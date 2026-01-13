@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QuickLoan | Apply for your Loan</title>
+    <link rel="stylesheet" href="/portal_styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+
+<body>
+    <div class="portal-container">
+        <header class="portal-header">
+            <div class="brand">
+                <span class="brand-logo">⚡</span>
+                <h1>QuickLoan</h1>
+            </div>
+            <p>Your financial partner for growth.</p>
+        </header>
+
+        <main class="portal-main">
+            <section id="application-view" class="portal-view">
+                <div class="headline">
+                    <h2>Loan Application</h2>
+                    <p>Tell us about yourself and your needs.</p>
+                </div>
+
+                <form id="borrowerForm" class="portal-form">
+                    <div class="form-section">
+                        <h3>Personal Details</h3>
+                        <div class="input-group">
+                            <label>Full Name</label>
+                            <input type="text" name="name" placeholder="Enter your full name" required>
+                        </div>
+                        <div class="input-group">
+                            <label>Phone Number</label>
+                            <input type="tel" name="phone" placeholder="+254 7..." required>
+                        </div>
+                        <div class="input-group">
+                            <label>Employment Status</label>
+                            <select name="employment_type">
+                                <option value="salaried">Salaried (Steady job)</option>
+                                <option value="trader">Business Person / Trader</option>
+                                <option value="farmer">Farmer</option>
+                                <option value="gig">Independent Worker / Gig</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>Financial Details</h3>
+                        <div class="input-group">
+                            <label>Monthly Income ($)</label>
+                            <input type="number" name="monthly_income" placeholder="How much do you earn?" required>
+                        </div>
+                        <div class="input-group">
+                            <label>Monthly Expenses ($)</label>
+                            <input type="number" name="monthly_expenses" placeholder="Total spending per month"
+                                required>
+                        </div>
+                        <div class="input-group">
+                            <label>Existing Loans Debt ($)</label>
+                            <input type="number" name="existing_debt" value="0">
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>Loan Request</h3>
+                        <div class="input-group">
+                            <label>What's the money for?</label>
+                            <input type="text" name="loan_purpose" placeholder="e.g. Stock for shop, School fees"
+                                required>
+                        </div>
+                        <div class="input-group">
+                            <label>Amount Needed ($)</label>
+                            <input type="number" name="loan_amount_requested" placeholder="0.00" required>
+                        </div>
+                    </div>
+
+                    <button type="submit" class="submit-btn" id="submitBtn">
+                        <span class="btn-text">Submit Application</span>
+                        <div class="loader hidden"></div>
+                    </button>
+                    <p class="form-note">By submitting, you agree to our terms of assessment.</p>
+                </form>
+            </section>
+
+            <section id="success-view" class="portal-view hidden">
+                <div class="success-card">
+                    <div class="success-icon">✅</div>
+                    <h2>Application Received!</h2>
+                    <p>Thank you. Your application has been sent to our credit team. We will review it shortly using our
+                        AI assessment tools.</p>
+                    <div class="ref-num">
+                        <span>Borrower ID:</span>
+                        <strong id="borrowerIdDisplay">--</strong>
+                    </div>
+                    <button class="ghost-btn" onclick="location.reload()">New Application</button>
+                </div>
+            </section>
+        </main>
+
+        <footer class="portal-footer">
+            <p>&copy; 2026 QuickLoan Microfinance. Modern Lending.</p>
+        </footer>
+    </div>
+    <script src="/portal_app.js"></script>
+</body>
+
+</html>

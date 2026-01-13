@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MFI Pro - Next-Gen AI Credit Engine (V2)</title>
+    <link rel="stylesheet" href="/mfi_styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet">
+</head>
+
+<body>
+    <div class="app-container">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="logo">
+                <div class="logo-icon">V2</div>
+                <h2>Next-Gen AI</h2>
+            </div>
+            <nav class="sidebar-nav">
+                <a href="#" class="nav-item active" data-view="overview">
+                    <span class="icon">🏠</span> Dashboard
+                </a>
+                <a href="#" class="nav-item" data-view="intake">
+                    <span class="icon">➕</span> New Intake
+                </a>
+                <a href="#" class="nav-item" data-view="history">
+                    <span class="icon">📜</span> History
+                </a>
+                <a href="#" class="nav-item" data-view="loans">
+                    <span class="icon">💰</span> Manage Loans
+                </a>
+            </nav>
+            <div class="sidebar-footer">
+                <div class="user-profile">
+                    <div class="avatar">JD</div>
+                    <div class="user-info">
+                        <strong>John Doe</strong>
+                        <span>Senior Officer</span>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <header class="top-bar">
+                <div class="search-bar">
+                    <input type="text" placeholder="Search assessments or borrowers...">
+                </div>
+                <div class="top-actions">
+                    <button class="btn-icon">🔔</button>
+                    <button class="btn-primary" id="quickIntakeBtn">+ New Assessment</button>
+                </div>
+            </header>
+
+            <div id="content-viewport">
+                <!-- Overview View (Default) -->
+                <section id="view-overview" class="view">
+                    <div class="view-header">
+                        <h2>System Overview</h2>
+                        <p>Next-Gen AI Engine (V2) - Unified Credit Analytics</p>
+                    </div>
+
+                    <div class="stats-grid">
+                        <div class="stat-card">
+                            <span class="stat-label">Total Applications</span>
+                            <h3 id="stat-total-count">0</h3>
+                        </div>
+                        <div class="stat-card">
+                            <span class="stat-label">Avg Risk Score</span>
+                            <h3 id="stat-avg-risk">0.00</h3>
+                        </div>
+                        <div class="stat-card highlighted">
+                            <span class="stat-label">AI Prob. Default (Avg)</span>
+                            <h3 id="stat-avg-pd">0.00</h3>
+                        </div>
+                        <div class="stat-card">
+                            <span class="stat-label">Approval Rate</span>
+                            <h3 id="stat-approval-rate">0%</h3>
+                        </div>
+                    </div>
+
+                    <!-- Early Warning Alerts (V2) -->
+                    <div id="v2-alerts-container" class="alerts-section hidden">
+                        <div class="section-header">
+                            <h3>⚠️ Early Warning Indicators</h3>
+                            <span class="badge red">Action Required</span>
+                        </div>
+                        <div id="alerts-list">
+                            <!-- Injected alerts -->
+                        </div>
+                    </div>
+
+                    <div class="dashboard-secondary-grid">
+                        <div class="card recent-activity">
+                            <div class="card-header">
+                                <h3>Recent Assessments</h3>
+                                <button class="btn-link" id="viewAllHistory">View All</button>
+                            </div>
+                            <div class="activity-list" id="recent-list">
+                                <p class="empty-msg">No recent activity found.</p>
+                            </div>
+                        </div>
+                        <div class="card distribution-card">
+                            <div class="card-header">
+                                <h3>Risk Distribution</h3>
+                            </div>
+                            <div class="chart-box">
+                                <div class="simple-bar-chart">
+                                    <div class="bar-group">
+                                        <div class="bar low" style="height: 0%" id="bar-low"></div>
+                                        <span>Low</span>
+                                    </div>
+                                    <div class="bar-group">
+                                        <div class="bar med" style="height: 0%" id="bar-med"></div>
+                                        <span>Med</span>
+                                    </div>
+                                    <div class="bar-group">
+                                        <div class="bar high" style="height: 0%" id="bar-high"></div>
+                                        <span>High</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Intake View -->
+                <section id="view-intake" class="view hidden">
+                    <div class="view-header">
+                        <h2>New Borrower Intake</h2>
+                        <p>Fill in the details to run the AI risk assessment engine.</p>
+                    </div>
+                    <div class="card form-container">
+                        <form id="proIntakeForm">
+                            <div class="form-section">
+                                <h4>Personal Information</h4>
+                                <div class="form-grid">
+                                    <div class="control">
+                                        <label>Full Name</label>
+                                        <input type="text" name="name" required>
+                                    </div>
+                                    <div class="control">
+                                        <label>Phone Number</label>
+                                        <input type="tel" name="phone" required>
+                                    </div>
+                                    <div class="control">
+                                        <label>Employment Type</label>
+                                        <select name="employment_type">
+                                            <option value="salaried">Salaried</option>
+                                            <option value="trader">Trader</option>
+                                            <option value="farmer">Farmer</option>
+                                            <option value="gig">Gig Worker</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="form-section">
+                                <h4>Financial Profile</h4>
+                                <div class="form-grid">
+                                    <div class="control">
+                                        <label>Monthly Income ($)</label>
+                                        <input type="number" name="monthly_income" required>
+                                    </div>
+                                    <div class="control">
+                                        <label>Monthly Expenses ($)</label>
+                                        <input type="number" name="monthly_expenses" required>
+                                    </div>
+                                    <div class="control">
+                                        <label>Existing Debt ($)</label>
+                                        <input type="number" name="existing_debt" value="0">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="form-section">
+                                <h4>Loan Request</h4>
+                                <div class="form-grid">
+                                    <div class="control full-width">
+                                        <label>Reason for Loan</label>
+                                        <textarea name="loan_purpose" rows="2" required></textarea>
+                                    </div>
+                                    <div class="control">
+                                        <label>Requested Amount ($)</label>
+                                        <input type="number" name="loan_amount_requested" required>
+                                    </div>
+                                </div>
+                            </div>
+                            <button type="submit" class="btn-primary large">Run AI Assessment</button>
+                        </form>
+                    </div>
+                </section>
+
+                <!-- History View -->
+                <section id="view-history" class="view hidden">
+                    <div class="view-header">
+                        <h2>Assessment History</h2>
+                        <p>Audit log of all AI-generated loan recommendations.</p>
+                    </div>
+                    <div class="card">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Assessment ID</th>
+                                    <th>Risk Score</th>
+                                    <th>Level</th>
+                                    <th>Decision</th>
+                                    <th>Rec. Amount</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="history-table-body">
+                                <!-- Data injected here -->
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <!-- Manage Loans View (Phase 6) -->
+                <section id="view-loans" class="view hidden">
+                    <div class="view-header">
+                        <h2>Active Loans & Portfolio</h2>
+                        <p>Track loan outcomes to drive Self-Healing AI retraining.</p>
+                    </div>
+                    <div class="card">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Loan ID</th>
+                                    <th>Amount</th>
+                                    <th>Status</th>
+                                    <th>Disbursed At</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="loans-table-body">
+                                <!-- Data injected here -->
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <!-- Assessment Result Modal (Simulated View) -->
+                <div id="result-modal" class="modal hidden">
+                    <div class="modal-content card">
+                        <div class="modal-header">
+                            <h3>Assessment Report</h3>
+                            <button class="close-modal">&times;</button>
+                        </div>
+                        <div id="modal-body-content">
+                            <!-- Detailed report here -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Mobile Nav (Visible on small screens) -->
+    <nav class="mobile-nav">
+        <a href="#" class="mob-item active" data-view="overview">📊</a>
+        <a href="#" class="mob-item" data-view="intake">➕</a>
+        <a href="#" class="mob-item" data-view="history">📜</a>
+        <a href="#" class="mob-item" data-view="loans">💰</a>
+    </nav>
+
+    <script src="/mfi_app.js"></script>
+</body>
+
+</html>

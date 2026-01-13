@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Platform Admin - MicroLend AI SaaS</title>
+    <link rel="stylesheet" href="/mfi_styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet">
+    <style>
+        :root {
+            --platform-primary: #0ea5e9;
+            --platform-bg: #020617;
+            --platform-card: #0f172a;
+        }
+
+        body {
+            background: var(--platform-bg);
+            color: #f8fafc;
+        }
+
+        .sidebar {
+            background: #020617;
+            border-right: 1px solid #1e293b;
+            color: #94a3b8;
+        }
+
+        .stat-card.platform {
+            background: var(--platform-card);
+            border: 1px solid #1e293b;
+            border-top: 3px solid var(--platform-primary);
+            color: white;
+        }
+
+        .stat-label {
+            color: #94a3b8;
+        }
+
+        .card {
+            background: var(--platform-card);
+            border: 1px solid #1e293b;
+            color: white;
+        }
+
+        .data-table th {
+            color: #94a3b8;
+            border-bottom: 1px solid #1e293b;
+        }
+
+        .data-table td {
+            border-bottom: 1px solid #1e293b;
+        }
+
+        .top-bar {
+            border-bottom: 1px solid #1e293b;
+            padding-bottom: 1rem;
+        }
+
+        .search-bar input {
+            background: #0f172a;
+            border: 1px solid #1e293b;
+            color: white;
+        }
+
+        .badge.blue {
+            background: rgba(14, 165, 233, 0.1);
+            color: var(--platform-primary);
+        }
+
+        .nav-item {
+            cursor: pointer;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="app-layout">
+        <aside class="sidebar">
+            <div class="sidebar-brand">
+                <div class="logo-box" style="background: var(--platform-primary)">SAAS</div>
+                <h2>MicroLend AI</h2>
+            </div>
+            <nav class="sidebar-nav">
+                <div class="nav-item active" data-view="overview">🏠 Global Overview</div>
+                <div class="nav-item" data-view="tenants">🏢 MFI Tenants</div>
+                <div class="nav-item" data-view="governance">🛡️ Cloud Governance</div>
+            </nav>
+        </aside>
+
+        <main class="main-content">
+            <header class="top-bar">
+                <div class="search-bar">
+                    <input type="text" placeholder="Search tenants or global data...">
+                </div>
+                <div class="top-actions">
+                    <span class="badge blue">SUPER ADMIN</span>
+                </div>
+            </header>
+
+            <div id="content-viewport">
+                <!-- Overview View -->
+                <section id="view-overview" class="view">
+                    <div class="view-header">
+                        <h2>Platform Intelligence</h2>
+                        <p>Aggregated performance across all MFI instances.</p>
+                    </div>
+
+                    <div class="stats-row">
+                        <div class="stat-card platform">
+                            <span class="stat-label">Active MFIs</span>
+                            <h3 id="stat-total-mfis">0</h3>
+                        </div>
+                        <div class="stat-card platform">
+                            <span class="stat-label">Global Disbursed Vol.</span>
+                            <h3 id="stat-global-volume">$0</h3>
+                        </div>
+                        <div class="stat-card platform">
+                            <span class="stat-label">Total AI Assessments</span>
+                            <h3 id="stat-total-asmt">0</h3>
+                        </div>
+                        <div class="stat-card platform">
+                            <span class="stat-label">Avg Default Rate</span>
+                            <h3 id="stat-global-default">0%</h3>
+                        </div>
+                    </div>
+
+                    <div class="card" style="margin-top: 2rem;">
+                        <div class="card-header"
+                            style="display: flex; justify-content: space-between; align-items: center;">
+                            <h3>Platform Governance & AI Settings</h3>
+                            <div id="ai-toggle-container" style="display: flex; align-items: center; gap: 0.8rem;">
+                                <span style="font-size: 0.9rem; color: #94a3b8;">AI Enhanced Explanations:</span>
+                                <label class="switch"
+                                    style="position: relative; display: inline-block; width: 50px; height: 24px;">
+                                    <input type="checkbox" id="ai-explanation-toggle"
+                                        style="opacity: 0; width: 0; height: 0; margin: 0;">
+                                    <span class="slider round"
+                                        style="position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #1e293b; transition: .4s; border-radius: 24px;"></span>
+                                </label>
+                                <span id="ai-status-label" class="badge gray">DISABLED</span>
+                            </div>
+                        </div>
+                        <p style="color: #94a3b8; font-size: 0.9rem; margin-top: 0.5rem; margin-bottom: 1rem;">
+                            Vertex AI rephrases engine facts for clarity. <b>Decision logic is always rule-based.</b>
+                        </p>
+                        <div id="ai-config-info"
+                            style="font-size: 0.8rem; color: #64748b; background: rgba(15, 23, 42, 0.5); padding: 1rem; border-radius: 8px;">
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+                                <div>Model: <span id="ai-model-name">gemini-1.5-flash</span></div>
+                                <div>Temperature: 0.1 (Fixed)</div>
+                                <div>Privacy: PII Masking Active</div>
+                                <div>Audit: Enabled</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <style>
+                        .switch input:checked+.slider {
+                            background-color: var(--platform-primary);
+                        }
+
+                        .slider:before {
+                            position: absolute;
+                            content: "";
+                            height: 18px;
+                            width: 18px;
+                            left: 3px;
+                            bottom: 3px;
+                            background-color: white;
+                            transition: .4s;
+                            border-radius: 50%;
+                        }
+
+                        .switch input:checked+.slider:before {
+                            transform: translateX(26px);
+                        }
+
+                        .badge.gray {
+                            background: #1e293b;
+                            color: #94a3b8;
+                        }
+
+                        .badge.green {
+                            background: rgba(34, 197, 94, 0.1);
+                            color: #22c55e;
+                        }
+                    </style>
+
+                    <div class="card" style="margin-top: 2rem;">
+                        <div class="card-header">
+                            <h3>Global Network Portfolio</h3>
+                        </div>
+                        <p style="color: #94a3b8; font-size: 0.9rem; margin-bottom: 1rem;">Real-time health of all
+                            microfinance operations.</p>
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Metric</th>
+                                    <th>Global Value</th>
+                                    <th>Target Threshold</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td>Global Performance Index</td>
+                                    <td>94.2%</td>
+                                    <td>> 90.0%</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <!-- Tenants View -->
+                <section id="view-tenants" class="view hidden">
+                    <div class="view-header">
+                        <h2>MFI Tenant Ecosystem</h2>
+                        <p>Managing the specialized microfinance organizations.</p>
+                    </div>
+                    <div class="card">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Organization Name (ID)</th>
+                                    <th>Status</th>
+                                    <th>Plan / Tier</th>
+                                    <th>Monthly Usage</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tenants-list">
+                                <!-- Dynamic content -->
+                                <tr>
+                                    <td colspan="5" style="text-align: center; padding: 2rem;">Loading tenants...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <!-- Upgrade Modal -->
+                <div id="upgrade-modal" class="modal hidden"
+                    style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; display: flex; align-items: center; justify-content: center;">
+                    <div class="card" style="width: 400px; padding: 2rem;">
+                        <h3 id="upgrade-org-name">Upgrade Organization</h3>
+                        <p style="margin: 1rem 0; color: #94a3b8;">Select a new plan for this organization.</p>
+                        <select id="upgrade-plan-select"
+                            style="width: 100%; padding: 0.8rem; background: #0f172a; color: white; border: 1px solid #1e293b; border-radius: 8px; margin-bottom: 1.5rem;">
+                            <option value="sandbox">Sandbox (10/mo)</option>
+                            <option value="starter">Starter (1000/mo)</option>
+                            <option value="professional">Professional (5000/mo)</option>
+                            <option value="enterprise">Enterprise (Unlimited)</option>
+                        </select>
+                        <div style="display: flex; gap: 1rem;">
+                            <button onclick="closeUpgradeModal()" class="btn btn-secondary"
+                                style="flex: 1; padding: 0.8rem; background: #1e293b; color: white; border: none; border-radius: 8px; cursor: pointer;">Cancel</button>
+                            <button id="confirm-upgrade-btn" class="btn btn-primary"
+                                style="flex: 1; padding: 0.8rem; background: var(--platform-primary); color: white; border: none; border-radius: 8px; cursor: pointer;">Confirm</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        const API_KEY = 'super-admin-key';
+        let currentUpgradeOrgId = null;
+
+        // Navigation Logic
+        const navItems = document.querySelectorAll('.nav-item');
+        const views = document.querySelectorAll('.view');
+
+        navItems.forEach(item => {
+            item.addEventListener('click', () => {
+                const target = item.getAttribute('data-view');
+
+                // Toggle active class
+                navItems.forEach(n => n.classList.remove('active'));
+                item.classList.add('active');
+
+                // Toggle views
+                views.forEach(v => v.classList.add('hidden'));
+                document.getElementById(`view-${target}`).classList.remove('hidden');
+
+                if (target === 'tenants') {
+                    fetchTenants();
+                }
+            });
+        });
+
+        async function fetchPlatformStats() {
+            try {
+                const res = await fetch('/admin/platform/stats', {
+                    headers: { 'X-API-KEY': API_KEY }
+                });
+                if (!res.ok) throw new Error('API Error');
+                const stats = await res.json();
+
+                document.getElementById('stat-total-mfis').textContent = stats.total_mfis;
+                document.getElementById('stat-global-volume').textContent = '$' + stats.total_disbursed_volume.toLocaleString();
+                document.getElementById('stat-total-asmt').textContent = stats.total_assessments;
+                document.getElementById('stat-global-default').textContent = stats.global_default_rate.toFixed(1) + '%';
+
+                // Update AI Toggle state
+                const aiToggle = document.getElementById('ai-explanation-toggle');
+                const aiLabel = document.getElementById('ai-status-label');
+                if (aiToggle && aiLabel) {
+                    aiToggle.checked = stats.llm_enabled;
+                    aiLabel.textContent = stats.llm_enabled ? 'ENABLED' : 'DISABLED';
+                    aiLabel.className = `badge ${stats.llm_enabled ? 'green' : 'gray'}`;
+                }
+            } catch (err) {
+                console.error('Failed to fetch platform stats', err);
+            }
+        }
+
+        async function fetchTenants() {
+            try {
+                const res = await fetch('/admin/organizations', {
+                    headers: { 'X-API-KEY': API_KEY }
+                });
+                if (!res.ok) throw new Error('API Error');
+                const tenants = await res.json();
+                renderTenants(tenants);
+            } catch (err) {
+                console.error('Failed to fetch tenants', err);
+            }
+        }
+
+        function renderTenants(tenants) {
+            const list = document.getElementById('tenants-list');
+            list.innerHTML = '';
+
+            tenants.forEach(org => {
+                const usagePercent = (org.usage_count / org.monthly_limit) * 100;
+                const statusBadge = org.status === 'ACTIVE' ? 'blue' : 'gray';
+
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>
+                        <div style="font-weight: 600;">${org.name}</div>
+                        <div style="font-size: 0.8rem; color: #94a3b8;">${org.id}</div>
+                    </td>
+                    <td><span class="badge ${statusBadge}">${org.status}</span></td>
+                    <td><span style="text-transform: capitalize;">${org.plan_name}</span></td>
+                    <td>
+                        <div style="display: flex; justify-content: space-between; font-size: 0.8rem; margin-bottom: 4px;">
+                            <span>${org.usage_count} / ${org.monthly_limit}</span>
+                            <span>${Math.round(usagePercent)}%</span>
+                        </div>
+                        <div style="width: 100%; height: 4px; background: #1e293b; border-radius: 2px;">
+                            <div style="width: ${Math.min(usagePercent, 100)}%; height: 100%; background: ${usagePercent > 90 ? '#ef4444' : 'var(--platform-primary)'}; border-radius: 2px;"></div>
+                        </div>
+                    </td>
+                    <td>
+                        <button onclick="openUpgradeModal('${org.id}', '${org.name}', '${org.plan_name}')" class="badge blue" style="border: none; cursor: pointer; padding: 4px 8px;">Upgrade</button>
+                    </td>
+                `;
+                list.appendChild(tr);
+            });
+        }
+
+        function openUpgradeModal(id, name, currentPlan) {
+            currentUpgradeOrgId = id;
+            document.getElementById('upgrade-org-name').textContent = `Upgrade ${name}`;
+            document.getElementById('upgrade-plan-select').value = currentPlan;
+            document.getElementById('upgrade-modal').classList.remove('hidden');
+        }
+
+        function closeUpgradeModal() {
+            document.getElementById('upgrade-modal').classList.add('hidden');
+        }
+
+        document.getElementById('confirm-upgrade-btn').addEventListener('click', async () => {
+            const newPlan = document.getElementById('upgrade-plan-select').value;
+            let newLimit = 1000;
+            if (newPlan === 'sandbox') newLimit = 10;
+            if (newPlan === 'professional') newLimit = 5000;
+            if (newPlan === 'enterprise') newLimit = 1000000;
+
+            try {
+                const res = await fetch(`/admin/organizations/${currentUpgradeOrgId}`, {
+                    method: 'PATCH',
+                    headers: {
+                        'X-API-KEY': API_KEY,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        plan_name: newPlan,
+                        monthly_limit: newLimit
+                    })
+                });
+
+                if (res.ok) {
+                    closeUpgradeModal();
+                    fetchTenants();
+                } else {
+                    alert('Failed to upgrade organization');
+                }
+            } catch (err) {
+                console.error('Upgrade error', err);
+            }
+        });
+
+        document.getElementById('ai-explanation-toggle').addEventListener('change', async (e) => {
+            const enabled = e.target.checked;
+            try {
+                const res = await fetch('/admin/platform/settings', {
+                    method: 'PATCH',
+                    headers: {
+                        'X-API-KEY': API_KEY,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ llm_enabled: enabled })
+                });
+                if (res.ok) {
+                    fetchPlatformStats();
+                } else {
+                    alert('Failed to update AI settings');
+                    e.target.checked = !enabled;
+                }
+            } catch (err) {
+                console.error('Failed to update AI settings', err);
+                e.target.checked = !enabled;
+            }
+        });
+
+        fetchPlatformStats();
+        // Auto-refresh stats
+        setInterval(fetchPlatformStats, 10000);
+    </script>
+</body>
+
+</html>

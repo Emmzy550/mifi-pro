@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Loan Decision Engine - V4</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Ionicons for icons matching the vibe -->
+    <script type="module" src="https://unpkg.com/ionicons@7.1.0/dist/ionicons/ionicons.esm.js"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #F1F5F9;
+        }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #f1f1f1;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 4px;
+        }
+
+        /* Premium Shadow */
+        .card-shadow {
+            box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.05);
+        }
+
+        /* Gauge CSS */
+        .gauge-bg {
+            width: 150px;
+            height: 75px;
+            background: #e2e8f0;
+            border-top-left-radius: 100px;
+            border-top-right-radius: 100px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .gauge-fill {
+            width: 100%;
+            height: 100%;
+            background: #10b981;
+            /* Dynamic color */
+            transform-origin: bottom center;
+            transform: rotate(0deg);
+            /* Dynamic */
+            transition: transform 1s ease-out;
+        }
+
+        .gauge-mask {
+            position: absolute;
+            bottom: 0;
+            left: 25px;
+            width: 100px;
+            height: 50px;
+            background: white;
+            border-top-left-radius: 100px;
+            border-top-right-radius: 100px;
+        }
+
+        /* Animations */
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .fade-in {
+            animation: fadeIn 0.5s ease-out forwards;
+        }
+    </style>
+</head>
+
+<body class="flex h-screen overflow-hidden text-slate-800">
+
+    <!-- SIDEBAR -->
+    <div
+        class="w-20 lg:w-64 bg-slate-900 text-white flex flex-col justify-between py-6 px-4 shrink-0 transition-all duration-300">
+        <div>
+            <!-- Logo -->
+            <div class="flex items-center gap-3 mb-10 px-2 cursor-pointer">
+                <div class="w-8 h-8 rounded-lg bg-indigo-500 flex items-center justify-center font-bold text-xl">L</div>
+                <span class="font-bold text-lg hidden lg:block tracking-wide">LoanAI<span
+                        class="text-indigo-400">.</span></span>
+            </div>
+
+            <!-- Nav -->
+            <nav class="space-y-2">
+                <a href="#"
+                    class="flex items-center gap-3 px-3 py-3 bg-indigo-600 rounded-xl text-white shadow-lg shadow-indigo-900/50">
+                    <ion-icon name="grid-outline" class="text-xl"></ion-icon>
+                    <span class="font-medium hidden lg:block">Dashboard</span>
+                </a>
+                <a href="#"
+                    class="flex items-center gap-3 px-3 py-3 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition">
+                    <ion-icon name="folder-open-outline" class="text-xl"></ion-icon>
+                    <span class="font-medium hidden lg:block">Asessments</span>
+                </a>
+                <a href="#"
+                    class="flex items-center gap-3 px-3 py-3 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition">
+                    <ion-icon name="people-outline" class="text-xl"></ion-icon>
+                    <span class="font-medium hidden lg:block">Borrowers</span>
+                </a>
+                <a href="#"
+                    class="flex items-center gap-3 px-3 py-3 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition">
+                    <ion-icon name="pie-chart-outline" class="text-xl"></ion-icon>
+                    <span class="font-medium hidden lg:block">Reports</span>
+                </a>
+            </nav>
+        </div>
+
+        <!-- Available Capital Widget -->
+        <div class="bg-gradient-to-br from-emerald-500 to-teal-600 rounded-2xl p-4 hidden lg:block shadow-lg">
+            <div class="flex items-center justify-between text-emerald-100 text-xs font-medium mb-1">
+                <span>Available Capital</span>
+                <ion-icon name="wifi-outline"></ion-icon>
+            </div>
+            <div class="text-white font-bold text-xl">K 1,250,000</div>
+            <div class="mt-2 w-full bg-emerald-800/30 rounded-full h-1.5">
+                <div class="bg-white/80 h-1.5 rounded-full" style="width: 75%"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- MAIN CONTENT -->
+    <main class="flex-1 flex flex-col min-w-0 bg-slate-50 relative">
+
+        <!-- Top Bar -->
+        <header class="bg-white h-16 border-b border-slate-200 flex items-center justify-between px-8 z-10">
+            <h1 class="font-bold text-slate-700 flex items-center gap-2">
+                <ion-icon name="shield-checkmark-outline" class="text-indigo-600 text-xl"></ion-icon>
+                LOAN DECISION ENGINE
+            </h1>
+            <div class="flex items-center gap-4">
+                <button onclick="toggleIntakeModal()"
+                    class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition shadow-md shadow-indigo-200 flex items-center gap-2">
+                    <ion-icon name="add-circle-outline" class="text-lg"></ion-icon>
+                    New Assessment
+                </button>
+            </div>
+        </header>
+
+        <!-- DASHBOARD CONTENT (Two Columns) -->
+        <div id="dashboardView"
+            class="flex-1 overflow-y-auto p-8 grid grid-cols-12 gap-8 hidden opacity-0 transition-opacity duration-700">
+
+            <!-- LEFT COLUMN: APPLICATION ASSESSMENT (Cols 8) -->
+            <div class="col-span-12 xl:col-span-8 space-y-6">
+
+                <!-- 1. Applicant Header -->
+                <div class="bg-white rounded-2xl p-6 card-shadow flex items-center gap-6 relative overflow-hidden">
+                    <div class="w-1 bg-indigo-500 absolute left-0 top-0 bottom-0"></div>
+                    <!-- Avatar -->
+                    <div
+                        class="w-20 h-20 rounded-full bg-gradient-to-tr from-indigo-100 to-purple-100 flex-shrink-0 flex items-center justify-center text-3xl shadow-inner border border-white">
+                        👩🏾
+                    </div>
+                    <div class="flex-1">
+                        <div class="flex items-center gap-2">
+                            <h2 id="dispName" class="text-2xl font-bold text-slate-800">Mary Phiri</h2>
+                            <ion-icon name="checkmark-circle" class="text-emerald-500 text-xl"></ion-icon>
+                        </div>
+                        <p class="text-slate-500 text-sm mt-1 flex items-center gap-4">
+                            <span><ion-icon name="location-outline" class="align-middle"></ion-icon> Lusaka, Zambia,
+                                35</span>
+                            <span><ion-icon name="call-outline" class="align-middle"></ion-icon> +260 976 22123</span>
+                        </p>
+                        <div class="flex gap-2 mt-3">
+                            <span
+                                class="px-2 py-1 bg-slate-100 text-slate-600 text-xs font-bold rounded-md uppercase tracking-wide">Previous
+                                Notes: Good</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 2. Loan Request Card -->
+                <div id="decisionBanner"
+                    class="bg-white rounded-2xl p-8 card-shadow border border-slate-100 relative overflow-hidden">
+                    <!-- Background Illustration placeholder -->
+                    <div class="absolute right-0 top-0 opacity-10">
+                        <ion-icon name="wallet"
+                            style="font-size: 200px; transform: rotate(-10deg) translate(50px, -50px);"></ion-icon>
+                    </div>
+
+                    <div class="flex items-end gap-12 relative z-10">
+                        <!-- Requested -->
+                        <div>
+                            <div class="text-slate-400 text-sm font-semibold uppercase tracking-wider mb-1">Requested
+                            </div>
+                            <div class="text-4xl font-black text-slate-800" id="dispReqAmount">K 15,000</div>
+                            <div class="text-xs text-slate-400 mt-1">Pay terms: 12 months</div>
+                        </div>
+
+                        <!-- Divider Arrow -->
+                        <div class="text-slate-300 pb-4">
+                            <ion-icon name="arrow-forward-outline" class="text-3xl"></ion-icon>
+                        </div>
+
+                        <!-- Recommended -->
+                        <div>
+                            <div
+                                class="px-3 py-1 bg-amber-100 text-amber-700 rounded-full text-xs font-bold inline-block mb-2">
+                                Recommended</div>
+                            <div class="text-4xl font-black text-indigo-600" id="dispRecAmount">K 11,500</div>
+                            <div class="text-xs text-indigo-400 mt-1 flex gap-2 font-medium">
+                                <span id="dispRecInterest">20.0% Interest</span>
+                                <span>•</span>
+                                <span>12 Month Term</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mt-8 pt-6 border-t border-slate-100">
+                        <h3 class="text-lg font-bold text-slate-700 flex items-center gap-2">
+                            <span id="txtDecisionIcon">⚠️</span>
+                            <span id="txtDecisionTitle">Conditional Approval Recommended</span>
+                        </h3>
+                        <p id="txtDecisionReason" class="text-slate-500 text-sm mt-1 max-w-2xl leading-relaxed">
+                            Based on alternative data analysis, the applicant demonstrates strong savings but slightly
+                            high airtime usage.
+                        </p>
+                    </div>
+                </div>
+
+                <!-- 3. Behavioral Analysis Grid -->
+                <div>
+                    <h3 class="text-slate-400 font-bold text-xs uppercase tracking-widest mb-4 ml-1">Behavioral
+                        Intelligence</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <!-- Card 1: Income Analysis -->
+                        <div
+                            class="bg-white p-5 rounded-xl card-shadow border border-slate-100 relative hover:-translate-y-1 transition duration-300">
+                            <div class="absolute top-4 right-4 text-emerald-500 text-xl"><ion-icon
+                                    name="trending-up-outline"></ion-icon></div>
+                            <div class="text-3xl font-bold text-slate-800 mt-2" id="valIncomeScore">85%</div>
+                            <div class="text-sm font-semibold text-slate-500 mt-1">Income Consistency</div>
+                            <div class="mt-4 h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
+                                <div id="barIncome" class="h-full bg-indigo-500 rounded-full" style="width: 85%"></div>
+                            </div>
+                            <div class="text-right text-xs font-bold text-indigo-500 mt-1" id="lblIncome">High</div>
+                        </div>
+
+                        <!-- Card 2: Transaction Stability -->
+                        <div
+                            class="bg-white p-5 rounded-xl card-shadow border border-slate-100 relative hover:-translate-y-1 transition duration-300">
+                            <div class="absolute top-4 right-4 text-blue-500 text-xl"><ion-icon
+                                    name="pulse-outline"></ion-icon></div>
+                            <div class="text-3xl font-bold text-slate-800 mt-2" id="valTxStability">High</div>
+                            <div class="text-sm font-semibold text-slate-500 mt-1">Transaction Stability</div>
+                            <div class="flex gap-1 mt-4">
+                                <span class="h-1.5 w-full bg-blue-500 rounded-full"></span>
+                                <span class="h-1.5 w-full bg-blue-500 rounded-full"></span>
+                                <span class="h-1.5 w-full bg-blue-200 rounded-full"></span>
+                            </div>
+                            <div class="text-right text-xs font-bold text-blue-500 mt-1">Steady</div>
+                        </div>
+
+                        <!-- Card 3: Savings Rate -->
+                        <div
+                            class="bg-white p-5 rounded-xl card-shadow border border-slate-100 relative hover:-translate-y-1 transition duration-300">
+                            <div class="absolute top-4 right-4 text-amber-500 text-xl"><ion-icon
+                                    name="wallet-outline"></ion-icon></div>
+                            <div class="text-3xl font-bold text-slate-800 mt-2" id="valSavings">9%</div>
+                            <div class="text-sm font-semibold text-slate-500 mt-1">Net Savings Rate</div>
+                            <div
+                                class="mt-4 flex items-center gap-2 text-xs font-medium text-emerald-600 bg-emerald-50 px-2 py-1 rounded inline-block">
+                                <ion-icon name="caret-up-outline"></ion-icon> Positive Trend
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 4. Action Bar -->
+                <div class="flex gap-4 pt-4">
+                    <button
+                        class="flex-1 bg-emerald-500 hover:bg-emerald-600 text-white py-4 rounded-xl font-bold shadow-lg shadow-emerald-200 transition flex items-center justify-center gap-2">
+                        <ion-icon name="checkmark-circle"></ion-icon> APPROVE
+                    </button>
+                    <button
+                        class="flex-1 bg-amber-500 hover:bg-amber-600 text-white py-4 rounded-xl font-bold shadow-lg shadow-amber-200 transition flex items-center justify-center gap-2">
+                        <ion-icon name="alert-circle"></ion-icon> CONDITIONAL
+                    </button>
+                    <button
+                        class="flex-1 bg-rose-500 hover:bg-rose-600 text-white py-4 rounded-xl font-bold shadow-lg shadow-rose-200 transition flex items-center justify-center gap-2">
+                        <ion-icon name="close-circle"></ion-icon> REJECT
+                    </button>
+                </div>
+
+            </div>
+
+            <!-- RIGHT COLUMN: RISK & POLICIES (Cols 4) -->
+            <div class="col-span-12 xl:col-span-4 space-y-6">
+
+                <!-- Risk Gauge Card -->
+                <div class="bg-white rounded-2xl p-6 card-shadow text-center">
+                    <h3 class="text-slate-400 font-bold text-xs uppercase tracking-widest mb-6">Risk Assessment</h3>
+
+                    <div class="flex justify-center mb-4 relative">
+                        <div class="gauge-bg">
+                            <div id="gaugeFill" class="gauge-fill"
+                                style="transform: rotate(0deg); background: #f59e0b;"></div>
+                            <div class="gauge-mask"></div>
+                        </div>
+                        <div class="absolute bottom-0 text-center">
+                            <div id="riskLabel"
+                                class="text-xs font-bold text-amber-500 bg-amber-50 px-2 py-0.5 rounded uppercase">
+                                Medium Risk</div>
+                        </div>
+                    </div>
+
+                    <div class="text-4xl font-black text-slate-800 mb-1" id="riskScoreDisp">0.45</div>
+                    <div class="text-slate-400 text-xs font-medium uppercase">Predicted Default Prob</div>
+
+                    <!-- Factors -->
+                    <div class="mt-8 text-left space-y-3">
+                        <div class="flex items-center gap-2 text-sm text-slate-600">
+                            <ion-icon name="search-outline" class="text-indigo-500"></ion-icon>
+                            <span class="flex-1">Evidence Verified</span>
+                            <span class="text-emerald-500 font-bold">100%</span>
+                        </div>
+                        <div class="flex items-center gap-2 text-sm text-slate-600">
+                            <ion-icon name="phone-portrait-outline" class="text-rose-500"></ion-icon>
+                            <span class="flex-1">Airtime Usage</span>
+                            <span class="text-rose-500 font-bold">High</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Policy Checklist -->
+                <div class="bg-white rounded-2xl p-6 card-shadow">
+                    <h3 class="text-slate-400 font-bold text-xs uppercase tracking-widest mb-4">Policy & Rules</h3>
+                    <ul class="space-y-3">
+                        <li class="flex items-center gap-3 text-sm text-slate-600">
+                            <div
+                                class="w-5 h-5 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center text-xs">
+                                <ion-icon name="checkmark"></ion-icon></div>
+                            <span class="flex-1">Income verification check</span>
+                            <ion-icon name="document-text-outline" class="text-slate-300"></ion-icon>
+                        </li>
+                        <li class="flex items-center gap-3 text-sm text-slate-600">
+                            <div
+                                class="w-5 h-5 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center text-xs">
+                                <ion-icon name="checkmark"></ion-icon></div>
+                            <span class="flex-1">DTI: 45% (Moderate)</span>
+                        </li>
+                        <li class="flex items-center gap-3 text-sm text-slate-600">
+                            <div
+                                class="w-5 h-5 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center text-xs">
+                                <ion-icon name="checkmark"></ion-icon></div>
+                            <span class="flex-1">Expense to Income Ratio: 55%</span>
+                        </li>
+                        <li class="flex items-center gap-3 text-sm text-slate-400">
+                            <div
+                                class="w-5 h-5 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center text-xs">
+                                <ion-icon name="square-outline"></ion-icon></div>
+                            <span class="flex-1">Critical Flags: None</span>
+                        </li>
+                    </ul>
+                </div>
+
+                <!-- Recommendations -->
+                <div class="bg-indigo-50 border border-indigo-100 rounded-2xl p-6">
+                    <h3 class="text-indigo-800 font-bold text-xs uppercase tracking-widest mb-3">AI Recommendations</h3>
+                    <ul class="space-y-2 text-sm text-indigo-900 list-disc pl-4" id="aiRecList">
+                        <li>Lower loan amount to displayed sum.</li>
+                        <li>Require proof of stable income (Verified).</li>
+                        <li>Review terms in 6 months.</li>
+                    </ul>
+                </div>
+
+            </div>
+
+        </div>
+
+        <!-- EMPTY STATE (Initial View) -->
+        <div id="emptyState" class="flex-1 flex flex-col items-center justify-center text-center p-8">
+            <div class="bg-white p-6 rounded-full shadow-lg mb-6 animate-bounce">
+                <ion-icon name="cloud-upload-outline" class="text-4xl text-indigo-600"></ion-icon>
+            </div>
+            <h2 class="text-2xl font-bold text-slate-800">Ready for Assessment</h2>
+            <p class="text-slate-500 mt-2 max-w-md">Click "New Assessment" to start the loan intake process or select a
+                borrower from the sidebar.</p>
+            <button onclick="toggleIntakeModal()"
+                class="mt-8 bg-indigo-600 hover:bg-indigo-700 text-white px-8 py-3 rounded-xl font-bold shadow-xl shadow-indigo-200 transition">
+                Start New Application
+            </button>
+        </div>
+
+    </main>
+
+    <!-- INTAKE MODAL (Hidden Overlay) -->
+    <div id="intakeModal"
+        class="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 hidden flex items-center justify-center transition-opacity opacity-0">
+        <div class="bg-white w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden scale-95 transition-transform duration-300 transform"
+            id="modalContent">
+
+            <!-- Modal Header -->
+            <div class="bg-indigo-600 p-6 text-white flex justify-between items-center">
+                <h3 class="font-bold text-lg">New Borrower Application</h3>
+                <button onclick="toggleIntakeModal()" class="hover:bg-indigo-500 rounded-full p-1"><ion-icon
+                        name="close-outline" class="text-2xl"></ion-icon></button>
+            </div>
+
+            <!-- Step 1: Details -->
+            <div id="step1Form" class="p-8 space-y-4">
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="text-xs font-bold text-slate-500 uppercase">First Name</label>
+                        <input id="inpName" type="text" value="Mary Phiri"
+                            class="w-full mt-1 p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none font-medium text-slate-700">
+                    </div>
+                    <div>
+                        <label class="text-xs font-bold text-slate-500 uppercase">Phone</label>
+                        <input type="text" value="+260 976..."
+                            class="w-full mt-1 p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none font-medium text-slate-700">
+                    </div>
+                </div>
+                <div>
+                    <label class="text-xs font-bold text-slate-500 uppercase">Monthly Income</label>
+                    <input id="inpIncome" type="number" value="15000"
+                        class="w-full mt-1 p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none font-medium text-slate-700">
+                </div>
+                <div>
+                    <label class="text-xs font-bold text-slate-500 uppercase">Requested Amount</label>
+                    <input id="inpLoanAmt" type="number" value="15000"
+                        class="w-full mt-1 p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none font-medium text-slate-700">
+                </div>
+                <button onclick="submitIntake()"
+                    class="w-full bg-indigo-600 text-white font-bold py-3 rounded-xl mt-4 shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition">
+                    Next: Upload Documents
+                </button>
+            </div>
+
+            <!-- Step 2: Upload -->
+            <div id="step2Upload" class="p-8 hidden text-center">
+                <div id="dropZone"
+                    class="border-2 border-dashed border-indigo-200 bg-indigo-50 rounded-xl p-8 cursor-pointer hover:bg-indigo-100 transition">
+                    <ion-icon name="document-text-outline" class="text-4xl text-indigo-400 mb-2"></ion-icon>
+                    <p class="font-medium text-indigo-900">Upload Bank Statement (PDF)</p>
+                    <p class="text-xs text-indigo-500 mt-1">Drag and drop or click to browse</p>
+                    <p id="fileName" class="mt-4 text-sm font-bold text-slate-700 hidden"></p>
+                </div>
+                <input type="file" id="fileInput" class="hidden" accept=".pdf">
+
+                <button id="btnAnalyze" onclick="uploadDocument()"
+                    class="w-full bg-emerald-500 text-white font-bold py-3 rounded-xl mt-6 shadow-lg shadow-emerald-200 hover:bg-emerald-600 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                    disabled>
+                    Run AI Analysis
+                </button>
+                <div id="spinner" class="hidden mt-4 text-indigo-600 flex justify-center gap-2">
+                    <ion-icon name="sync-outline" class="animate-spin text-xl"></ion-icon> Processing...
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = `http://localhost:${window.location.port || '8004'}`; // Dynamic port
+        let currentBorrowerId = null;
+
+        // Modal Logic
+        function toggleIntakeModal() {
+            const modal = document.getElementById('intakeModal');
+            if (modal.classList.contains('hidden')) {
+                modal.classList.remove('hidden');
+                setTimeout(() => {
+                    modal.classList.remove('opacity-0');
+                    document.getElementById('modalContent').classList.remove('scale-95');
+                    document.getElementById('modalContent').classList.add('scale-100');
+                }, 10);
+            } else {
+                modal.classList.add('opacity-0');
+                document.getElementById('modalContent').classList.remove('scale-100');
+                document.getElementById('modalContent').classList.add('scale-95');
+                setTimeout(() => modal.classList.add('hidden'), 300);
+            }
+        }
+
+        // --- STEP 1: CREATE BORROWER ---
+        async function submitIntake() {
+            // Mocking the creation to speed up UI demo if needed, but will try real API
+            const payload = {
+                name: document.getElementById('inpName').value,
+                monthly_income: parseFloat(document.getElementById('inpIncome').value),
+                monthly_expenses: 5000,
+                loan_amount_requested: parseFloat(document.getElementById('inpLoanAmt').value),
+                phone: "+26097622123",
+                loan_purpose: "Business",
+                employment_type: "salaried",
+                existing_debt: 0
+            };
+
+            try {
+                const res = await fetch(`${API_BASE}/intake/start`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                currentBorrowerId = data.borrower_id;
+
+                // Switch to Upload Step
+                document.getElementById('step1Form').classList.add('hidden');
+                document.getElementById('step2Upload').classList.remove('hidden');
+            } catch (e) {
+                alert("API Error: Ensure backend is running");
+            }
+        }
+
+        // --- STEP 2: UPLOAD & ANALYZE ---
+        // Drag Drop
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+
+        dropZone.addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length > 0) {
+                document.getElementById('fileName').textContent = fileInput.files[0].name;
+                document.getElementById('fileName').classList.remove('hidden');
+                document.getElementById('btnAnalyze').disabled = false;
+            }
+        });
+
+        async function uploadDocument() {
+            const file = fileInput.files[0];
+            document.getElementById('btnAnalyze').classList.add('hidden');
+            document.getElementById('spinner').classList.remove('hidden');
+
+            const formData = new FormData();
+            formData.append('borrower_id', currentBorrowerId);
+            formData.append('file', file);
+
+            try {
+                const res = await fetch(`${API_BASE}/borrower/data/upload-document`, { method: 'POST', body: formData });
+                const data = await res.json();
+
+                // Close Modal & Show Dashboard
+                toggleIntakeModal();
+                populateDashboard(data, document.getElementById('inpName').value);
+
+                document.getElementById('emptyState').classList.add('hidden');
+                const dash = document.getElementById('dashboardView');
+                dash.classList.remove('hidden');
+                setTimeout(() => dash.classList.remove('opacity-0'), 100);
+
+            } catch (e) {
+                alert("Analysis Error");
+                document.getElementById('spinner').classList.add('hidden');
+                document.getElementById('btnAnalyze').classList.remove('hidden');
+            }
+        }
+
+        // --- RENDER FUNCTION ---
+        function populateDashboard(data, name) {
+            // Header
+            document.getElementById('dispName').textContent = name;
+
+            // Amounts
+            document.getElementById('dispReqAmount').textContent = "K " + data.risk_assessment.recommended_amount.toLocaleString(); // Mocking req logic
+            // Note: API returns 'recommended', typically request is in input. 
+            // Setting verified/recommended:
+            document.getElementById('dispRecAmount').textContent = "K " + data.risk_assessment.recommended_amount.toLocaleString();
+            document.getElementById('dispRecInterest').textContent = data.risk_assessment.recommended_interest_rate + "% Interest";
+
+            // Status Badge & Reason
+            const decision = data.risk_assessment.decision;
+            document.getElementById('txtDecisionTitle').textContent = decision + " RECOMMENDED";
+            document.getElementById('txtDecisionReason').textContent = data.explanation.split('\n')[1] || "Behavioral analysis complete.";
+
+            // Icons
+            if (decision === 'APPROVED') {
+                document.getElementById('txtDecisionIcon').textContent = "✅";
+            } else if (decision === 'REJECTED') {
+                document.getElementById('txtDecisionIcon').textContent = "❌";
+            } else {
+                document.getElementById('txtDecisionIcon').textContent = "⚠️";
+            }
+
+            // Behavioral Scores (Mapping API to UI)
+            // Income
+            const incScore = ((1 - data.behavioral_analysis.income_consistency) * 100).toFixed(0);
+            document.getElementById('valIncomeScore').textContent = incScore + "%";
+            document.getElementById('barIncome').style.width = incScore + "%";
+
+            // Savings
+            const savRate = (data.behavioral_analysis.savings_trend * 100).toFixed(0);
+            // Mocking savings rate % display based on trend or generic
+            document.getElementById('valSavings').textContent = "12%"; // Placeholder logic or derived
+
+            // Risk Gauge
+            const risk = data.risk_assessment.risk_score;
+            document.getElementById('riskScoreDisp').textContent = risk.toFixed(2);
+
+            // Rotate Gauge (0 to 180deg)
+            // 0 risk = 0deg (Green), 1.0 risk = 180deg (Red)
+            const deg = risk * 180;
+            const gaugeFill = document.getElementById('gaugeFill');
+            gaugeFill.style.transform = `rotate(${deg}deg)`;
+
+            // Gauge Color
+            if (risk < 0.3) {
+                gaugeFill.style.background = "#10b981"; // Green
+                document.getElementById('riskLabel').textContent = "Low Risk";
+                document.getElementById('riskLabel').className = "text-xs font-bold text-emerald-500 bg-emerald-50 px-2 py-0.5 rounded uppercase";
+            } else if (risk < 0.7) {
+                gaugeFill.style.background = "#f59e0b"; // Orange
+                document.getElementById('riskLabel').textContent = "Medium Risk";
+                document.getElementById('riskLabel').className = "text-xs font-bold text-amber-500 bg-amber-50 px-2 py-0.5 rounded uppercase";
+            } else {
+                gaugeFill.style.background = "#ef4444"; // Red
+                document.getElementById('riskLabel').textContent = "High Risk";
+                document.getElementById('riskLabel').className = "text-xs font-bold text-rose-500 bg-rose-50 px-2 py-0.5 rounded uppercase";
+            }
+        }
+    </script>
+</body>
+
+</html>
