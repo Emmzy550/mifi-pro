@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+
+# Firebase / Secrets
+serviceAccountKey.json
+.env
+firebase_credentials.json
+
+# Node / Frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+.eslintcache
+
+# Logs and Debug
+*.log
+*.txt
+server_log_latest.txt
+demo_final_output.txt
+demo_final_output_utf8.txt
+server_log_check.txt
+server_log_tail.txt
+server_log_tail_2.txt
+server_log_tail_3.txt
+server_log_422.txt
+server_log_422_v2.txt
+
+# OS
+.DS_Store
+Thumbs.db
