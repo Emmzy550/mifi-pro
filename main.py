@@ -1445,10 +1445,21 @@ if os.path.exists(frontend_dist):
     @app.get("/{full_path:path}")
     async def serve_react_app(full_path: str):
         # Allow API requests, admin, and documentation to pass through
-        if full_path.startswith("api/") or full_path.startswith("admin/") or full_path.startswith("docs") or full_path.startswith("openapi.json") or full_path.startswith("documentation"):
+        blocked_prefixes = ["api/", "admin/", "docs", "openapi.json", "documentation", "auth/"]
+        if any(full_path.startswith(prefix) for prefix in blocked_prefixes):
              raise HTTPException(status_code=404, detail="Not Found")
+        
+        # 1. Check if the file exists in the root directory (static_path)
+        root_file_path = os.path.join(static_path, full_path)
+        if os.path.isfile(root_file_path):
+            return FileResponse(root_file_path)
+            
+        # 2. Check if the file exists in the frontend/dist directory
+        dist_file_path = os.path.join(frontend_dist, full_path)
+        if os.path.isfile(dist_file_path):
+            return FileResponse(dist_file_path)
              
-        # Serve index.html for any other route
+        # 3. SPA Fallback: Serve index.html for any other route
         return FileResponse(os.path.join(frontend_dist, "index.html"))
 else:
     print(f"FRONTEND NOT FOUND at {frontend_dist}")
