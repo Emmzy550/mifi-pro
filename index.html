@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -9,14 +10,15 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 </head>
+
 <body class="dark-theme">
     <div class="container">
         <header>
             <div class="logo">
-                <span class="logo-icon">⚖️</span>
-                <h1>Loan Officer AI <span class="badge">V1</span></h1>
+                <img src="/logo.png" alt="Logo" style="height: 48px; margin-right: 15px;">
+                <h1>LoanOfficerAI <span class="badge">V4</span></h1>
             </div>
-            <p class="subtitle">Decision-Support System for Microfinance</p>
+            <p class="subtitle">Platform-level Credit Decisioning</p>
         </header>
 
         <main class="grid">
@@ -67,7 +69,8 @@
                     </div>
                     <div class="form-group">
                         <label for="loan_purpose">Loan Purpose</label>
-                        <textarea id="loan_purpose" rows="2" placeholder="Describe the reason for the loan..." required></textarea>
+                        <textarea id="loan_purpose" rows="2" placeholder="Describe the reason for the loan..."
+                            required></textarea>
                     </div>
                     <button type="submit" id="runAssessmentBtn" class="primary-btn">
                         <span class="btn-text">Run Assessment</span>
@@ -80,7 +83,8 @@
                 <div id="welcomeState" class="card empty-state">
                     <div class="empty-icon">📊</div>
                     <h3>Ready for Assessment</h3>
-                    <p>Enter borrower details and click "Run Assessment" to generate a risk profile and recommendation.</p>
+                    <p>Enter borrower details and click "Run Assessment" to generate a risk profile and recommendation.
+                    </p>
                 </div>
 
                 <div id="resultsState" class="hidden">
@@ -133,9 +137,10 @@
         </main>
 
         <footer>
-            <p>&copy; 2026 Loan Officer AI Agent • Powered by Antigravity</p>
+            <p>&copy; 2026 LoanOfficerAI Agent • Powered by Antigravity</p>
         </footer>
     </div>
     <script src="app.js"></script>
 </body>
+
 </html>
