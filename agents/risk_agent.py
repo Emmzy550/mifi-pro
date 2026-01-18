@@ -12,8 +12,15 @@ Rules ALWAYS override ML predictions when critical flags are present.
 This ensures regulatory compliance and protects against ML errors.
 """
 
-from models.borrower import Borrower
+import sys
+import os
 from typing import Dict, Any
+
+# Fix for direct execution: ensure project root is in path
+if __name__ == "__main__" or __package__ is None:
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from models.borrower import Borrower
 import config
 
 # Import agents based on feature flags
@@ -87,7 +94,7 @@ class RiskAgent:
         # Calculate Base Score
         rule_score = calculate_risk_score(borrower, flags)
         
-        # Base metrics for display
+        # Base metrics for display (Using stated income for DTI/Expense Context)
         metrics = {
             "dti_ratio": round(borrower.existing_debt / borrower.monthly_income, 2) if borrower.monthly_income > 0 else 1.0,
             "expense_ratio": round(borrower.monthly_expenses / borrower.monthly_income, 2) if borrower.monthly_income > 0 else 1.0,
@@ -183,7 +190,73 @@ class RiskAgent:
         final_level = derive_risk_level(final_score)
 
         # ====================================================================
-        # STEP 5: RETURN COMPREHENSIVE RESULTS
+        # STEP 5: CAPACITY VALIDATION (BANK-GRADE GUARDRAILS)
+        # ====================================================================
+        # WHY: Anchor all decisions to demonstrated financial capacity
+        # NOTE: This step has VETO POWER over all previous analysis
+        
+        # STEP 5: CAPACITY VALIDATION (BANK-GRADE GUARDRAILS)
+        from agents.capacity_agent import CapacityAgent
+        capacity_results = CapacityAgent.calculate_demonstrated_capacity(
+            borrower_id=borrower.id,
+            risk_level=final_level,
+            requested_amount=borrower.loan_amount_requested,
+            external_transactions=external_behavioral_results.get("transactions") if external_behavioral_results else None
+        )
+        
+        # Merge metrics
+        metrics.update({
+            "observed_deposit_volume": capacity_results.get("observed_deposit_volume", 0.0),
+            "transaction_count": capacity_results.get("transaction_count", 0),
+            "history_days": capacity_results.get("history_days", 0),
+            "observation_window_days": capacity_results.get("observation_window_days", 0),
+            "capacity_based_max": capacity_results.get("capacity_based_max", 0.0)
+        })
+
+        # GOVERNANCE: Handle Insufficient Observation Window
+        if capacity_results.get("insufficient_observation"):
+            # POLICY: Lack of time != Bad behavior
+            if final_score > 0.6:
+                final_score = 0.6
+                final_level = "MEDIUM"
+                flags.append("INFO: Risk capped due to limited observation window")
+            
+            # Always add the policy flag so DecisionAgent knows to WAIT
+            flags.append("INSUFFICIENT_OBSERVATION_WINDOW: Transactions detected but span less than 30 days")
+            
+            # Clean up any legacy critical messages
+            if any("CRITICAL" in f for f in flags if "HISTORY" in f):
+                flags = [f for f in flags if not ("CRITICAL" in f and "HISTORY" in f)]
+
+        # Hard reject if capacity validation fails (unless it's just a time issue)
+        if not capacity_results["is_valid"]:
+            # If it's an observation window issue, we already handled it above (is_valid was set to True in CapacityAgent for this case)
+            # This block now only handles real hard rejects (0 transactions, etc.)
+            final_score = 1.0  # Force HIGH risk
+            final_level = "HIGH"
+            flags.append(f"CRITICAL: {capacity_results['rejection_reason']}")
+            override_applied = True
+            override_reason = capacity_results["rejection_reason"]
+            
+            print(f"CAPACITY REJECTION: {capacity_results['rejection_reason']}")
+        
+        # Add capacity metrics to output
+        metrics.update({
+            "observed_deposit_volume": capacity_results["observed_deposit_volume"],
+            "transaction_count": capacity_results["transaction_count"],
+            "history_days": capacity_results["history_days"],
+            "capacity_based_max": capacity_results["capacity_based_max"],
+            "capacity_anchor_amount": capacity_results["capacity_anchor_amount"],
+            "capacity_anchor_reason": capacity_results["capacity_anchor_reason"],
+            "capacity_multiplier_used": capacity_results["capacity_multiplier_used"],
+            "starter_loan_applied": capacity_results["starter_loan_applied"],
+            "micro_loan_exception": capacity_results.get("micro_loan_exception", False),
+            "micro_starter_audit": capacity_results.get("audit_trail", {}).get("micro_starter"),
+            "capacity_data_source": capacity_results["data_source"]
+        })
+        
+        # ====================================================================
+        # STEP 6: RETURN COMPREHENSIVE RESULTS
         # ====================================================================
         # WHY: Transparency for loan officers and audit trail for regulators
         
@@ -200,7 +273,8 @@ class RiskAgent:
                 "ml_feature_importance": ml_feature_importance,
                 "behavioral_stability": behavioral_results["behavioral_stability"],
                 "saving_trend": behavioral_results["saving_trend"],
-                "utility_compliance": behavioral_results["utility_compliance"]
+                "utility_compliance": behavioral_results["utility_compliance"],
+                "behavioral_status": behavioral_results.get("behavioral_status", "UNKNOWN")
             },
             
             # Component scores for comparison
@@ -211,6 +285,9 @@ class RiskAgent:
             "data_source": data_source,
             "override_applied": override_applied,
             "override_reason": override_reason,
-            "config_snapshot": config.get_config_snapshot()
+            "config_snapshot": config.get_config_snapshot(),
+            
+            # Capacity validation results (for DecisionAgent)
+            "capacity_validation": capacity_results
         }
 

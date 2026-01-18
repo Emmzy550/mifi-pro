@@ -40,8 +40,14 @@ body {
     margin-bottom: 0.25rem;
 }
 
+.portal-logo {
+    height: 60px;
+    width: auto;
+    object-fit: contain;
+}
+
 .brand-logo {
-    font-size: 1.75rem;
+    display: none;
 }
 
 .brand h1 {

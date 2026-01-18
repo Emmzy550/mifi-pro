@@ -27,7 +27,7 @@ export default function Login() {
             await login(res.data.access_token);
             navigate('/');
         } catch (err: any) {
-            setError(err.response?.data?.detail || 'Login failed. Please checks your credentials.');
+            setError(err.response?.data?.detail || 'Login failed. Please check your credentials.');
         } finally {
             setLoading(false);
         }
@@ -37,11 +37,8 @@ export default function Login() {
         <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-md p-8 rounded-2xl shadow-xl border border-slate-100">
                 <div className="text-center mb-8">
-                    <div className="w-12 h-12 bg-primary/10 text-primary rounded-xl flex items-center justify-center mx-auto mb-4">
-                        <Shield size={24} className="fill-current" />
-                    </div>
-                    <h1 className="text-2xl font-bold text-slate-900">Partner Console</h1>
-                    <p className="text-slate-500 mt-2">Sign in to manage your integration</p>
+                    <img src="/logo.png" alt="Mifi Pro" className="h-48 w-auto object-contain mx-auto mb-4" />
+                    <p className="text-slate-500 mt-2">Sign in to manage your Mifi Pro integration</p>
                 </div>
 
                 {error && (

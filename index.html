@@ -1,146 +1,16 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Loan Officer AI | Assessment Dashboard</title>
-    <link rel="stylesheet" href="styles.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Loan Officer AI - Partner Console</title>
+  <script type="module" crossorigin src="/assets/index-Y7XiONsa.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-CrsFsCST.css">
 </head>
 
-<body class="dark-theme">
-    <div class="container">
-        <header>
-            <div class="logo">
-                <img src="/logo.png" alt="Logo" style="height: 48px; margin-right: 15px;">
-                <h1>LoanOfficerAI <span class="badge">V4</span></h1>
-            </div>
-            <p class="subtitle">Platform-level Credit Decisioning</p>
-        </header>
-
-        <main class="grid">
-            <section class="card intake-form">
-                <div class="card-header">
-                    <h2>Borrower Intake</h2>
-                    <span class="step-indicator">Step 1 of 2</span>
-                </div>
-                <form id="loanForm">
-                    <div class="form-group">
-                        <label for="name">Full Name</label>
-                        <input type="text" id="name" placeholder="John Maina" required>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label for="phone">Phone Number</label>
-                            <input type="tel" id="phone" placeholder="+254 7..." required>
-                        </div>
-                        <div class="form-group">
-                            <label for="employment_type">Employment</label>
-                            <select id="employment_type" required>
-                                <option value="salaried">Salaried</option>
-                                <option value="trader">Trader</option>
-                                <option value="farmer">Farmer</option>
-                                <option value="gig">Gig Worker</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label for="monthly_income">Monthly Income</label>
-                            <input type="number" id="monthly_income" placeholder="0.00" required>
-                        </div>
-                        <div class="form-group">
-                            <label for="monthly_expenses">Monthly Expenses</label>
-                            <input type="number" id="monthly_expenses" placeholder="0.00" required>
-                        </div>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label for="existing_debt">Existing Debt</label>
-                            <input type="number" id="existing_debt" value="0" required>
-                        </div>
-                        <div class="form-group">
-                            <label for="loan_amount_requested">Requested Amount</label>
-                            <input type="number" id="loan_amount_requested" placeholder="0.00" required>
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label for="loan_purpose">Loan Purpose</label>
-                        <textarea id="loan_purpose" rows="2" placeholder="Describe the reason for the loan..."
-                            required></textarea>
-                    </div>
-                    <button type="submit" id="runAssessmentBtn" class="primary-btn">
-                        <span class="btn-text">Run Assessment</span>
-                        <div class="loader hidden"></div>
-                    </button>
-                </form>
-            </section>
-
-            <section class="results-section">
-                <div id="welcomeState" class="card empty-state">
-                    <div class="empty-icon">📊</div>
-                    <h3>Ready for Assessment</h3>
-                    <p>Enter borrower details and click "Run Assessment" to generate a risk profile and recommendation.
-                    </p>
-                </div>
-
-                <div id="resultsState" class="hidden">
-                    <div class="card result-card">
-                        <div class="result-header">
-                            <div class="status-summary">
-                                <h2 id="finalDecision">--</h2>
-                                <p id="assessmentId">ASSESSMENT-ID</p>
-                            </div>
-                            <div class="risk-gauge">
-                                <span class="gauge-label">Risk Score</span>
-                                <div class="gauge-value" id="riskScore">0.00</div>
-                                <div id="riskLevel" class="risk-tag">LOW</div>
-                            </div>
-                        </div>
-
-                        <div class="recommended-terms">
-                            <div class="term-item">
-                                <span class="term-label">Recommended Amount</span>
-                                <span class="term-value" id="recAmount">0.00</span>
-                            </div>
-                            <div class="term-item">
-                                <span class="term-label">Suggested Rate</span>
-                                <span class="term-value" id="recRate">0.00%</span>
-                            </div>
-                        </div>
-
-                        <div class="explanation-box">
-                            <h4>Analysis & Reasoning</h4>
-                            <p id="explanationText">--</p>
-                        </div>
-
-                        <div class="flags-container" id="flagsContainer">
-                            <!-- Flags will be injected here -->
-                        </div>
-                    </div>
-
-                    <div class="metrics-grid">
-                        <div class="card metric-card">
-                            <span class="metric-label">DTI Ratio</span>
-                            <span class="metric-value" id="dtiMetric">0.00</span>
-                        </div>
-                        <div class="card metric-card">
-                            <span class="metric-label">Expense Ratio</span>
-                            <span class="metric-value" id="expenseMetric">0.00</span>
-                        </div>
-                    </div>
-                </div>
-            </section>
-        </main>
-
-        <footer>
-            <p>&copy; 2026 LoanOfficerAI Agent • Powered by Antigravity</p>
-        </footer>
-    </div>
-    <script src="app.js"></script>
+<body>
+    <div id="root"></div>
 </body>
 
 </html>

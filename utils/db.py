@@ -12,7 +12,9 @@ from models.organization import Organization
 from models.api_key import APIKey
 from models.user import User
 from models.usage_log import UsageLog
-
+from models.usage_record import UsageRecord
+from models.payment import Payment
+from models.organization import OrgEnvironment
 
 class MockFirestore:
     """A simple in-memory mock to simulate Firestore locally with basic filtering.
@@ -111,6 +113,7 @@ class Database:
                     cls._db = MockFirestore()
             else:
                 print("DEBUG: serviceAccountKey.json not found. Falling back to Mock Firestore.")
+
                 cls._db = MockFirestore()
         return cls._db
 
@@ -349,3 +352,66 @@ class Database:
         results.sort(key=lambda x: x.timestamp, reverse=True)
         
         return results[:limit]
+    @classmethod
+    def save_usage_record(cls, record: UsageRecord):
+        """Save an environment-specific usage record."""
+        db = cls.get_db()
+        # Convert environment enum to string for consistent storage
+        doc_id = f"{record.organization_id}_{str(record.environment.value if hasattr(record.environment, 'value') else record.environment)}"
+        data = record.model_dump(mode='json')
+        # Ensure environment is stored as string
+        if 'environment' in data:
+            data['environment'] = str(data['environment'])
+        db.collection("usage_records").document(doc_id).set(data)
+
+    @classmethod
+    def get_usage_record(cls, org_id: str, environment: OrgEnvironment) -> UsageRecord:
+        """Get or create an environment-specific usage record."""
+        db = cls.get_db()
+        # Convert environment enum to string for consistent lookup
+        env_str = str(environment.value if hasattr(environment, 'value') else environment)
+        doc_id = f"{org_id}_{env_str}"
+        doc = db.collection("usage_records").document(doc_id).get()
+        if doc.exists:
+            return UsageRecord(**doc.to_dict())
+        
+        # Create default if non-existent
+        record = UsageRecord(organization_id=org_id, environment=environment)
+        cls.save_usage_record(record)
+        return record
+
+    @classmethod
+    def list_usage_records(cls, org_id: str) -> List[UsageRecord]:
+        """List all usage records for an organization."""
+        db = cls.get_db()
+        docs = db.collection("usage_records").where("organization_id", "==", org_id).stream()
+        return [UsageRecord(**doc.to_dict()) for doc in docs]
+
+    @classmethod
+    def save_payment(cls, payment: Payment):
+        db = cls.get_db()
+        db.collection("payments").document(payment.payment_id).set(payment.model_dump(mode='json'))
+
+    @classmethod
+    def get_payment(cls, payment_id: str) -> Optional[Payment]:
+        db = cls.get_db()
+        doc = db.collection("payments").document(payment_id).get()
+        if doc.exists:
+            return Payment(**doc.to_dict())
+        return None
+
+    @classmethod
+    def get_payment_by_transaction_id(cls, transaction_id: str) -> Optional[Payment]:
+        db = cls.get_db()
+        query = db.collection("payments").where("transaction_id", "==", transaction_id)
+        docs = query.stream()
+        results = [doc for doc in docs]
+        if results:
+            return Payment(**results[0].to_dict())
+        return None
+
+    @classmethod
+    def list_payments(cls, org_id: str) -> List[Payment]:
+        db = cls.get_db()
+        docs = db.collection("payments").where("org_id", "==", org_id).stream()
+        return [Payment(**doc.to_dict()) for doc in docs]

@@ -11,11 +11,31 @@ interface Assessment {
     recommended_amount: number;
     explanation: string;
     metrics: any;
+    // Human-First Multi-View
+    decision_summary?: string;
+    customer_message?: {
+        summary: string;
+        key_reasons: string;
+        next_steps: string;
+    };
+    internal_notes?: {
+        rationale: string;
+        policy_context: string;
+        guidance: string;
+    };
+    customer_view?: string;
+    officer_view?: string;
+    audit_view?: string;
+    blocking_factors?: string[];
+    policy_version?: string;
 }
+
+import DecisionDetailsModal from '../components/DecisionDetailsModal';
 
 export default function Decisions() {
     const [decisions, setDecisions] = useState<Assessment[]>([]);
     const [loading, setLoading] = useState(true);
+    const [selectedAssessment, setSelectedAssessment] = useState<Assessment | null>(null);
 
     useEffect(() => {
         const fetchDecisions = async () => {
@@ -101,7 +121,10 @@ export default function Decisions() {
                                     </span>
                                 </td>
                                 <td className="px-6 py-4 text-right">
-                                    <button className="text-primary hover:text-primary/80 font-medium text-xs flex items-center gap-1 ml-auto">
+                                    <button
+                                        onClick={() => setSelectedAssessment(d)}
+                                        className="text-primary hover:text-primary/80 font-medium text-xs flex items-center gap-1 ml-auto"
+                                    >
                                         Details <ArrowRight size={14} />
                                     </button>
                                 </td>
@@ -110,6 +133,13 @@ export default function Decisions() {
                     </tbody>
                 </table>
             </div>
+
+            {selectedAssessment && (
+                <DecisionDetailsModal
+                    assessment={selectedAssessment}
+                    onClose={() => setSelectedAssessment(null)}
+                />
+            )}
         </div>
     );
 }

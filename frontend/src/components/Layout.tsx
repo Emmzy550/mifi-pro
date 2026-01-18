@@ -34,12 +34,11 @@ export default function Layout() {
         <div className="flex h-screen bg-slate-50">
             {/* Sidebar */}
             <aside className="w-64 bg-white border-r border-slate-200 flex flex-col">
-                <div className="p-4 border-b border-slate-100">
-                    <div className="flex items-center gap-2">
-                        <img src="/logo.png" alt="LoanOfficerAI Logo" className="h-8 w-auto" />
-                        <span className="text-secondary font-bold text-lg">LoanOfficerAI</span>
+                <div className="p-6 border-b border-slate-100">
+                    <div className="flex items-center gap-3 text-primary font-bold text-xl">
+                        <img src="/logo.png" alt="Mifi Pro" className="h-12 w-auto object-contain" />
                     </div>
-                    <div className="text-[10px] text-slate-400 mt-1 uppercase tracking-widest font-bold">Partner Console</div>
+                    <div className="text-xs text-slate-400 mt-1 uppercase tracking-wider font-medium">Partner Console</div>
                 </div>
 
                 <nav className="flex-1 p-4 space-y-1">

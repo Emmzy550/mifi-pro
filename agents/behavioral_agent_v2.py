@@ -21,7 +21,14 @@ IMPORTANT: This agent does NOT use ML. All metrics are rule-based
 and transparent, making them audit-friendly and explainable.
 """
 
+import sys
+import os
 from typing import List, Dict, Any
+
+# Fix for direct execution: ensure project root is in path
+if __name__ == "__main__" or __package__ is None:
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from models.alternative_data import AlternativeData, MobileMoneyTransaction, UtilityPayment
 from datetime import datetime, timedelta, timezone
 import statistics
@@ -43,7 +50,6 @@ class BehavioralAgentV2:
         Applies confidence weighting to all scores.
         """
         # 1. Calculate raw metrics using standard logic
-        # We adapt the existing logic but for the new Transaction class
         metrics = {
             "behavioral_stability": 0.0,
             "income_consistency_score": 0.0,
@@ -52,7 +58,7 @@ class BehavioralAgentV2:
             "savings_behavior": 0.0,
             "expense_volatility": 0.0,
             "early_warnings": [],
-            "utility_compliance": 0.0 # Default 0 for uploads unless we parse utility specific lines
+            "utility_compliance": 0.0
         }
         
         if not transactions:
@@ -61,10 +67,25 @@ class BehavioralAgentV2:
         # get confidence weight from first tx (all should be same source)
         confidence = transactions[0].confidence_weight if transactions else 0.6
         
-        # --- LOGICHARMONIZATION ---
-        # Map standardized Transaction to internal logic
-        # Transaction(amount, direction="INFLOW"/"OUTFLOW")
+        # --- LOGIC HARMONIZATION ---
+        # Calculate observation window for confidence tagging
+        timestamps = [t.date for t in transactions if t.date]
+        window_days = 0
+        if timestamps:
+            delta = max(timestamps) - min(timestamps)
+            window_days = max(delta.days, 1)
         
+        is_thin_history = window_days < 30
+        metrics["observation_window_days"] = window_days
+        metrics["metric_confidence"] = "LOW" if is_thin_history else "NORMAL"
+        metrics["behavioral_status"] = "INSUFFICIENT_DATA" if is_thin_history else "ANALYSIS_COMPLETE"
+
+        if is_thin_history:
+            # POLICY: Disable behavioral analysis for insufficient data windows
+            # No points computed, return early with status marker
+            metrics["transactions"] = transactions
+            return metrics
+
         # Stability (Volume) - Scale by confidence
         metrics["behavioral_stability"] = min(len(transactions) / 20.0, 1.0) * confidence
 
@@ -74,7 +95,6 @@ class BehavioralAgentV2:
             mean_in = statistics.mean(inflows)
             std_in = statistics.stdev(inflows) if len(inflows) > 1 else 0
             cv = std_in / mean_in if mean_in > 0 else 10
-            # Score * Confidence
             raw_score = max(0, 1 - (cv / 0.5))
             metrics["income_consistency_score"] = raw_score * confidence
 
@@ -84,10 +104,9 @@ class BehavioralAgentV2:
         
         if total_in > 0:
             savings_rate = (total_in - total_out) / total_in
-            metrics["saving_trend"] = savings_rate # Keep raw for trend
+            metrics["saving_trend"] = savings_rate
             metrics["savings_behavior"] = max(0, min(savings_rate, 1.0)) * confidence
             
-            # Spike check
             if total_out > total_in * config.SPENDING_SPIKE_THRESHOLD:
                 metrics["early_warnings"].append("SUSPICIOUS_SPENDING_SPIKE (User Upload)")
 
@@ -105,28 +124,14 @@ class BehavioralAgentV2:
              mean_out = statistics.mean(outflows)
              std_out = statistics.stdev(outflows) if len(outflows) > 1 else 0
              cv_out = std_out / mean_out if mean_out > 0 else 10
-             metrics["expense_volatility"] = min(cv_out, 1.0) # Raw volatility is ok, impact is capped in risk agent
+             metrics["expense_volatility"] = min(cv_out, 1.0)
 
+        # LINK: Return raw transactions for CapacityAgent
+        metrics["transactions"] = transactions
         return metrics
 
     @staticmethod
     def analyze(alt_data: AlternativeData) -> Dict[str, Any]:
-        """
-        Calculates comprehensive behavioral metrics from alternative data.
-        
-        METRICS COMPUTED:
-        1. income_consistency_score: How regular are deposits? (0-1)
-        2. transaction_stability: Inverse of transaction volatility (0-1)
-        3. savings_behavior: Net savings rate over time (0-1)
-        4. expense_volatility: Consistency of spending patterns (0-1)
-        5. early_warnings: List of behavioral red flags
-        
-        Args:
-            alt_data: Alternative data including mobile money and utility history
-            
-        Returns:
-            Dictionary with behavioral metrics and warnings
-        """
         results = {
             "behavioral_stability": 0.0,
             "income_consistency_score": 0.0,
@@ -141,21 +146,10 @@ class BehavioralAgentV2:
         if not alt_data:
             return results
 
-        # ====================================================================
-        # METRIC 1: MOBILE MONEY TRANSACTION ANALYSIS
-        # ====================================================================
-        # WHY: Transaction patterns reveal income stability and spending discipline
-        
         if alt_data.mobile_money_history:
             mm_metrics = BehavioralAgentV2._analyze_mobile_money(alt_data.mobile_money_history)
             results.update(mm_metrics)
 
-        # ====================================================================
-        # METRIC 2: UTILITY PAYMENT COMPLIANCE
-        # ====================================================================
-        # WHY: Utility payment history is a strong predictor of loan repayment
-        # RESEARCH: Studies show 70%+ correlation between utility and loan payments
-        
         if alt_data.utility_history:
             utility_metrics = BehavioralAgentV2._analyze_utility_payments(alt_data.utility_history)
             results.update(utility_metrics)
@@ -164,22 +158,6 @@ class BehavioralAgentV2:
 
     @staticmethod
     def _analyze_mobile_money(transactions: List[MobileMoneyTransaction]) -> Dict[str, Any]:
-        """
-        Analyzes mobile money transaction history for behavioral signals.
-        
-        ANALYSIS COMPONENTS:
-        1. Transaction volume (more transactions = more data reliability)
-        2. Income consistency (regularity of deposits)
-        3. Savings trend (net cash flow over time)
-        4. Spending spikes (sudden high outflows)
-        5. Transaction stability (volatility of amounts)
-        
-        Args:
-            transactions: List of mobile money transactions
-            
-        Returns:
-            Dictionary with mobile money metrics
-        """
         metrics = {
             "behavioral_stability": 0.0,
             "income_consistency_score": 0.0,
@@ -193,52 +171,25 @@ class BehavioralAgentV2:
         if not transactions:
             return metrics
         
-        # ====================================================================
-        # STEP 1: BEHAVIORAL STABILITY (Transaction Volume)
-        # ====================================================================
-        # WHY: More transactions = more reliable behavioral data
-        # THRESHOLD: 20+ transactions considered stable
-        
         total_tx = len(transactions)
         metrics["behavioral_stability"] = min(total_tx / 20.0, 1.0)
-        
-        # ====================================================================
-        # STEP 2: INCOME CONSISTENCY (Deposit Regularity)
-        # ====================================================================
-        # WHY: Regular deposits indicate stable income source
-        # METHOD: Calculate coefficient of variation for deposit amounts
         
         deposits = [t for t in transactions if t.type in ["DEPOSIT", "TRANSFER_IN", "SALARY"]]
         
         if len(deposits) >= 3:
             deposit_amounts = [t.amount for t in deposits]
-            
-            # Calculate coefficient of variation (CV = std_dev / mean)
-            # WHY: CV measures relative variability
-            # INTERPRETATION: Low CV = consistent income, High CV = volatile income
             mean_deposit = statistics.mean(deposit_amounts)
             if mean_deposit > 0:
                 std_deposit = statistics.stdev(deposit_amounts) if len(deposit_amounts) > 1 else 0
                 cv = std_deposit / mean_deposit
-                
-                # Convert CV to score (0-1, lower CV = higher score)
-                # WHY: CV of 0.5 or less is considered good consistency
                 metrics["income_consistency_score"] = max(0, 1 - (cv / 0.5))
-        
-        # ====================================================================
-        # STEP 3: SAVINGS BEHAVIOR (Net Cash Flow Trend)
-        # ====================================================================
-        # WHY: Positive savings trend indicates financial discipline
-        # METHOD: Compare inflows vs outflows over last 30 days
         
         one_month_ago = datetime.now(timezone.utc) - timedelta(days=30)
         recent_tx = []
         for t in transactions:
-            # Ensure t.timestamp is aware for comparison
             tx_ts = t.timestamp
             if tx_ts.tzinfo is None:
                 tx_ts = tx_ts.replace(tzinfo=timezone.utc)
-            
             if tx_ts > one_month_ago:
                 recent_tx.append(t)
         
@@ -247,77 +198,34 @@ class BehavioralAgentV2:
             outflow = sum(t.amount for t in recent_tx if t.type in ["WITHDRAWAL", "PAYMENT", "TRANSFER_OUT"])
             
             if inflow > 0:
-                # Net savings rate = (inflow - outflow) / inflow
-                # WHY: Measures what percentage of income is saved
                 savings_rate = (inflow - outflow) / inflow
                 metrics["saving_trend"] = savings_rate
                 metrics["savings_behavior"] = max(0, min(savings_rate, 1.0))
                 
-                # ====================================================================
-                # EARLY WARNING: SPENDING SPIKE
-                # ====================================================================
-                # WHY: Sudden high spending may indicate financial stress or emergency
-                # THRESHOLD: Outflow > 1.5x inflow
-                
                 if outflow > inflow * config.SPENDING_SPIKE_THRESHOLD:
                     metrics["early_warnings"].append("SUSPICIOUS_SPENDING_SPIKE")
-        
-        # ====================================================================
-        # STEP 4: TRANSACTION STABILITY (Volatility Analysis)
-        # ====================================================================
-        # WHY: Stable transaction amounts indicate predictable financial behavior
-        # METHOD: Calculate coefficient of variation for all transactions
         
         if len(transactions) >= 5:
             all_amounts = [t.amount for t in transactions]
             mean_amount = statistics.mean(all_amounts)
-            
             if mean_amount > 0:
                 std_amount = statistics.stdev(all_amounts) if len(all_amounts) > 1 else 0
                 cv_all = std_amount / mean_amount
-                
-                # Convert to stability score (inverse of volatility)
-                # WHY: Lower volatility = higher stability
                 metrics["transaction_stability"] = max(0, 1 - (cv_all / 1.0))
         
-        # ====================================================================
-        # STEP 5: EXPENSE VOLATILITY
-        # ====================================================================
-        # WHY: Erratic spending patterns may indicate poor financial planning
-        # METHOD: Analyze consistency of outflows
-        
         outflows = [t for t in transactions if t.type in ["WITHDRAWAL", "PAYMENT", "TRANSFER_OUT"]]
-        
         if len(outflows) >= 3:
             outflow_amounts = [t.amount for t in outflows]
             mean_outflow = statistics.mean(outflow_amounts)
-            
             if mean_outflow > 0:
                 std_outflow = statistics.stdev(outflow_amounts) if len(outflow_amounts) > 1 else 0
                 cv_outflow = std_outflow / mean_outflow
-                
-                # Convert to volatility score (higher CV = higher volatility)
-                # WHY: Consistent expenses indicate good budgeting
                 metrics["expense_volatility"] = min(cv_outflow, 1.0)
         
         return metrics
 
     @staticmethod
     def _analyze_utility_payments(payments: List[UtilityPayment]) -> Dict[str, Any]:
-        """
-        Analyzes utility payment history for compliance and reliability.
-        
-        WHY UTILITY PAYMENTS MATTER:
-        - Strong predictor of loan repayment behavior
-        - Indicates financial responsibility
-        - Regular payments show ability to meet recurring obligations
-        
-        Args:
-            payments: List of utility payment records
-            
-        Returns:
-            Dictionary with utility compliance metrics
-        """
         metrics = {
             "utility_compliance": 0.0,
             "early_warnings": []
@@ -326,32 +234,13 @@ class BehavioralAgentV2:
         if not payments:
             return metrics
         
-        # ====================================================================
-        # UTILITY COMPLIANCE RATE
-        # ====================================================================
-        # WHY: On-time utility payments predict on-time loan payments
-        # METHOD: Calculate percentage of payments marked as "PAID"
-        
         paid_count = len([u for u in payments if u.status == "PAID"])
         total_count = len(payments)
-        
         compliance_rate = paid_count / total_count if total_count > 0 else 0
         metrics["utility_compliance"] = compliance_rate
         
-        # ====================================================================
-        # EARLY WARNING: MISSED PAYMENTS
-        # ====================================================================
-        # WHY: Even one missed utility payment is a red flag
-        # THRESHOLD: Any payment with status "MISSED" or "LATE"
-        
         if any(u.status in ["MISSED", "LATE"] for u in payments):
             metrics["early_warnings"].append("MISSED_UTILITY_PAYMENT")
-        
-        # ====================================================================
-        # EARLY WARNING: LOW COMPLIANCE RATE
-        # ====================================================================
-        # WHY: Compliance below threshold indicates payment reliability issues
-        # THRESHOLD: Configurable (default 80%)
         
         if compliance_rate < config.UTILITY_COMPLIANCE_THRESHOLD:
             metrics["early_warnings"].append("LOW_UTILITY_COMPLIANCE")

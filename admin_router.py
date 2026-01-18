@@ -52,7 +52,7 @@ async def create_organization(
         id=org_id,
         name=org_data.get("name"),
         plan_name=org_data.get("plan_name", "sandbox"),
-        monthly_limit=10 if org_data.get("plan_name", "sandbox") == "sandbox" else 1000,
+        monthly_limit=10 if org_data.get("plan_name", "sandbox") == "sandbox" else 10,
         status=OrgStatus.ACTIVE
     )
     

@@ -39,10 +39,12 @@ The engine needs a borrower profile to analyze.
   "monthly_income": 50000,
   "monthly_expenses": 20000,
   "loan_amount_requested": 15000,
-  "loan_purpose": "Business stock purchase",
-  "organization_id": "ORG-44141161"
+  "loan_purpose": "Business stock purchase"
 }
 ```
+
+> [!TIP]
+> **Automatic Organization Detection:** If you include your `X-API-KEY` in the headers (as described in Step 0), the system will automatically associate the borrower with your organization. You no longer need to manually pass `organization_id` in the JSON body unless you want to override it.
 
 > [!IMPORTANT]
 > **Save the `borrower_id`** from the response (e.g., `BOR-12345`). You will need it for the next steps.
@@ -53,7 +55,7 @@ The engine needs a borrower profile to analyze.
 
 To test how the engine handles behavioral data (Mobile Money, Utilities), upload context for the borrower.
 
-*   **Endpoint**: `POST {{BaseURL}}/borrower/data/upload`
+*   **Endpoint**: `POST {{BaseURLam 
 *   **Body Type**: `JSON`
 
 ### Request Body Example:

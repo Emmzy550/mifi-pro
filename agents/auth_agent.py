@@ -102,6 +102,19 @@ class AuthAgent:
                 status_code=HTTP_403_FORBIDDEN, detail="Organization is suspended"
             )
 
+        # 4b. Enforce Payment Status for PRODUCTION environment
+        from models.organization import OrgEnvironment, PaymentStatus
+        if api_key_record.environment == OrgEnvironment.PRODUCTION:
+            if org.payment_status != PaymentStatus.PAID:
+                raise HTTPException(
+                    status_code=402, 
+                    detail={
+                        "error": "Payment Required",
+                        "message": "You’re currently using the sandbox. Complete payment to unlock live decision processing.",
+                        "payment_status": org.payment_status
+                    }
+                )
+
         # 5. Return context
         # If the key belongs to the Platform Owner organization, grant Super Admin role
         role = "OFFICER"
@@ -110,8 +123,21 @@ class AuthAgent:
             
         return AuthUser(
             role=role, 
-            organization_id=api_key_record.organization_id
+            organization_id=api_key_record.organization_id,
+            environment=api_key_record.environment
         )
+
+    @classmethod
+    async def get_api_key_optional(cls, received_key: str = Security(api_key_header)):
+        """
+        Optional version of get_api_key. Returns None if key is missing or invalid.
+        """
+        if not received_key:
+            return None
+        try:
+            return await cls.get_api_key(received_key)
+        except HTTPException:
+            return None
 
     @classmethod
     async def get_current_user(cls, token: str = Depends(oauth2_scheme)) -> User:
@@ -172,7 +198,49 @@ class AuthAgent:
     def create_api_key(cls, organization_id: str, name: str, env: str, created_by: str) -> tuple[str, APIKey]:
         """
         Generates a new API Key and returns the raw key + the record to save.
+        Enforces one active key per environment.
         """
+        # 1. Resolve Organization
+        org = Database.get_organization(organization_id)
+        if not org:
+            raise HTTPException(status_code=404, detail="Organization not found")
+
+        # 2. Check for existing active keys in the same environment
+        existing_keys = Database.list_api_keys(organization_id)
+        active_env_keys = [k for k in existing_keys if k.environment == env and k.status == KeyStatus.ACTIVE]
+        
+        if active_env_keys:
+            if env == "SANDBOX":
+                AuditAgent.log_event("BLOCKED_CREATE", created_by, {"reason": "SANDBOX_KEY_EXISTS", "org_id": organization_id})
+                raise HTTPException(
+                    status_code=409, 
+                    detail={
+                        "error": "SANDBOX_KEY_EXISTS",
+                        "message": "Only one Sandbox API key is allowed per organization."
+                    }
+                )
+            else:
+                AuditAgent.log_event("BLOCKED_CREATE", created_by, {"reason": "PRODUCTION_KEY_EXISTS", "org_id": organization_id})
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "PRODUCTION_KEY_EXISTS",
+                        "message": "Only one Production API key is allowed. Please revoke the existing key to rotate."
+                    }
+                )
+
+        # 3. Enforce Production billing status
+        if env == "PRODUCTION" and org.billing_status != "ACTIVE":
+            AuditAgent.log_event("BLOCKED_CREATE", created_by, {"reason": "BILLING_NOT_ACTIVE", "org_id": organization_id})
+            raise HTTPException(
+                status_code=402,
+                detail={
+                    "error": "BILLING_NOT_ACTIVE",
+                    "message": "Activate billing to create a Production API key."
+                }
+            )
+
+        # 4. Generate Key
         raw_key = "sk_" + secrets.token_urlsafe(32)
         key_hash = cls.hash_key(raw_key)
         
@@ -187,6 +255,8 @@ class AuthAgent:
         )
         
         Database.save_api_key(api_key_record)
+        AuditAgent.log_event("CREATE_KEY", created_by, {"environment": env, "org_id": organization_id})
+        
         return raw_key, api_key_record
 
     @staticmethod
@@ -207,9 +277,10 @@ class AuthAgent:
 
 # Helper class to match what main.py expects
 class AuthUser:
-    def __init__(self, role: str, organization_id: str, email: Optional[str] = None):
+    def __init__(self, role: str, organization_id: str, environment: str = "SANDBOX", email: Optional[str] = None):
         self.role = role
         self.organization_id = organization_id
+        self.environment = environment
         self.email = email or f"key_user_{organization_id.lower()}"
 
 async def get_super_admin(

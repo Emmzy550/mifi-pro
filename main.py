@@ -1,22 +1,23 @@
 import uuid
-from fastapi import FastAPI, HTTPException, Body, Depends, Security, UploadFile, File
-from typing import Dict, List
+from fastapi import FastAPI, HTTPException, Body, Depends, Security, UploadFile, File, Form
+from typing import Dict, List, Optional, Any
 import io
-import datetime
+from datetime import datetime, timedelta, timezone
 
-from fastapi.security import OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from starlette.status import HTTP_401_UNAUTHORIZED, HTTP_403_FORBIDDEN
 from models.borrower import Borrower
 from models.assessment import Assessment
 from models.loan import Loan, LoanStatus
 from models.alternative_data import AlternativeData
-from models.organization import Organization
-from models.api_key import APIKey
+from models.organization import Organization, BillingPlan, BillingStatus, OrgEnvironment
+from models.api_key import APIKey, KeyStatus
 from models.user import User
 from agents.intake_agent import IntakeAgent
 from agents.risk_agent import RiskAgent
 from agents.decision_agent import DecisionAgent
 from agents.explanation_agent import ExplanationAgent
+from agents.query_agent import QueryAgent
 from agents.auth_agent import AuthAgent, AuthUser, ACCESS_TOKEN_EXPIRE_MINUTES, get_super_admin
 from agents.audit_agent import AuditAgent
 from agents.self_healing_agent import SelfHealingAgent
@@ -138,9 +139,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve static files (CSS, JS)
-# Use the current directory for simplicity in V1
+# --------------------------------------------------------------------
+# STATIC FILES & SPA SERVING
+# --------------------------------------------------------------------
+frontend_dist = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
 static_path = os.path.dirname(os.path.abspath(__file__))
+
+if os.path.exists(frontend_dist):
+    print(f"🚀 FRONTEND: Serving from {frontend_dist}")
+    app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="assets")
+    
+    @app.get("/")
+    async def serve_spa_root():
+        return FileResponse(os.path.join(frontend_dist, "index.html"))
+else:
+    print(f"⚠️ FRONTEND: {frontend_dist} not found. Using root legacy mode.")
+    # Fallback for root assets if they exist
+    root_assets = os.path.join(static_path, "assets")
+    if os.path.exists(root_assets):
+        app.mount("/assets", StaticFiles(directory=root_assets), name="assets")
+
+
+
 
 # Include Admin Router
 from admin_router import admin_router
@@ -208,6 +228,223 @@ async def update_platform_settings(
     AuditAgent.log_event("PLATFORM_SETTINGS_UPDATED", current_user.email, {"updates": global_updates})
     return {"status": "success", "updates": global_updates}
 
+# ============================================================================
+# PARTNER DASHBOARD METRICS (Portfolio Analytics)
+# ============================================================================
+
+from fastapi.security import APIKeyHeader
+
+async def get_dashboard_user(
+    received_key: Optional[str] = Security(AuthAgent.api_key_header),
+    token: Optional[str] = Depends(OAuth2PasswordBearer(tokenUrl="auth/login", auto_error=False))
+) -> User:
+    """
+    Flexible auth dependency that works with both JWT (dashboard) and API Key.
+    """
+    user = None
+    
+    # 1. Try JWT first (common for dashboard)
+    if token:
+        try:
+            user = await AuthAgent.get_current_user(token)
+        except Exception as e:
+            print(f"DEBUG: JWT auth failed: {e}")
+            pass
+            
+    # 2. Try API Key if no user found yet
+    if not user and received_key:
+        try:
+            auth_user = await AuthAgent.get_api_key(received_key)
+            # Convert AuthUser to User-like object
+            user = Database.get_user_by_email(auth_user.email)
+            if not user:
+                # Create a minimal User object from AuthUser
+                user = User(
+                    id=f"API-{auth_user.organization_id}",
+                    email=auth_user.email,
+                    organization_id=auth_user.organization_id,
+                    role="API_USER"
+                )
+        except Exception as e:
+            print(f"DEBUG: API Key auth failed: {e}")
+            pass
+            
+    if not user:
+        raise HTTPException(
+            status_code=HTTP_401_UNAUTHORIZED, 
+            detail="Authentication required. Please login or provide a valid API Key."
+        )
+
+    return user
+
+@app.get("/org/metrics", tags=["Dashboard"])
+async def get_org_metrics(
+    days: int = 30,
+    current_user: User = Depends(get_dashboard_user)
+):
+    """
+    Portfolio-level metrics for the Partner Console dashboard.
+    Robustly aggregates data by using raw docs to avoid strict Pydantic validation errors on legacy records.
+    Supports time range filtering via 'days' parameter.
+    """
+    from collections import defaultdict
+    from datetime import datetime, timedelta
+    
+    org_id = current_user.organization_id
+    db = Database.get_db()
+    
+    # Calculate cutoff date
+    cutoff_date = datetime.utcnow() - timedelta(days=days)
+    
+    # Fetch raw documents
+    asmt_query = db.collection("assessments").where("organization_id", "==", org_id)
+    asmt_docs = list(asmt_query.stream())
+    
+    loan_query = db.collection("loans").where("organization_id", "==", org_id)
+    loan_docs = list(loan_query.stream())
+    
+    # --- Statistics Preparation ---
+    risk_counts = {"LOW": 0, "MEDIUM": 0, "HIGH": 0, "REJECTED": 0}
+    
+    # Trends Prep
+    today = datetime.utcnow().date()
+    trends_map = {}
+    for i in range(days):
+        day = today - timedelta(days=i)
+        trends_map[day] = {"approved": 0, "conditional": 0, "rejected": 0, "label": day.strftime("%b %d")}
+    
+    filtered_asmt_count = 0
+    total_asmt_count = 0
+    
+    for doc in asmt_docs:
+        try:
+            data = doc.to_dict()
+            decision = data.get("decision")
+            risk_level = data.get("risk_level")
+            created_at_val = data.get("created_at")
+            
+            # Parse created_at
+            created_dt = None
+            if created_at_val:
+                if isinstance(created_at_val, datetime):
+                    created_dt = created_at_val
+                elif isinstance(created_at_val, str):
+                    try:
+                        created_dt = datetime.fromisoformat(created_at_val.replace('Z', '+00:00'))
+                    except: pass
+            
+            # Global count (within organization)
+            total_asmt_count += 1
+            
+            # Time filter check
+            is_in_range = False
+            if created_dt:
+                # Ensure it has timezone for comparison if needed, or stripping for naive
+                ref_dt = created_dt.replace(tzinfo=None) if created_dt.tzinfo else created_dt
+                if ref_dt >= cutoff_date:
+                    is_in_range = True
+                    filtered_asmt_count += 1
+            
+            if is_in_range:
+                # Risk Stats
+                if decision == "REJECT":
+                    risk_counts["REJECTED"] += 1
+                elif risk_level:
+                    risk_counts[str(risk_level)] = risk_counts.get(str(risk_level), 0) + 1
+                
+                # Trend Stats
+                created_date = created_dt.date() if created_dt else None
+                if created_date in trends_map:
+                    if decision == "APPROVE":
+                        trends_map[created_date]["approved"] += 1
+                    elif decision == "CONDITIONAL":
+                        trends_map[created_date]["conditional"] += 1
+                    elif decision == "REJECT":
+                        trends_map[created_date]["rejected"] += 1
+                    
+        except Exception as e:
+            continue
+
+    # Risk Distribution Percentages
+    total_in_range = sum(risk_counts.values())
+    risk_distribution = [
+        {"name": "Low Risk", "value": risk_counts["LOW"], "color": "#22c55e"},
+        {"name": "Medium Risk", "value": risk_counts["MEDIUM"], "color": "#f59e0b"},
+        {"name": "High Risk", "value": risk_counts["HIGH"], "color": "#ef4444"},
+        {"name": "Rejected", "value": risk_counts["REJECTED"], "color": "#94a3b8"},
+    ]
+    
+    # Format trends for frontend (Sorted by date)
+    decision_trends = []
+    sorted_days = sorted(trends_map.keys())
+    for d in sorted_days:
+        decision_trends.append({
+            "name": trends_map[d]["label"],
+            **trends_map[d]
+        })
+    
+    # --- Loan KPIs ---
+    active_count = 0
+    default_count = 0
+    total_loans = 0
+    disbursed_volume = 0.0
+    
+    for doc in loan_docs:
+        try:
+            l_data = doc.to_dict()
+            status = l_data.get("status")
+            amount = l_data.get("amount", 0.0)
+            disbursed_at_val = l_data.get("disbursed_at")
+            
+            # Parse disbursed_at
+            disbursed_dt = None
+            if disbursed_at_val:
+                if isinstance(disbursed_at_val, datetime):
+                    disbursed_dt = disbursed_at_val
+                elif isinstance(disbursed_at_val, str):
+                    try:
+                        disbursed_dt = datetime.fromisoformat(disbursed_at_val.replace('Z', '+00:00'))
+                    except: pass
+            
+            # Time filter check
+            is_in_range = False
+            if disbursed_dt:
+                ref_dt = disbursed_dt.replace(tzinfo=None) if disbursed_dt.tzinfo else disbursed_dt
+                if ref_dt >= cutoff_date:
+                    is_in_range = True
+            
+            if is_in_range:
+                if status not in ["REPAID", "CANCELLED"]:
+                    active_count += 1
+                if status == "DEFAULTED":
+                    default_count += 1
+                total_loans += 1
+                disbursed_volume += amount
+        except: continue
+        
+    default_rate = (default_count / total_loans * 100) if total_loans > 0 else 0.0
+    
+    # --- Risk Drift Detection ---
+    alerts = []
+    if total_in_range > 0:
+        negative_rate = (risk_counts["REJECTED"] + risk_counts["HIGH"]) / total_in_range
+        if negative_rate > 0.4:
+            alerts.append({
+                "type": "RISK_DRIFT",
+                "severity": "WARNING",
+                "message": f"Negative outcome rate ({negative_rate*100:.1f}%) exceeds safety threshold. Review policy strictness."
+            })
+    
+    return {
+        "total_assessments": filtered_asmt_count,
+        "active_loans": active_count,
+        "disbursed_volume": round(disbursed_volume, 2),
+        "default_rate": round(default_rate, 1),
+        "risk_distribution": risk_distribution,
+        "decision_trends": decision_trends,
+        "alerts": alerts
+    }
+
 # Database initialization happens via the Database class
 # No local dictionaries needed for V2
 
@@ -263,33 +500,48 @@ async def health_check():
     **Next Step:** Use the returned `borrower_id` with `/assessment/run`
     """
 )
-async def intake_start(raw_data: dict = Body(
-    ...,
-    example={
-        "name": "Jane Doe",
-        "phone": "+254700000000",
-        "email": "jane@example.com",
-        "employment_type": "trader",
-        "monthly_income": 50000,
-        "monthly_expenses": 20000,
-        "existing_debt": 5000,
-        "loan_amount_requested": 15000,
-        "loan_purpose": "Business stock purchase",
-        "organization_id": "ORG-123"
-    }
-)):
+async def intake_start(
+    raw_data: dict = Body(
+        ...,
+        example={
+            "name": "Jane Doe",
+            "phone": "+254700000000",
+            "email": "jane@example.com",
+            "employment_type": "trader",
+            "monthly_income": 50000,
+            "monthly_expenses": 20000,
+            "existing_debt": 5000,
+            "loan_amount_requested": 15000,
+            "loan_purpose": "Business stock purchase",
+            "organization_id": "ORG-123"
+        }
+    ),
+    user: Optional[AuthUser] = Depends(AuthAgent.get_api_key_optional)
+):
     """
     Create a new borrower profile with validated information.
     """
     try:
-        org_id = raw_data.get("organization_id", "DEFAULT_ORG")
+        # Determine Org ID: API key (if provided) overrides body which overrides default
+        org_id = raw_data.get("organization_id")
+        if user:
+            org_id = user.organization_id
+        
+        if not org_id:
+            org_id = "DEFAULT_ORG"
+
         borrower_profile = IntakeAgent.process(raw_data)
         borrower_profile.id = f"BOR-{uuid.uuid4().hex[:8].upper()}"
         borrower_profile.organization_id = org_id
+        
         Database.save_borrower(borrower_profile)
-        AuditAgent.log_event("INTAKE_START", "BORROWER_PORTAL", {"borrower_id": borrower_profile.id, "org": org_id})
-        return {"borrower_id": borrower_profile.id, "status": "INTAKE_COMPLETE"}
+        AuditAgent.log_event("INTAKE_START", user.role if user else "BORROWER_PORTAL", 
+                             {"borrower_id": borrower_profile.id, "org": org_id})
+        
+        return {"borrower_id": borrower_profile.id, "status": "INTAKE_COMPLETE", "organization_id": org_id}
     except Exception as e:
+        import traceback
+        print(f"ERROR in intake_start: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post(
@@ -327,6 +579,9 @@ async def intake_start(raw_data: dict = Body(
 )
 async def assessment_run(
     borrower_id: str = Body(..., embed=True, example="BOR-A1B2C3D4"),
+    mobile_money_history: Optional[List[Dict[str, Any]]] = Body(None),
+    utility_history: Optional[List[Dict[str, Any]]] = Body(None),
+    airtime_usage_avg: Optional[float] = Body(None),
     user: AuthUser = Depends(AuthAgent.get_api_key)
 ):
     """
@@ -347,28 +602,45 @@ async def assessment_run(
     if not org:
         raise HTTPException(status_code=500, detail="Organization context missing")
     
-    # BILLING: Check and reset billing cycle if needed
+    # BILLING: New Environment-Isolated Enforcement
     from agents.billing_agent import BillingAgent
-    org = BillingAgent.check_billing_cycle(org)
     
-    # BILLING: Check if organization has exceeded limit
-    is_allowed, error_response = BillingAgent.check_billing_limit(org)
+    # Check if organization has exceeded limit for the specific environment
+    is_allowed, billing_error = BillingAgent.check_billing_limit(org, user.environment)
     if not is_allowed:
-       # Return HTTP 429 with billing error details
-        raise HTTPException(status_code=429, detail=error_response)
+        # User requirement: 402 for Payment Required (Prod), 429 for Limit (Sandbox)
+        status_code = billing_error.get("code", 429)
+        raise HTTPException(status_code=status_code, detail=billing_error)
     
     try:
         # Proceed with assessment
-        # 1. Evaluate Risk
-        risk_results = RiskAgent.evaluate(borrower)
+        
+        # INSTANT DATA: Check if transactional data was provided in the request body
+        external_results = None
+        if mobile_money_history is not None or utility_history is not None:
+            external_results = {
+                "transactions": mobile_money_history or [],
+                "utility_history": utility_history or [],
+                "airtime_usage_avg": airtime_usage_avg or 0.0,
+                # Default behavioral metrics for instant analysis
+                "behavioral_stability": 0.7, 
+                "saving_trend": 0.7,
+                "utility_compliance": 0.7,
+                "early_warnings": []
+            }
+            print(f"DEBUG: Using instant data provided in request body for {borrower_id}")
+            
+        # 1. Evaluate Risk (passing external results if provided)
+        risk_results = RiskAgent.evaluate(borrower, external_behavioral_results=external_results)
         
         # 2. Recommmend Decision
         decision_results = DecisionAgent.recommend(risk_results, borrower)
         
-        # 3. Generate Explanation
-        explanation_text, explanation_source = ExplanationAgent.generate(risk_results, decision_results, borrower)
+        # 3. Generate Explanation (V4: Multi-View & Persona Based)
+        explanation_results = ExplanationAgent.generate(risk_results, decision_results, borrower)
         
         # 4. Construct Final Assessment Object
+        mdata = decision_results.get("decision_metadata", {})
         assessment = Assessment(
             assessment_id=f"ASMT-{uuid.uuid4().hex[:8].upper()}",
             borrower_id=borrower_id,
@@ -379,21 +651,106 @@ async def assessment_run(
             recommended_amount=decision_results["recommended_amount"],
             recommended_interest_rate=decision_results["recommended_interest_rate"],
             requested_amount=borrower.loan_amount_requested,
-            explanation=explanation_text,
-            explanation_source=explanation_source,
+            
+            # Human-First Persona Views
+            decision_summary=explanation_results["decision_summary"],
+            customer_view=explanation_results["customer_view"],
+            officer_view=explanation_results["officer_view"],
+            audit_view=explanation_results["audit_view"],
+            blocking_factors=explanation_results["blocking_factors"],
+            
+            # Key Structured Data (MISSING FIX)
+            customer_message=explanation_results["customer_message"],
+            internal_notes=explanation_results["internal_notes"],
+            
+            # Legacy/Internal
+            explanation=explanation_results["explanation"],
+            explanation_source=explanation_results["explanation_source"],
             decision_source="rules_engine",
+            policy_version=mdata.get("policy_version", "v1.2.0-human-first"),
+            
             flags=risk_results["flags"],
-            metrics=risk_results["metrics"]
+            # --- CAPACITY METRICS (CRITICAL FIX) ---
+            # Strictly hydrate from metrics to prevent zeroing out
+            observed_deposit_volume=risk_results["metrics"]["observed_deposit_volume"], 
+            transaction_count=risk_results["metrics"]["transaction_count"],
+            history_days=risk_results["metrics"]["history_days"],
+
+            # --- ANCHOR PROPAGATION FIX ---
+            # Use decision_metadata as the single source of truth for the final anchor.
+            # If a risk haircut was applied, this will differ from the raw capacity_based_max.
+            capacity_based_max=mdata.get("capacity_based_max", 
+                                        risk_results["metrics"].get("capacity_based_max", 0.0)),
+                                        
+            capacity_anchor_amount=mdata.get("capacity_anchor_amount", 
+                                            risk_results["metrics"].get("capacity_anchor_amount", 0.0)),
+                                            
+            capacity_anchor_reason=mdata.get("capacity_anchor_reason", 
+                                            risk_results["metrics"].get("capacity_anchor_reason", "POLICY_DEFAULT")),
+            
+            capacity_multiplier_used=risk_results["metrics"].get("capacity_multiplier_used", 0.0),
+            starter_loan_applied=mdata.get("starter_loan_applied", 
+                                          risk_results["metrics"].get("starter_loan_applied", False)),
+            
+            metrics={
+                **risk_results["metrics"],
+                # Overwrite metrics anchor with authoritative decision metadata
+                "capacity_anchor_amount": mdata.get("capacity_anchor_amount", risk_results["metrics"].get("capacity_anchor_amount", 0.0)),
+                "capacity_anchor_reason": mdata.get("capacity_anchor_reason", risk_results["metrics"].get("capacity_anchor_reason", "POLICY_DEFAULT"))
+            },
+            
+            # ML Advisory Metadata
+            ml_advisory_only=True,
+            ml_attempted_override=any(
+                adj.get("type") == "CAPACITY_CAP" 
+                for adj in mdata.get("adjustments_applied", [])
+                if isinstance(adj, dict)
+            ),
+            decision_metadata=mdata
         )
         
-        # Save assessment
+        # 5. Validate and Auto-Repair Explanation Consistency
+        from utils.explanation_validator import ExplanationValidator
+        
+        # Auto-repair common consistency issues (e.g. missing capacity mentions)
+        assessment.explanation = ExplanationValidator.auto_repair_explanation(assessment)
+        
+        # --- FINAL VALIDATION & FLAG LIFECYCLE (PHASE 4) ---
+        # 1. Flag Deduplication & Initialization
+        # Treat flags as a set to prevent duplicates during processing
+        current_flags = set(assessment.flags)
+        
+        # 2. Validation Flags Reset
+        # We always re-evaluate INCONSISTENT_EXPLANATION at the end.
+        if "INCONSISTENT_EXPLANATION" in current_flags:
+            current_flags.remove("INCONSISTENT_EXPLANATION")
+            
+        try:
+            from utils.explanation_validator import ExplanationValidator, ExplanationInconsistencyError
+            ExplanationValidator.validate(assessment)
+            # If we get here, validation PASSED.
+            # Flag remains removed.
+                
+        except ExplanationInconsistencyError as e:
+            # 3. Validation Failed Logic
+            # Add flag back EXACTLY once
+            current_flags.add("INCONSISTENT_EXPLANATION")
+            
+            # Log developer warning with diff (Safety Logging)
+            print(f"WARNING: Explanation Inconsistency Finalized: {e}")
+            
+        # 4. Final Flag Set Update
+        # Convert back to list for response serialization
+        assessment.flags = sorted(list(current_flags))
+            
+        # 6. Save assessment
         Database.save_assessment(assessment)
         
         # BILLING: Meter usage (only after successful assessment)
-        # This gets called ONLY if we reach this point (HTTP 200)
         BillingAgent.meter_usage(
             org=org,
-            api_key_id="API_KEY",  # We could pass the actual key ID if we threaded it through AuthUser
+            environment=user.environment,
+            api_key_id="API_KEY", # Prefix could be used if threaded
             endpoint="/assessment/run",
             assessment_id=assessment.assessment_id
         )
@@ -414,6 +771,18 @@ async def assessment_run(
         print(error_msg)
         with open("crash_report.txt", "w", encoding="utf-8") as f:
             f.write(error_msg)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/assessment/query")
+async def assessment_query(assessment: Assessment, question_type: str):
+    """
+    Safe 'Ask Why' capability for humans to interact with the decision facts.
+    Returns deterministic, policy-anchored answers.
+    """
+    try:
+        answer = QueryAgent.answer(assessment, question_type)
+        return answer
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/assessment/result/{assessment_id}", response_model=Assessment)
@@ -524,7 +893,103 @@ async def get_billing_usage(current_user: User = Depends(AuthAgent.get_current_u
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
         
-    return BillingAgent.get_usage_summary(org)
+    return BillingAgent.get_full_usage_summary(org)
+
+@app.get("/billing/plans", response_model=Dict)
+async def list_billing_plans(current_user: User = Depends(AuthAgent.get_current_user)):
+    """
+    Returns available billing plans and their configuration (prices, limits).
+    """
+    from pricing_config import PLAN_CONFIG
+    return PLAN_CONFIG
+
+
+@app.post("/billing/upgrade", tags=["Billing"])
+async def upgrade_billing_plan(
+    plan: str = Body(..., embed=True),
+    gateway: str = Body("LIPILA", embed=True),
+    phone_number: Optional[str] = Body(None, embed=True),
+    current_user: User = Depends(AuthAgent.get_current_user)
+):
+    """
+    Initiate an upgrade for the organization's billing plan.
+    Triggers MoMo STK Push or generates an Invoice.
+    """
+    if current_user.role != "ORG_ADMIN":
+        raise HTTPException(status_code=403, detail="Only Organization Admins can initiate upgrades.")
+    
+    org = Database.get_organization(current_user.organization_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    from pricing_config import PLAN_CONFIG
+    if plan.upper() not in PLAN_CONFIG:
+        raise HTTPException(status_code=400, detail=f"Invalid plan: {plan}")
+
+    from agents.payment_agent import PaymentAgent
+    try:
+        payment_init = PaymentAgent.initiate_payment(
+            org=org,
+            plan_name=plan,
+            gateway=gateway,
+            extra_data={"phone_number": phone_number}
+        )
+        return payment_init
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail="Failed to initiate payment")
+
+@app.post("/billing/webhook/lipila", tags=["Billing"])
+async def billing_webhook_lipila(payload: Dict = Body(...)):
+    """
+    Async webhook from Lipila for Mobile Money transactions.
+    """
+    from agents.payment_agent import PaymentAgent
+    success = PaymentAgent.handle_webhook("LIPILA", payload)
+    if success:
+        return {"status": "ACKNOWLEDGED"}
+    else:
+        # We still return 200 to acknowledge receipt even if logic failed
+        # to prevent gateway from retrying indefinitely on bad data
+        return {"status": "ERROR_HANDLED"}
+
+@app.post("/billing/admin/confirm-payment", tags=["Billing"])
+async def confirm_manual_payment(
+    payment_id: str = Body(..., embed=True),
+    current_user: User = Depends(get_super_admin)
+):
+    """
+    Global Admin capability to manually confirm Bank Transfers/Invoices.
+    """
+    from agents.payment_agent import PaymentAgent
+    payment = Database.get_payment(payment_id)
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment record not found")
+    
+    # Simulate a successful webhook payload
+    payload = {
+        "transaction_id": payment.transaction_id or payment.reference_code,
+        "status": "SUCCESS",
+        "metadata": {"payment_id": payment_id}
+    }
+    
+    success = PaymentAgent.handle_webhook(payment.gateway, payload)
+    if success:
+        AuditAgent.log_event("MANUAL_PAYMENT_CONFIRMED", current_user.email, {"payment_id": payment_id})
+        return {"status": "SUCCESS", "message": f"Payment {payment_id} confirmed and plan activated."}
+    
+    raise HTTPException(status_code=500, detail="Failed to confirm payment")
+
+@app.get("/billing/payments", tags=["Billing"])
+async def list_org_payments(current_user: User = Depends(AuthAgent.get_current_user)):
+    """
+    List all payment attempts and invoices for the organization.
+    """
+    payments = Database.list_payments(current_user.organization_id)
+    return sorted(payments, key=lambda x: x.timestamp, reverse=True)
 
 # --- API KEY MANAGEMENT ---
 @app.get("/borrowers", response_model=List[Borrower])
@@ -611,8 +1076,7 @@ async def loan_status_update(loan_id: str = Body(..., embed=True), status: LoanS
     
     loan.status = status
     if status in [LoanStatus.PAID, LoanStatus.DEFAULTED]:
-        import datetime
-        loan.closed_at = datetime.datetime.now()
+        loan.closed_at = datetime.now()
         # Trigger Self-Healing loop
         SelfHealingAgent.register_outcome(loan.loan_id, status)
         
@@ -729,7 +1193,7 @@ async def update_feature_flags(
 
 @app.post("/borrower/data/upload-document")
 async def upload_transaction_document(
-    borrower_id: str = Body(..., embed=True),
+    borrower_id: str = Form(...),
     file: UploadFile = File(...)
 ):
     """
@@ -885,9 +1349,23 @@ async def upload_transaction_document(
 
 @app.post("/behavior/upload")
 async def behavior_upload(
-    borrower_id: str = Body(..., embed=True),
+    borrower_id: str = Form(...),
     file: UploadFile = File(...)
 ):
+    # This logic is also accessible via the /documents/upload alias
+    return await process_document_upload(borrower_id, file)
+
+@app.post("/documents/upload", tags=["Alternative Data"])
+async def documents_upload_alias(
+    borrower_id: str = Form(...),
+    file: UploadFile = File(...)
+):
+    """
+    Alias for /behavior/upload to support legacy or Postman integrations.
+    """
+    return await process_document_upload(borrower_id, file)
+
+async def process_document_upload(borrower_id: str, file: UploadFile):
     """
     REGULATOR-SAFE pipeline for ingesting user-provided transaction data.
     
@@ -977,7 +1455,7 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     print(f"✅ LOGIN SUCCESS: {user.email} ({user.role})")
     
     # 3. Create JWT
-    access_token_expires = datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     token_data = {"sub": user.email, "role": str(user.role.value if hasattr(user.role, 'value') else user.role), "org": str(user.organization_id)}
     print(f"[LOGIN] Creating token for: {token_data}")
     access_token = AuthAgent.create_access_token(
@@ -990,6 +1468,9 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
 
 @app.get("/auth/me", response_model=User)
 async def read_users_me(current_user: User = Depends(AuthAgent.get_current_user)):
+    """
+    Returns the current authenticated user's profile.
+    """
     return current_user
 
 # --- API KEY MANAGEMENT ---
@@ -1016,7 +1497,7 @@ async def create_api_key(
         created_by=current_user.id
     )
     
-    AuditAgent.log_event("KEY_CREATE", current_user.role, {"key_prefix": key_record.key_prefix, "org": current_user.organization_id})
+    # KEY_CREATE is already logged inside AuthAgent.create_api_key
     
     return {
         "api_key": raw_key,
@@ -1039,82 +1520,13 @@ async def revoke_api_key(
     if key_record.organization_id != current_user.organization_id:
         raise HTTPException(status_code=403, detail="Unauthorized")
         
-    key_record.status = "REVOKED" # Use string or Enum if imported
+    key_record.status = KeyStatus.REVOKED
     Database.save_api_key(key_record)
     
-    AuditAgent.log_event("KEY_REVOKE", current_user.role, {"key_prefix": key_record.key_prefix})
+    AuditAgent.log_event("KEY_REVOKE", current_user.email, {"key_prefix": key_record.key_prefix, "org_id": current_user.organization_id})
     return {"status": "REVOKED"}
 
 # --- DASHBOARD METRICS ---
-
-@app.get("/org/metrics")
-async def get_org_metrics(current_user: User = Depends(AuthAgent.get_current_user)):
-    """
-    Get usage metrics for the dashboard.
-    """
-    # Filter assessments by org
-    assessments = Database.list_assessments(current_user.organization_id)
-    loans = Database.list_loans(current_user.organization_id)
-    
-    total_assessments = len(assessments)
-    today = datetime.datetime.now().date()
-    # Note: Assessment object needs 'created_at' for 'today' filter.
-    # Assuming standard Assessment doesn't have it explicitly yet in this context,
-    # or it's embedded in ID/Audit logs. For V1 we'll mock 'today' with total.
-    
-    return {
-        "total_assessments": total_assessments,
-        "total_loans": len(loans),
-        "active_loans": len([l for l in loans if l.status == "ACTIVE"]),
-        "default_rate": (len([l for l in loans if l.status == "DEFAULTED"]) / len(loans) * 100) if loans else 0
-    }
-
-# ============================================================================
-# BILLING ENDPOINTS
-# ============================================================================
-
-@app.get("/billing/usage", tags=["Billing"])
-async def get_billing_usage(current_user: User = Depends(AuthAgent.get_current_user)):
-    """
-    Get current billing usage summary for the organization.
-    
-    **Permissions:** ORG_ADMIN or DEVELOPER can view usage count.
-    Only ORG_ADMIN can see cost details.
-    """
-    org = Database.get_organization(current_user.organization_id)
-    if not org:
-        raise HTTPException(status_code=404, detail="Organization not found")
-    
-    from agents.billing_agent import BillingAgent
-    summary = BillingAgent.get_usage_summary(org)
-    
-    # Hide cost details for non-admins
-    if current_user.role not in ["ORG_ADMIN", "SUPER_ADMIN"]:
-        summary.pop("unit_cost", None)
-        summary.pop("estimated_cost", None)
-    
-    return summary
-
-@app.get("/billing/logs", tags=["Billing"])
-async def get_billing_logs(
-    limit: int = 100,
-    current_user: User = Depends(AuthAgent.get_current_user)
-):
-    """
-    Get usage log history for the organization.
-    
-    **Permissions:** ORG_ADMIN only
-    """
-    if current_user.role not in ["ORG_ADMIN", "SUPER_ADMIN"]:
-        raise HTTPException(status_code=403, detail="Only admins can view billing logs")
-    
-    logs = Database.get_usage_logs(current_user.organization_id, limit=limit)
-    
-    # Convert to dict for JSON response
-    return {
-        "logs": [log.model_dump(mode='json') for log in logs],
-        "count": len(logs)
-    }
 
 # ============================================================================
 # DOCUMENTATION VIEWER
@@ -1427,46 +1839,30 @@ async def view_documentation(doc_name: str):
     
     return HTMLResponse(content=html)
 
-# Mount at bottom to avoid intercepting API routes
-# Serve the React App from 'frontend/dist'
-frontend_dist = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
-
-if os.path.exists(frontend_dist):
-    print(f"FRONTEND FOUND at {frontend_dist}")
-    print("Serving React App...")
-    # Mount assets folders (assets, etc)
-    app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="assets")
+# Catch-all for React Router (must be at the bottom)
+@app.get("/{full_path:path}")
+async def catch_all(full_path: str):
+    # Skip API/Auth/Docs
+    if any(full_path.startswith(p) for p in ["api", "auth", "docs", "openapi", "billing", "admin", "org", "borrower", "assessment", "loan", "documentation"]):
+        raise HTTPException(status_code=404, detail="Not Found")
     
-    @app.get("/")
-    async def serve_spa_root():
+    # 1. Try serving from frontend/dist
+    if os.path.exists(frontend_dist):
+        file_path = os.path.join(frontend_dist, full_path)
+        if os.path.isfile(file_path):
+            return FileResponse(file_path)
         return FileResponse(os.path.join(frontend_dist, "index.html"))
-
-    # Catch-all for React Router
-    @app.get("/{full_path:path}")
-    async def serve_react_app(full_path: str):
-        # Allow API requests, admin, and documentation to pass through
-        blocked_prefixes = ["api/", "admin/", "docs", "openapi.json", "documentation", "auth/"]
-        if any(full_path.startswith(prefix) for prefix in blocked_prefixes):
-             raise HTTPException(status_code=404, detail="Not Found")
+    
+    # 2. Try serving from project root (Legacy)
+    file_path = os.path.join(static_path, full_path)
+    if os.path.isfile(file_path):
+        return FileResponse(file_path)
+    
+    index_path = os.path.join(static_path, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
         
-        # 1. Check if the file exists in the root directory (static_path)
-        root_file_path = os.path.join(static_path, full_path)
-        if os.path.isfile(root_file_path):
-            return FileResponse(root_file_path)
-            
-        # 2. Check if the file exists in the frontend/dist directory
-        dist_file_path = os.path.join(frontend_dist, full_path)
-        if os.path.isfile(dist_file_path):
-            return FileResponse(dist_file_path)
-             
-        # 3. SPA Fallback: Serve index.html for any other route
-        return FileResponse(os.path.join(frontend_dist, "index.html"))
-else:
-    print(f"FRONTEND NOT FOUND at {frontend_dist}")
-    print("Running in LEGACY/API-ONLY mode")
-    print(f"Fallback Static Path: {static_path}")
-    # Fallback to serving old static folder if dist doesn't exist
-    app.mount("/", StaticFiles(directory=static_path), name="static")
+    return {"message": "Frontend not deployed. Please run 'npm run build' in the frontend directory."}
 
 if __name__ == "__main__":
     import uvicorn

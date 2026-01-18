@@ -38,8 +38,17 @@ export default function APIKeys() {
             setEnv('SANDBOX');
             setShowModal(false);
             fetchKeys(); // Refresh list
-        } catch (err) {
-            alert("Failed to create key");
+        } catch (err: any) {
+            const errorData = err.response?.data?.detail;
+            if (errorData?.error === 'SANDBOX_KEY_EXISTS') {
+                alert("Only one Sandbox API key is allowed. Use the existing key or rotate it.");
+            } else if (errorData?.error === 'PRODUCTION_KEY_EXISTS') {
+                alert("Only one Production API key is allowed. Please revoke the existing key to rotate.");
+            } else if (errorData?.error === 'BILLING_NOT_ACTIVE') {
+                alert("Activate billing to create a Production API key.");
+            } else {
+                alert(errorData?.message || "Failed to create key");
+            }
         }
     };
 
@@ -185,6 +194,16 @@ export default function APIKeys() {
                                         <option value="SANDBOX">Sandbox (Test)</option>
                                         <option value="PRODUCTION">Production (Live)</option>
                                     </select>
+                                    {env === 'SANDBOX' && keys.find(k => k.environment === 'SANDBOX' && k.status === 'ACTIVE') && (
+                                        <p className="mt-2 text-xs text-amber-600 bg-amber-50 p-2 rounded">
+                                            Warning: You already have an active Sandbox key. You must revoke it first to create a new one.
+                                        </p>
+                                    )}
+                                    {env === 'PRODUCTION' && keys.find(k => k.environment === 'PRODUCTION' && k.status === 'ACTIVE') && (
+                                        <p className="mt-2 text-xs text-amber-600 bg-amber-50 p-2 rounded">
+                                            Warning: You already have an active Production key. Rotate by revoking the old one first.
+                                        </p>
+                                    )}
                                 </div>
                             </div>
                             <div className="flex items-center gap-3 mt-8">

@@ -1,0 +1,238 @@
+{
+    "borrower_id": "BOR-TEST-001",
+    "mobile_money_history": [
+        {
+            "transaction_id": "TX-3336e9",
+            "amount": 200.0,
+            "type": "DEPOSIT",
+            "timestamp": "2026-01-16T14:25:04.899196+00:00",
+            "counterparty": "Customer Payment"
+        },
+        {
+            "transaction_id": "TX-5cc9b8",
+            "amount": 50.0,
+            "type": "WITHDRAWAL",
+            "timestamp": "2026-01-16T11:25:04.899196+00:00",
+            "counterparty": "Personal Expense"
+        },
+        {
+            "transaction_id": "TX-0a7cb8",
+            "amount": 210.0,
+            "type": "DEPOSIT",
+            "timestamp": "2026-01-15T14:25:04.899196+00:00",
+            "counterparty": "Customer Payment"
+        },
+        {
+            "transaction_id": "TX-999436",
+            "amount": 52.0,
+            "type": "WITHDRAWAL",
+            "timestamp": "2026-01-15T11:25:04.899196+00:00",
+            "counterparty": "Personal Expense"
+        },
+        {
+            "transaction_id": "TX-939ae5",
+            "amount": 220.0,
+            "type": "DEPOSIT",
+            "timestamp": "2026-01-14T14:25:04.899196+00:00",
+            "counterparty": "Customer Payment"
+        },
+        {
+            "transaction_id": "TX-54a336",
+            "amount": 54.0,
+            "type": "WITHDRAWAL",
+            "timestamp": "2026-01-14T11:25:04.899196+00:00",
+            "counterparty": "Personal Expense"
+        },
+        {
+            "transaction_id": "TX-4b95a8",
+            "amount": 230.0,
+            "type": "DEPOSIT",
+            "timestamp": "2026-01-13T14:25:04.899196+00:00",
+            "counterparty": "Customer Payment"
+        },
+        {
+            "transaction_id": "TX-d3e173",
+            "amount": 56.0,
+            "type": "WITHDRAWAL",
+            "timestamp": "2026-01-13T11:25:04.899196+00:00",
+            "counterparty": "Personal Expense"
+        },
+        {
+            "transaction_id": "TX-26a2f0",
+            "amount": 240.0,
+            "type": "DEPOSIT",
+            "timestamp": "2026-01-12T14:25:04.899196+00:00",
+            "counterparty": "Customer Payment"
+        },
+        {
+            "transaction_id": "TX-463eda",
+            "amount": 58.0,
+            "type": "WITHDRAWAL",
+            "timestamp": "2026-01-12T11:25:04.899196+00:00",
+            "counterparty": "Personal Expense"
+        },
+        {
+            "transaction_id": "TX-237489",
+            "amount": 250.0,
+            "type": "DEPOSIT",
+            "timestamp": "2026-01-11T14:25:04.899196+00:00",
+            "counterparty": "Customer Payment"
+        },
+        {
+            "transaction_id": "TX-739773",
+            "amount": 60.0,
+            "type": "WITHDRAWAL",
+            "timestamp": "2026-01-11T11:25:04.899196+00:00",
+            "counterparty": "Personal Expense"
+        },
+        {
+            "transaction_id": "TX-5230a9",
+            "amount": 260.0,
+            "type": "DEPOSIT",
+            "timestamp": "2026-01-10T14:25:04.899196+00:00",
+            "counterparty": "Customer Payment"
+        },
+        {
+            "transaction_id": "TX-be1aa5",
+            "amount": 62.0,
+            "type": "WITHDRAWAL",
+            "timestamp": "2026-01-10T11:25:04.899196+00:00",
+            "counterparty": "Personal Expense"
+        },
+        {
+            "transaction_id": "TX-49f522",
+            "amount": 270.0,
+            "type": "DEPOSIT",
+            "timestamp": "2026-01-09T14:25:04.899196+00:00",
+            "counterparty": "Customer Payment"
+        },
+        {
+            "transaction_id": "TX-2a5e83",
+            "amount": 64.0,
+            "type": "WITHDRAWAL",
+            "timestamp": "2026-01-09T11:25:04.899196+00:00",
+            "counterparty": "Personal Expense"
+        },
+        {
+            "transaction_id": "TX-c6fdc0",
+            "amount": 280.0,
+            "type": "DEPOSIT",
+            "timestamp": "2026-01-08T14:25:04.899196+00:00",
+            "counterparty": "Customer Payment"
+        },
+        {
+            "transaction_id": "TX-7e55cf",
+            "amount": 66.0,
+            "type": "WITHDRAWAL",
+            "timestamp": "2026-01-08T11:25:04.899196+00:00",
+            "counterparty": "Personal Expense"
+        },
+        {
+            "transaction_id": "TX-0b7c67",
+            "amount": 290.0,
+            "type": "DEPOSIT",
+            "timestamp": "2026-01-07T14:25:04.899196+00:00",
+            "counterparty": "Customer Payment"
+        },
+        {
+            "transaction_id": "TX-444ceb",
+            "amount": 68.0,
+            "type": "WITHDRAWAL",
+            "timestamp": "2026-01-07T11:25:04.899196+00:00",
+            "counterparty": "Personal Expense"
+        },
+        {
+            "transaction_id": "TX-da4544",
+            "amount": 300.0,
+            "type": "DEPOSIT",
+            "timestamp": "2026-01-06T14:25:04.899196+00:00",
+            "counterparty": "Customer Payment"
+        },
+        {
+            "transaction_id": "TX-c6a21c",
+            "amount": 70.0,
+            "type": "WITHDRAWAL",
+            "timestamp": "2026-01-06T11:25:04.899196+00:00",
+            "counterparty": "Personal Expense"
+        },
+        {
+            "transaction_id": "TX-a64815",
+            "amount": 310.0,
+            "type": "DEPOSIT",
+            "timestamp": "2026-01-05T14:25:04.899196+00:00",
+            "counterparty": "Customer Payment"
+        },
+        {
+            "transaction_id": "TX-dbf844",
+            "amount": 72.0,
+            "type": "WITHDRAWAL",
+            "timestamp": "2026-01-05T11:25:04.899196+00:00",
+            "counterparty": "Personal Expense"
+        },
+        {
+            "transaction_id": "TX-1044c8",
+            "amount": 320.0,
+            "type": "DEPOSIT",
+            "timestamp": "2026-01-04T14:25:04.899196+00:00",
+            "counterparty": "Customer Payment"
+        },
+        {
+            "transaction_id": "TX-805451",
+            "amount": 74.0,
+            "type": "WITHDRAWAL",
+            "timestamp": "2026-01-04T11:25:04.899196+00:00",
+            "counterparty": "Personal Expense"
+        },
+        {
+            "transaction_id": "TX-26bfe5",
+            "amount": 330.0,
+            "type": "DEPOSIT",
+            "timestamp": "2026-01-03T14:25:04.899196+00:00",
+            "counterparty": "Customer Payment"
+        },
+        {
+            "transaction_id": "TX-1141b7",
+            "amount": 76.0,
+            "type": "WITHDRAWAL",
+            "timestamp": "2026-01-03T11:25:04.899196+00:00",
+            "counterparty": "Personal Expense"
+        },
+        {
+            "transaction_id": "ZAN-49129a",
+            "amount": 4500.0,
+            "type": "DEPOSIT",
+            "timestamp": "2026-01-02T17:25:04.899196+00:00",
+            "counterparty": "Zanaco Bank - Salary"
+        },
+        {
+            "transaction_id": "TX-d6d05b",
+            "amount": 340.0,
+            "type": "DEPOSIT",
+            "timestamp": "2026-01-02T14:25:04.899196+00:00",
+            "counterparty": "Customer Payment"
+        },
+        {
+            "transaction_id": "TX-0af728",
+            "amount": 78.0,
+            "type": "WITHDRAWAL",
+            "timestamp": "2026-01-02T11:25:04.899196+00:00",
+            "counterparty": "Personal Expense"
+        },
+        {
+            "transaction_id": "ZAN-a4ff61",
+            "amount": 1200.0,
+            "type": "PAYMENT",
+            "timestamp": "2026-01-06T15:25:04.899196+00:00",
+            "counterparty": "Zanaco - Supplier HQ"
+        }
+    ],
+    "utility_history": [
+        {
+            "utility_name": "ZESCO",
+            "amount": 150.0,
+            "timestamp": "2026-01-11T09:25:04.899196+00:00",
+            "status": "PAID"
+        }
+    ],
+    "airtime_usage_avg": 45.5
+}

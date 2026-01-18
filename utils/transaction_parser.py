@@ -3,6 +3,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from pydantic import BaseModel
 import re
+import sys
 
 # Standardized Transaction Schema
 class Transaction(BaseModel):
@@ -11,6 +12,7 @@ class Transaction(BaseModel):
     amount: float
     direction: str  # "INFLOW", "OUTFLOW"
     description: str
+    type: str = "OTHER"  # "DEPOSIT", "WITHDRAWAL", etc. (Crucial for CapacityAgent)
     source_type: str  # "USER_UPLOADED", "BANK_API", "MOBILE_MONEY_API"
     confidence_weight: float  # 0.0 to 1.0
 
@@ -21,8 +23,8 @@ class AbstractTransactionSource(ABC):
 
 class TransactionParser(AbstractTransactionSource):
     """
-    Parses various file formats into a standardized transaction list.
-    Enforces 'USER_UPLOADED' source type and 0.6 max confidence.
+    Advanced Deterministic Parser for Loan Officer AI.
+    Features: Proximity Pairing, Pipe-Support, Statement/Payslip Auto-Detection.
     """
     
     def parse(self, file_content: bytes, filename: str) -> List[Transaction]:
@@ -34,112 +36,128 @@ class TransactionParser(AbstractTransactionSource):
             raise ValueError("Unsupported file format")
 
     def _parse_pdf(self, file_content: bytes) -> List[Transaction]:
-        """
-        Parses PDF content using regex patterns (Pilot: Zanaco support).
-        """
         import PyPDF2
         import io
         
         transactions = []
-        
         try:
             pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_content))
+            
+            if pdf_reader.is_encrypted:
+                print("[ERROR] PDF is encrypted. Cannot extract data.", flush=True)
+                return []
+
             text = ""
             for page in pdf_reader.pages:
-                text += page.extract_text() + "\n"
+                text += page.extract_text() or ""
+            text += "\n"
         except Exception as e:
-            print(f"Error reading PDF: {e}")
+            print(f"Error reading PDF: {e}", flush=True)
             return []
 
-        # Zanaco/Bank Statement Parsing Logic (Migrated from pdf_parser.py)
-        # Pattern: Ends with D or C, followed by Amount, then Balance
-        # Example: ... D 10.00 1,803.18
-        tx_pattern = re.compile(r'(.*?)\s([DC])\s+([0-9,]+\.[0-9]{2})\s+[0-9,]+\.[0-9]{2}.*?$')
-        date_pattern = re.compile(r'([A-Z][a-z]{2})\s+(\d{1,2}),\s+(\d{4})')
+        if not text.strip():
+            print("[DEBUG] No text extracted from PDF!", flush=True)
+            return []
+
+        # Patterns
+        date_pattern = re.compile(r'(\d{1,2})[-/ ]([A-Za-z]{0,3}\d{0,3})[-/ ](\d{2,4})')
+        amount_pattern = re.compile(r'([0-9,]+\.[0-9]{2})')
         
+        inflow_keywords = ["DEPOSIT", "CREDIT", "SALARY", "RCV", "INC", "EARNINGS", "BASIC", "ALLOWANCE", "NET PAY", "NET_PAY"]
+        outflow_keywords = ["WITHDRAWAL", "PAYMENT", "DEBIT", "SENT", "OUT", "DEDUCTION", "TAX", "PAYE", "NAPSA", "RENT"]
+
         lines = text.split('\n')
-        current_date = None
+        current_date = datetime.now()
+        last_label = None 
         
-        for line in lines:
+        print(f"--- ANALYZING DOCUMENT ({len(lines)} lines) ---", flush=True)
+        
+        for i, line in enumerate(lines):
             line = line.strip()
-            if not line:
+            if not line: continue
+            
+            dm = date_pattern.search(line)
+            if dm:
+                try:
+                    d, m, y = dm.groups()
+                    month_map = {"Jan":1,"Feb":2,"Mar":3,"Apr":4,"May":5,"Jun":6,"Jul":7,"Aug":8,"Sep":9,"Oct":10,"Nov":11,"Dec":12}
+                    year = int(y) + (2000 if int(y) < 100 else 0)
+                    if m.isdigit(): month = int(m)
+                    else: month = month_map.get(m.title()[:3], 1)
+                    current_date = datetime(year, month, int(d))
+                except: pass
+
+            if not any(char.isdigit() for char in line) or (len(line) > 5 and not amount_pattern.search(line)):
+                last_label = line
                 continue
-            
-            # 1. Try to find a date (Context)
-            date_match = date_pattern.search(line)
-            if date_match:
+
+            amounts = amount_pattern.findall(line)
+            if amounts:
                 try:
-                    month, day, year = date_match.groups()
-                    current_date = datetime.strptime(f"{year}-{month}-{day}", "%Y-%b-%d")
-                except:
-                    pass
-            
-            # 2. Try to find a transaction
-            tx_match = tx_pattern.search(line)
-            if tx_match and current_date:
-                try:
-                    description, dc_type, amount_str = tx_match.groups()
-                    amount = float(amount_str.replace(',', ''))
+                    main_amount = float(amounts[0].replace(',', ''))
+                    desc_raw = line
+                    for a in amounts: desc_raw = desc_raw.replace(a, "")
+                    desc_raw = desc_raw.replace("|", "").strip(" –-")
                     
-                    description = description.replace('DIGITAL NFS TRANSACTIONS', '')
-                    description = description.replace('COMMISSION ON', '')
-                    description = description.strip()
+                    final_desc = last_label if last_label and len(desc_raw) < 2 else desc_raw
+                    if not final_desc: final_desc = "Transaction"
                     
-                    direction = "INFLOW" if dc_type == 'C' else "OUTFLOW"
+                    ctx = (final_desc + " " + line).upper()
+                    if any(k in ctx for k in inflow_keywords): 
+                        direction = "INFLOW"
+                        tx_type = "DEPOSIT"
+                    elif any(k in ctx for k in outflow_keywords): 
+                        direction = "OUTFLOW"
+                        tx_type = "WITHDRAWAL"
+                    else: 
+                        direction = "OUTFLOW"
+                        tx_type = "WITHDRAWAL"
                     
+                    if any(x in ctx for x in ["BALANCE", "ACCOUNT", "BANK", "TOTAL"]):
+                        if "GROSS" not in ctx and "NET" not in ctx:
+                            continue
+
                     transactions.append(Transaction(
-                        transaction_id=f"TX-{hash(line+str(amount)) % 1000000}",
+                        transaction_id=f"TX-{hash(line+str(main_amount)) % 1000000}",
                         date=current_date,
-                        amount=amount,
+                        amount=main_amount,
                         direction=direction,
-                        description=description[:50],
+                        type=tx_type,
+                        description=final_desc[:50],
                         source_type="USER_UPLOADED",
-                        confidence_weight=0.6  # MAX CONFIDENCE FOR UPLOADS
+                        confidence_weight=0.7
                     ))
-                except Exception as e:
-                    print(f"Skipping line due to parse error: {e}")
-                    continue
+                    print(f"  [SAVE] {tx_type} {main_amount} ({final_desc[:20]})", flush=True)
+                    last_label = None 
+                except: pass
 
         return transactions
 
     def _parse_csv(self, file_content: bytes) -> List[Transaction]:
-        """
-        Parses CSV content. Assumes simple Date, Description, Amount columns.
-        """
         import csv
-        import io
-        
         transactions = []
         try:
             decoded_file = file_content.decode('utf-8').splitlines()
             reader = csv.DictReader(decoded_file)
-            
             for row in reader:
-                # Basic heuristic mapping
                 date_str = row.get('Date') or row.get('date')
                 amount_str = row.get('Amount') or row.get('amount')
                 desc = row.get('Description') or row.get('description') or "Unknown"
-                
                 if date_str and amount_str:
                     try:
-                        # Try parsing date (assuming YYYY-MM-DD for pilot)
                         date = datetime.strptime(date_str, '%Y-%m-%d')
                         amount = float(amount_str)
-                        direction = "INFLOW" if amount > 0 else "OUTFLOW"
-                        
                         transactions.append(Transaction(
                             transaction_id=f"TX-{hash(str(row)) % 1000000}",
                             date=date,
                             amount=abs(amount),
-                            direction=direction,
+                            direction="INFLOW" if amount > 0 else "OUTFLOW",
+                            type="DEPOSIT" if amount > 0 else "WITHDRAWAL",
                             description=desc,
                             source_type="USER_UPLOADED",
                             confidence_weight=0.6
                         ))
-                    except:
-                        continue
-        except Exception as e:
-            print(f"Error reading CSV: {e}")
+                    except: continue
+        except Exception:
             return []
-            
         return transactions

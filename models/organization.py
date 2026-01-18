@@ -1,7 +1,7 @@
-from pydantic import BaseModel, Field
+from datetime import datetime, timedelta, timezone
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 from enum import Enum
-from datetime import datetime, timedelta, timezone
 
 class OrgStatus(str, Enum):
     ACTIVE = "ACTIVE"
@@ -11,15 +11,23 @@ class OrgEnvironment(str, Enum):
     SANDBOX = "SANDBOX"
     PRODUCTION = "PRODUCTION"
 
-class BillingStatus(str, Enum):
-    ACTIVE = "active"
-    SUSPENDED = "suspended"
-
 class BillingPlan(str, Enum):
-    SANDBOX = "sandbox"
-    STARTER = "starter"
-    PROFESSIONAL = "professional"
-    ENTERPRISE = "enterprise"
+    SANDBOX = "SANDBOX"
+    STARTER = "STARTER"
+    GROWTH = "GROWTH"
+    ENTERPRISE = "ENTERPRISE"
+
+class BillingStatus(str, Enum):
+    FREE = "FREE"
+    ACTIVE = "ACTIVE"
+    PAST_DUE = "PAST_DUE"
+    SUSPENDED = "SUSPENDED"
+
+class PaymentStatus(str, Enum):
+    UNPAID = "UNPAID"
+    PENDING = "PENDING"
+    PAID = "PAID"
+    FAILED = "FAILED"
 
 class Organization(BaseModel):
     id: str = Field(..., description="Unique Organization ID")
@@ -32,14 +40,55 @@ class Organization(BaseModel):
     feature_flags: dict = Field(default_factory=dict, description="Enabled optional features")
     
     # Billing fields
-    plan_name: BillingPlan = Field(BillingPlan.SANDBOX, description="Current billing plan")
-    monthly_limit: int = Field(10, description="Maximum assessments allowed per billing cycle")
-    unit_cost: float = Field(0.00, description="Cost per assessment in USD")
-    usage_count: int = Field(0, description="Number of assessments used in current billing cycle")
-    billing_cycle_start: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Start of current billing cycle")
-    billing_cycle_end: datetime = Field(default_factory=lambda: datetime.now(timezone.utc) + timedelta(days=30), description="End of current billing cycle")
-    billing_status: BillingStatus = Field(BillingStatus.ACTIVE, description="Billing account status")
+    plan: BillingPlan = Field(BillingPlan.SANDBOX, description="Current billing plan")
+    billing_status: BillingStatus = Field(BillingStatus.FREE, description="Billing account status")
+    payment_status: PaymentStatus = Field(PaymentStatus.UNPAID, description="Strict payment status for gatekeeping")
+    last_payment_id: Optional[str] = Field(None, description="ID of the most recent payment attempt")
+    monthly_limit: Optional[int] = Field(None, description="Custom override for monthly limit (e.g. Enterprise)")
+    current_period_start: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Current billing period start")
+    current_period_end: datetime = Field(default_factory=lambda: datetime.now(timezone.utc) + timedelta(days=30), description="Current billing period end")
     
+    @field_validator('status', mode='before')
+    @classmethod
+    def normalize_status(cls, v):
+        if isinstance(v, str):
+            v_upper = v.upper()
+            if v_upper == "ACTIVE": return OrgStatus.ACTIVE
+            if v_upper == "SUSPENDED": return OrgStatus.SUSPENDED
+        return v
+
+    @field_validator('environment', mode='before')
+    @classmethod
+    def normalize_env(cls, v):
+        if isinstance(v, str):
+            v_upper = v.upper()
+            if v_upper == "SANDBOX": return OrgEnvironment.SANDBOX
+            if v_upper == "PRODUCTION": return OrgEnvironment.PRODUCTION
+        return v
+
+    @field_validator('plan', mode='before')
+    @classmethod
+    def normalize_plan(cls, v):
+        if isinstance(v, str):
+            v_upper = v.upper()
+            # Map common variations
+            if "SANDBOX" in v_upper: return BillingPlan.SANDBOX
+            if "STARTER" in v_upper: return BillingPlan.STARTER
+            if "GROWTH" in v_upper: return BillingPlan.GROWTH
+            if "ENTERPRISE" in v_upper: return BillingPlan.ENTERPRISE
+        return v
+    
+    @field_validator('billing_status', mode='before')
+    @classmethod
+    def normalize_billing_status(cls, v):
+        if isinstance(v, str):
+            v_upper = v.upper()
+            if v_upper == "FREE": return BillingStatus.FREE
+            if v_upper == "ACTIVE": return BillingStatus.ACTIVE
+            if v_upper == "PAST_DUE": return BillingStatus.PAST_DUE
+            if v_upper == "SUSPENDED": return BillingStatus.SUSPENDED
+        return v
+
     class Config:
         json_schema_extra = {
             "example": {

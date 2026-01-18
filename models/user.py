@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 from enum import Enum
 from datetime import datetime
@@ -20,3 +20,17 @@ class User(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
     last_login_at: Optional[datetime] = None
 
+    @field_validator('role', mode='before')
+    @classmethod
+    def normalize_role(cls, v):
+        if isinstance(v, str):
+            v_upper = v.upper()
+            # Map legacy roles
+            if v_upper == "ADMIN": return UserRole.ORG_ADMIN
+            if v_upper == "USER": return UserRole.VIEWER
+            
+            # Direct match
+            for role in UserRole:
+                if v_upper == role.value:
+                    return role
+        return v

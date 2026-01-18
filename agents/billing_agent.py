@@ -1,231 +1,184 @@
-"""
-BillingAgent - Handles usage tracking, billing limits, and metering.
-Foundation for future payment integration.
-"""
-
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Optional
-from models.organization import Organization, BillingPlan
+from typing import Dict, Optional, List
+from models.organization import Organization, BillingPlan, BillingStatus, OrgEnvironment
+from models.usage_record import UsageRecord
 from models.usage_log import UsageLog
 from utils.db import Database
-
-# Billing plan configurations
-BILLING_PLANS = {
-    "sandbox": {
-        "monthly_limit": 10,
-        "unit_cost": 0.00,  # Free
-        "name": "Sandbox (Free)"
-    },
-    "starter": {
-        "monthly_limit": 5000,
-        "unit_cost": 0.05,
-        "name": "Starter"
-    },
-    "professional": {
-        "monthly_limit": 25000,
-        "unit_cost": 0.04,
-        "name": "Professional"
-    },
-    "enterprise": {
-        "monthly_limit": 100000,
-        "unit_cost": 0.03,
-        "name": "Enterprise"
-    }
-}
+from pricing_config import PLAN_CONFIG
+from agents.audit_agent import AuditAgent
 
 class BillingAgent:
     """
-    Handles billing operations including usage tracking, limits, and cycle management.
+    Handles environment-isolated billing and usage tracking.
+    Usage is strictly tied to Organization + Environment.
     """
     
     @staticmethod
-    def check_billing_cycle(org: Organization) -> Organization:
-        """
-        Check if billing cycle has ended and reset if needed.
-        
-        Args:
-            org: Organization to check
-            
-        Returns:
-            Updated organization (if cycle was reset)
-        """
+    def check_usage_period(record: UsageRecord) -> UsageRecord:
+        """Resets usage if the period has ended."""
         now = datetime.now(timezone.utc)
-        
-        # Check if cycle has ended
-        if now > org.billing_cycle_end:
-            # Reset billing cycle
-            org.usage_count = 0
-            org.billing_cycle_start = now
-            org.billing_cycle_end = now + timedelta(days=30)
-            
-            # Save updated organization
-            Database.save_organization(org)
-            
-            print(f"[BILLING] Reset billing cycle for org {org.id}")
-        
-        return org
-    
+        if now > record.period_end:
+            record.assessment_count = 0
+            record.period_start = now
+            record.period_end = now + timedelta(days=30)
+            Database.save_usage_record(record)
+        return record
+
     @staticmethod
-    def check_billing_limit(org: Organization) -> tuple[bool, Optional[Dict]]:
-        """
-        Check if organization has exceeded billing limit.
+    def get_plan_limit(org: Organization) -> int:
+        """Get effective monthly limit, respecting custom overrides."""
+        if org.monthly_limit is not None:
+            return org.monthly_limit
         
-        Args:
-            org: Organization to check
+        # Fallback to plan default
+        plan_name = org.plan.value if hasattr(org.plan, 'value') else str(org.plan)
+        # Handle case sensitivity or missing plan
+        config = PLAN_CONFIG.get(plan_name.upper(), PLAN_CONFIG["SANDBOX"])
+        limit = config["monthly_limit"]
+        
+        # If limit is None (Enterprise/Unlimited), return a large number for comparison
+        if limit is None:
+            return float('inf')
             
-        Returns:
-            Tuple of (is_allowed, error_response)
-            - is_allowed: True if usage is under limit
-            - error_response: Dict with error details if limit exceeded, None otherwise
+        return limit
+
+    @staticmethod
+    def check_billing_limit(org: Organization, environment: OrgEnvironment) -> tuple[bool, Optional[Dict]]:
         """
-        # Check if billing is suspended
-        if org.billing_status.value == "suspended":
-            return False, {
-                "error": "Account suspended",
-                "message": "Your account has been suspended. Please contact support to reactivate.",
-                "billing_status": "suspended"
-            }
+        Enforce billing rules:
+        1. Non-active organizations cannot use PRODUCTION.
+        2. SANDBOX is capped (default 10).
+        3. PRODUCTION is capped by plan.
+        """
+        # Load Usage Record
+        record = Database.get_usage_record(org.id, environment)
+        record = BillingAgent.check_usage_period(record)
+
+        # Rule 1: PRODUCTION requires ACTIVE billing status
+        # Note: Enterprise might be "ACTIVE" billing status even if custom check
+        if environment == OrgEnvironment.PRODUCTION:
+            # Check config for production access
+            plan_name = org.plan.value if hasattr(org.plan, 'value') else str(org.plan)
+            config = PLAN_CONFIG.get(plan_name.upper(), PLAN_CONFIG["SANDBOX"])
+            
+            if not config.get("production_access", False):
+                 return False, {
+                    "error": "Upgrade Required",
+                    "code": 402,
+                    "message": "Your current plan does not support Production access. Upgrade to Starter or Growth to unlock live decision processing."
+                }
+
+            # Enforce strict PaymentStatus.PAID for production
+            from models.organization import PaymentStatus
+            if org.payment_status != PaymentStatus.PAID:
+                 return False, {
+                    "error": "Payment Required",
+                    "code": 402,
+                    "message": "You’re currently using the sandbox. Complete payment to unlock live decision processing.",
+                    "payment_status": org.payment_status
+                }
+
+            if org.billing_status not in [BillingStatus.ACTIVE, BillingStatus.FREE]: 
+                 if org.billing_status != BillingStatus.ACTIVE:
+                     return False, {
+                        "error": "Account Suspended",
+                        "code": 402,
+                        "message": "Production usage requires an active billing plan and valid payment status."
+                    }
         
-        # Check usage limit
-        if org.usage_count >= org.monthly_limit:
-            return False, {
-                "error": "Billing limit exceeded",
-                "message": f"You have reached your monthly assessment limit of {org.monthly_limit:,}. Please upgrade your plan or contact support.",
-                "current_usage": org.usage_count,
-                "monthly_limit": org.monthly_limit,
-                "plan_name": org.plan_name.value
-            }
+        # Rule 2: Enforce Limits
+        # Sandbox limit comes from Config directly (usually 10)
+        # Production limit comes from get_plan_limit (supports custom)
         
+        limit = 0
+        if environment == OrgEnvironment.SANDBOX:
+             # Force Sandbox-specific limit from config (usually 10) regardless of Plan?
+             # Yes, Sandbox is usually fixed.
+             limit = PLAN_CONFIG["SANDBOX"]["monthly_limit"]
+        else:
+             limit = BillingAgent.get_plan_limit(org)
+        
+        if record.assessment_count >= limit:
+            if environment == OrgEnvironment.SANDBOX:
+                AuditAgent.log_event("USAGE_LIMIT_REACHED", org.id, {"environment": "SANDBOX"})
+                return False, {
+                    "error": "SANDBOX_LIMIT_REACHED",
+                    "code": 429,
+                    "message": "Sandbox usage limit reached. Upgrade to Production to continue.",
+                    "upgrade_required": True
+                }
+            else:
+                AuditAgent.log_event("USAGE_LIMIT_REACHED", org.id, {"environment": "PRODUCTION"})
+                return False, {
+                    "error": "Plan Limit Reached",
+                    "code": 429,
+                    "message": f"Your {org.plan.value} plan limit of {limit} assessments has been reached."
+                }
+
         return True, None
-    
+
     @staticmethod
     def meter_usage(
         org: Organization,
+        environment: OrgEnvironment,
         api_key_id: str,
         endpoint: str,
-        assessment_id: Optional[str] = None,
-        user_email: Optional[str] = None
+        assessment_id: Optional[str] = None
     ) -> UsageLog:
-        """
-        Record billable usage and increment usage count.
-        Only call this AFTER successful assessment (HTTP 200).
-        """
-        try:
-            # Calculate cost
-            units = 1  # Always 1 for assessments
-            cost = BillingAgent.calculate_cost(org, units)
-            print(f"DEBUG: Metering usage for {org.id}. Type of org: {type(org)}")
-            
-            # Create usage log
-            print("DEBUG: Creating UsageLog object...")
-            usage_log = UsageLog(
-                log_id=f"LOG-{uuid.uuid4().hex[:8].upper()}",
-                org_id=org.id,
-                api_key_id=api_key_id,
-                endpoint=endpoint,
-                units=units,
-                cost=cost,
-                assessment_id=assessment_id,
-                user_email=user_email
-            )
-            print("DEBUG: UsageLog object created successfully.")
-            
-            # Save usage log to database
-            print("DEBUG: Saving UsageLog to DB...")
-            Database.save_usage_log(usage_log)
-            print("DEBUG: UsageLog saved successfully.")
-            
-            # Increment usage count
-            org.usage_count += units
-            Database.save_organization(org)
-            print(f"DEBUG: Organization usage count updated: {org.usage_count}")
-            
-            print(f"[BILLING] Metered usage for {org.id}: {org.usage_count}/{org.monthly_limit} (${cost:.2f})")
-            
-            return usage_log
-        except Exception as e:
-            print(f"🔥 BILLING CRASH in meter_usage: {e}")
-            import traceback
-            traceback.print_exc()
-            raise e
-    
+        """Increments environment-specific usage count."""
+
+        
+        # Record Log for Audit
+        usage_log = UsageLog(
+            log_id=f"LOG-{uuid.uuid4().hex[:8].upper()}",
+            org_id=org.id,
+            api_key_id=api_key_id,
+            endpoint=endpoint,
+            units=1,
+            cost=0.0, # Handled by subscription logic/external
+            assessment_id=assessment_id
+        )
+        Database.save_usage_log(usage_log)
+
+        # Update Usage Record
+        record = Database.get_usage_record(org.id, environment)
+        record.assessment_count += 1
+        record.last_updated = datetime.now(timezone.utc)
+        Database.save_usage_record(record)
+        
+        return usage_log
+
     @staticmethod
-    def calculate_cost(org: Organization, units: int = 1) -> float:
-        """
-        Calculate cost for given units based on organization's plan.
+    def get_full_usage_summary(org: Organization) -> Dict:
+        """Aggregation for the Usage & Billing dashboard."""
+        # Refactored to use direct lookups instead of list query (avoid index issues)
+        sandbox = Database.get_usage_record(org.id, OrgEnvironment.SANDBOX)
+        production = Database.get_usage_record(org.id, OrgEnvironment.PRODUCTION)
+
         
-        Args:
-            org: Organization
-            units: Number of billable units (default 1)
-            
-        Returns:
-            Cost in USD
-        """
-        return org.unit_cost * units
-    
-    @staticmethod
-    def get_usage_summary(org: Organization) -> Dict:
-        """
-        Get usage summary for dashboard display.
+        plan_name = org.plan.value if hasattr(org.plan, 'value') else str(org.plan)
+        plan_config = PLAN_CONFIG.get(plan_name.upper(), PLAN_CONFIG["SANDBOX"])
         
-        Args:
-            org: Organization
-            
-        Returns:
-            Dict with usage summary
-        """
-        # Ensure cycle is current
-        org = BillingAgent.check_billing_cycle(org)
-        
-        # Calculate estimated cost
-        estimated_cost = BillingAgent.calculate_cost(org, org.usage_count)
-        
-        # Calculate percentage used
-        percent_used = (org.usage_count / org.monthly_limit * 100) if org.monthly_limit > 0 else 0
-        
-        # Get plan details
-        plan_config = BILLING_PLANS.get(org.plan_name.value, {})
-        
+        effective_limit = BillingAgent.get_plan_limit(org)
+        if effective_limit == float('inf'):
+            effective_limit = 1000000000 # Return large number for frontend "Unlimited" check
+
+
         return {
-            "plan_name": org.plan_name.value,
-            "plan_display_name": plan_config.get("name", org.plan_name.value),
-            "usage_count": org.usage_count,
-            "monthly_limit": org.monthly_limit,
-            "percent_used": round(percent_used, 1),
-            "unit_cost": org.unit_cost,
-            "estimated_cost": round(estimated_cost, 2),
+            "sandbox": {
+                "usage": sandbox.assessment_count,
+                "limit": PLAN_CONFIG["SANDBOX"]["monthly_limit"],
+                "status": "Free"
+            },
+            "production": {
+                "usage": production.assessment_count,
+                "limit": effective_limit,
+                "status": org.billing_status.value
+            },
+            "current_plan": org.plan.value,
             "billing_status": org.billing_status.value,
-            "cycle_start": org.billing_cycle_start.isoformat(),
-            "cycle_end": org.billing_cycle_end.isoformat(),
-            "days_remaining": (org.billing_cycle_end - datetime.now(timezone.utc)).days
+            "payment_status": org.payment_status.value if hasattr(org.payment_status, 'value') else org.payment_status,
+            "period_end": org.current_period_end.isoformat()
         }
-    
-    @staticmethod
-    def get_plan_config(plan_name: str) -> Dict:
-        """
-        Get configuration for a specific billing plan.
-        
-        Args:
-            plan_name: Plan name (sandbox, starter, professional, enterprise)
-            
-        Returns:
-            Plan configuration dict
-        """
-        return BILLING_PLANS.get(plan_name, BILLING_PLANS["sandbox"])
-    
-    # TODO: Future payment integration points
-    # TODO: def process_payment(org: Organization, amount: float) -> bool:
-    #       """Process payment via Stripe/Paystack"""
-    
-    # TODO: def generate_invoice(org: Organization, start_date, end_date) -> Invoice:
-    #       """Generate PDF invoice for billing period"""
-    
-    # TODO: def send_usage_alert(org: Organization, threshold: float):
-    #       """Send email when usage reaches threshold (e.g., 80%)"""
-    
-    # TODO: def handle_payment_failure(org: Organization):
-    #       """Handle failed payment - send notifications, suspend if needed"""
-    
-    # TODO: def upgrade_plan(org: Organization, new_plan: str, prorate: bool = True):
-    #       """Upgrade plan with optional pro-rating"""
+
