@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth, api } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
+import { X, Activity, Shield, Key, BarChart, AlertTriangle, CheckCircle2, RefreshCw, Slash, Settings } from 'lucide-react';
 
 export default function AdminDashboard() {
     const { user } = useAuth();
@@ -20,9 +21,17 @@ export default function AdminDashboard() {
 
     // Form State
     const [newOrgName, setNewOrgName] = useState('');
-    const [newOrgPlan, setNewOrgPlan] = useState('starter');
+    const [newOrgPlan, setNewOrgPlan] = useState('sandbox');
     const [newOrgAdminEmail, setNewOrgAdminEmail] = useState('');
     const [credentials, setCredentials] = useState<{ email: string, password: string } | null>(null);
+
+    // Organization Detail Drawer State
+    const [selectedOrgId, setSelectedOrgId] = useState<string | null>(null);
+    const [orgDetails, setOrgDetails] = useState<any>(null);
+    const [detailsLoading, setDetailsLoading] = useState(false);
+    const [actionLoading, setActionLoading] = useState(false);
+    const [newLimit, setNewLimit] = useState<number>(0);
+    const [rotatedKey, setRotatedKey] = useState<string | null>(null);
 
     useEffect(() => {
         if (user && user.role !== 'SUPER_ADMIN') {
@@ -116,6 +125,73 @@ export default function AdminDashboard() {
             alert("Failed to update AI settings");
         } finally {
             setLoading(false);
+        }
+    };
+
+    const fetchOrgDetails = async (orgId: string) => {
+        setSelectedOrgId(orgId);
+        setDetailsLoading(true);
+        setRotatedKey(null);
+        try {
+            const res = await api.get(`/admin/organizations/${orgId}/details`);
+            setOrgDetails(res.data);
+            setNewLimit(res.data.organization.monthly_limit || 0);
+        } catch (e) {
+            console.error(e);
+            alert("Failed to fetch organization details.");
+        } finally {
+            setDetailsLoading(false);
+        }
+    };
+
+    const handleToggleOrgStatus = async () => {
+        if (!orgDetails) return;
+        const newStatus = orgDetails.organization.status === 'ACTIVE' ? 'SUSPENDED' : 'ACTIVE';
+        if (!window.confirm(`Are you sure you want to ${newStatus.toLowerCase()} this organization?`)) return;
+
+        setActionLoading(true);
+        try {
+            await api.patch(`/admin/organizations/${orgDetails.organization.id}`, { status: newStatus });
+            await fetchOrgDetails(orgDetails.organization.id);
+            fetchOrgs(); // Refresh list
+        } catch (e) {
+            console.error(e);
+            alert("Failed to update organization status.");
+        } finally {
+            setActionLoading(false);
+        }
+    };
+
+    const handleRotateKeys = async () => {
+        if (!orgDetails) return;
+        if (!window.confirm("WARNING: This will revoke ALL existing API keys for this organization and generate a new one. This cannot be undone. Proceed?")) return;
+
+        setActionLoading(true);
+        try {
+            const res = await api.post(`/admin/organizations/${orgDetails.organization.id}/rotate-keys`);
+            setRotatedKey(res.data.new_key);
+            alert("API keys rotated successfully. Please copy the new key below.");
+        } catch (e) {
+            console.error(e);
+            alert("Failed to rotate API keys.");
+        } finally {
+            setActionLoading(false);
+        }
+    };
+
+    const handleUpdateLimit = async () => {
+        if (!orgDetails) return;
+        setActionLoading(true);
+        try {
+            await api.patch(`/admin/organizations/${orgDetails.organization.id}`, { monthly_limit: newLimit });
+            await fetchOrgDetails(orgDetails.organization.id);
+            fetchOrgs(); // Refresh list
+            alert("Limit updated successfully.");
+        } catch (e) {
+            console.error(e);
+            alert("Failed to update usage limit.");
+        } finally {
+            setActionLoading(false);
         }
     };
 
@@ -240,11 +316,15 @@ export default function AdminDashboard() {
                             </thead>
                             <tbody>
                                 {orgs.map((org: any) => (
-                                    <tr key={org.id} className="border-b hover:bg-slate-50">
+                                    <tr
+                                        key={org.id}
+                                        className="border-b hover:bg-indigo-50/30 cursor-pointer transition-colors"
+                                        onClick={() => fetchOrgDetails(org.id)}
+                                    >
                                         <td className="p-4 font-mono text-sm">{org.id}</td>
                                         <td className="p-4 font-medium">{org.name}</td>
                                         <td className="p-4">
-                                            <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs uppercase">{org.plan_name}</span>
+                                            <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs uppercase">{org.plan_name || org.plan}</span>
                                         </td>
                                         <td className="p-4">
                                             {org.status === 'ACTIVE' ? (
@@ -365,6 +445,164 @@ export default function AdminDashboard() {
                         </div>
                     </div>
                 </div>
+            )}
+
+            {/* Organization Detail Side Drawer */}
+            <div
+                className={`fixed inset-y-0 right-0 w-96 bg-white shadow-2xl border-l transform transition-transform duration-300 ease-in-out z-50 ${selectedOrgId ? 'translate-x-0' : 'translate-x-full'}`}
+            >
+                {detailsLoading ? (
+                    <div className="flex items-center justify-center h-full text-slate-400">
+                        <Activity className="animate-spin mr-2" />
+                        Loading details...
+                    </div>
+                ) : orgDetails ? (
+                    <div className="flex flex-col h-full">
+                        {/* Drawer Header */}
+                        <div className="p-6 border-b flex justify-between items-center bg-slate-50">
+                            <div>
+                                <h3 className="font-bold text-lg text-slate-800">{orgDetails.organization.name}</h3>
+                                <p className="text-xs font-mono text-slate-500">{orgDetails.organization.id}</p>
+                            </div>
+                            <button
+                                onClick={() => setSelectedOrgId(null)}
+                                className="p-2 hover:bg-slate-200 rounded-full transition-colors"
+                            >
+                                <X size={20} />
+                            </button>
+                        </div>
+
+                        {/* Drawer Body */}
+                        <div className="flex-1 overflow-y-auto p-6 space-y-8">
+                            {/* Metrics Section */}
+                            <section>
+                                <h4 className="flex items-center gap-2 text-xs font-bold text-slate-400 uppercase tracking-widest mb-4">
+                                    <BarChart size={14} /> Usage Metrics
+                                </h4>
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div className="p-3 bg-slate-50 rounded-lg border">
+                                        <p className="text-xs text-slate-500 mb-1">Last 24h</p>
+                                        <p className="text-2xl font-bold text-indigo-600">{orgDetails.metrics.usage_24h}</p>
+                                    </div>
+                                    <div className="p-3 bg-slate-50 rounded-lg border">
+                                        <p className="text-xs text-slate-500 mb-1">Last 7d</p>
+                                        <p className="text-2xl font-bold text-indigo-600">{orgDetails.metrics.usage_7d}</p>
+                                    </div>
+                                </div>
+                                {orgDetails.metrics.last_assessment_at && (
+                                    <p className="mt-3 text-[10px] text-slate-400 italic">
+                                        Last assessment: {new Date(orgDetails.metrics.last_assessment_at).toLocaleString()}
+                                    </p>
+                                )}
+                            </section>
+
+                            {/* Config Section */}
+                            <section>
+                                <h4 className="flex items-center gap-2 text-xs font-bold text-slate-400 uppercase tracking-widest mb-4">
+                                    <Shield size={14} /> Configuration
+                                </h4>
+                                <div className="space-y-3">
+                                    <div className="flex justify-between items-center text-sm">
+                                        <span className="text-slate-600">Environment</span>
+                                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${orgDetails.organization.environment === 'PRODUCTION' ? 'bg-orange-100 text-orange-700' : 'bg-slate-100 text-slate-600'}`}>
+                                            {orgDetails.organization.environment}
+                                        </span>
+                                    </div>
+                                    <div className="flex justify-between items-start text-sm pt-1">
+                                        <span className="text-slate-600">Feature Flags</span>
+                                        <div className="text-right">
+                                            {Object.keys(orgDetails.organization.feature_flags || {}).length > 0 ? (
+                                                Object.keys(orgDetails.organization.feature_flags).map(flag => (
+                                                    <span key={flag} className="inline-block px-1.5 py-0.5 bg-indigo-50 text-indigo-700 rounded text-[10px] ml-1 mb-1">
+                                                        {flag}
+                                                    </span>
+                                                ))
+                                            ) : (
+                                                <span className="text-slate-400 italic text-xs">None enabled</span>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            </section>
+
+                            {/* Actions Section */}
+                            <section>
+                                <h4 className="flex items-center gap-2 text-xs font-bold text-red-400 uppercase tracking-widest mb-4">
+                                    <AlertTriangle size={14} /> Administrative Actions
+                                </h4>
+                                <div className="space-y-4">
+                                    {/* Suspend / Resume */}
+                                    <div className="p-4 border border-dashed rounded-lg bg-red-50/30">
+                                        <p className="text-xs font-medium text-slate-700 mb-2">Access Control</p>
+                                        <button
+                                            onClick={handleToggleOrgStatus}
+                                            disabled={actionLoading}
+                                            className={`w-full py-2 rounded font-bold text-xs flex items-center justify-center gap-2 transition-colors ${orgDetails.organization.status === 'ACTIVE' ? 'bg-red-600 text-white hover:bg-red-700' : 'bg-green-600 text-white hover:bg-green-700'}`}
+                                        >
+                                            {orgDetails.organization.status === 'ACTIVE' ? <Slash size={14} /> : <CheckCircle2 size={14} />}
+                                            {orgDetails.organization.status === 'ACTIVE' ? 'Suspend API Access' : 'Resume API Access'}
+                                        </button>
+                                    </div>
+
+                                    {/* Rotate Keys */}
+                                    <div className="p-4 border border-dashed rounded-lg bg-orange-50/30">
+                                        <p className="text-xs font-medium text-slate-700 mb-2">Security Override</p>
+                                        {!rotatedKey ? (
+                                            <button
+                                                onClick={handleRotateKeys}
+                                                disabled={actionLoading}
+                                                className="w-full py-2 bg-orange-600 text-white rounded font-bold text-xs flex items-center justify-center gap-2 hover:bg-orange-700 transition-colors"
+                                            >
+                                                <RefreshCw className={actionLoading ? 'animate-spin' : ''} size={14} />
+                                                Force Key Rotation
+                                            </button>
+                                        ) : (
+                                            <div className="bg-white p-3 border rounded border-orange-200">
+                                                <p className="text-[10px] text-orange-600 font-bold mb-1">NEW API KEY GENERATED:</p>
+                                                <code className="text-xs block bg-slate-50 p-2 rounded break-all select-all font-mono border">
+                                                    {rotatedKey}
+                                                </code>
+                                                <p className="text-[9px] text-slate-400 mt-2 italic text-center">Copy immediately. All previous keys are dead.</p>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* Adjust Limits */}
+                                    <div className="p-4 border border-dashed rounded-lg bg-indigo-50/30">
+                                        <p className="text-xs font-medium text-slate-700 mb-2">Operational Quota</p>
+                                        <div className="flex gap-2">
+                                            <input
+                                                type="number"
+                                                value={newLimit}
+                                                onChange={e => setNewLimit(parseInt(e.target.value))}
+                                                className="flex-1 border rounded p-2 text-sm focus:ring-1 focus:ring-indigo-500 outline-none"
+                                            />
+                                            <button
+                                                onClick={handleUpdateLimit}
+                                                disabled={actionLoading}
+                                                className="bg-indigo-600 text-white px-3 py-2 rounded font-bold text-xs hover:bg-indigo-700 transition-colors"
+                                            >
+                                                Update
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </section>
+                        </div>
+                    </div>
+                ) : (
+                    <div className="flex items-center justify-center h-full text-slate-400 italic">
+                        Select an organization to view details
+                    </div>
+                )}
+            </div>
+
+            {/* Click-away backdrop */}
+            {selectedOrgId && (
+                <div
+                    className="fixed inset-0 bg-slate-900/20 backdrop-blur-[1px] z-40 transition-opacity"
+                    onClick={() => setSelectedOrgId(null)}
+                />
             )}
         </div>
     );

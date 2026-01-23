@@ -1,15 +1,18 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import axios from 'axios';
+import { auth } from '../firebase';
+import { onAuthStateChanged, signOut, User as FirebaseUser } from 'firebase/auth';
 
 // Configure Axios
 const api = axios.create({
-    baseURL: 'http://localhost:8000', // Backend URL
+    baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000',
 });
 
 // Add token to requests
-api.interceptors.request.use((config) => {
-    const token = localStorage.getItem('token');
-    if (token) {
+api.interceptors.request.use(async (config) => {
+    const user = auth.currentUser;
+    if (user) {
+        const token = await user.getIdToken();
         config.headers.Authorization = `Bearer ${token}`;
     }
     return config;
@@ -17,9 +20,8 @@ api.interceptors.request.use((config) => {
 
 interface AuthContextType {
     user: any;
-    login: (token: string) => Promise<void>;
-    logout: () => void;
     isLoading: boolean;
+    logout: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType>(null!);
@@ -29,44 +31,35 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const [isLoading, setIsLoading] = useState(true);
 
     useEffect(() => {
-        const token = localStorage.getItem('token');
-        if (token) {
-            api.get('/auth/me')
-                .then(res => setUser(res.data))
-                .catch(() => {
-                    localStorage.removeItem('token');
+        const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+            if (firebaseUser) {
+                try {
+                    // Sync with backend to get organization/role data
+                    const token = await firebaseUser.getIdToken();
+                    const res = await axios.get(`${api.defaults.baseURL}/auth/me`, {
+                        headers: { Authorization: `Bearer ${token}` }
+                    });
+                    setUser(res.data);
+                } catch (err) {
+                    console.error("Failed to sync user with backend", err);
                     setUser(null);
-                })
-                .finally(() => setIsLoading(false));
-        } else {
+                }
+            } else {
+                setUser(null);
+            }
             setIsLoading(false);
-        }
+        });
+
+        return () => unsubscribe();
     }, []);
 
-    const login = async (token: string) => {
-        localStorage.setItem('token', token);
-        setIsLoading(true);
-        try {
-            // Manually set header here since interceptor might not pick it up immediately if instance is reused?
-            // Actually interceptor runs on every request so it should be fine.
-            const res = await api.get('/auth/me');
-            setUser(res.data);
-        } catch (err) {
-            console.error("Login verification failed", err);
-            localStorage.removeItem('token');
-            setUser(null);
-        } finally {
-            setIsLoading(false);
-        }
-    };
-
-    const logout = () => {
-        localStorage.removeItem('token');
+    const logout = async () => {
+        await signOut(auth);
         setUser(null);
     };
 
     return (
-        <AuthContext.Provider value={{ user, login, logout, isLoading }}>
+        <AuthContext.Provider value={{ user, logout, isLoading }}>
             {children}
         </AuthContext.Provider>
     );

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { CreditCard, TrendingUp, Calendar, AlertCircle, Shield, Rocket, X, Globe, Smartphone, Landmark, CheckCircle2 } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
+import { useAuth, api } from '../context/AuthContext';
 
 interface UsageRecord {
     usage: number;
@@ -17,18 +17,32 @@ interface UsageSummary {
     period_end: string;
 }
 
+const COLOR_CLASSES: Record<string, { bar: string, icon: string, badge: string }> = {
+    slate: {
+        bar: 'bg-indigo-600',
+        icon: 'text-indigo-600',
+        badge: 'bg-indigo-50 text-indigo-700'
+    },
+    blue: {
+        bar: 'bg-blue-600',
+        icon: 'text-blue-600',
+        badge: 'bg-blue-50 text-blue-700'
+    }
+};
+
 const UsageCard = ({ title, record, icon: Icon, color }: { title: string, record?: UsageRecord, icon: any, color: string }) => {
     if (!record) return null;
     const percent = (record.usage / record.limit) * 100;
+    const theme = COLOR_CLASSES[color] || COLOR_CLASSES.blue;
 
     return (
         <div className="bg-white rounded-lg border border-slate-200 p-6">
             <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-3">
-                    <Icon className={`text-${color}-600`} size={24} />
+                    <Icon className={theme.icon} size={24} />
                     <h3 className="font-semibold text-slate-900">{title}</h3>
                 </div>
-                <span className={`px-2 py-1 rounded-md text-xs font-bold uppercase tracking-wider bg-${color}-50 text-${color}-700`}>
+                <span className={`px-2 py-1 rounded-md text-xs font-bold uppercase tracking-wider ${theme.badge}`}>
                     {record.status}
                 </span>
             </div>
@@ -40,13 +54,13 @@ const UsageCard = ({ title, record, icon: Icon, color }: { title: string, record
 
             <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden mb-2">
                 <div
-                    className={`h-full transition-all ${percent >= 100 ? 'bg-red-600' : percent >= 90 ? 'bg-red-500' : percent >= 75 ? 'bg-yellow-500' : `bg-${color}-500`}`}
+                    className={`h-full transition-all duration-1000 ${percent >= 100 ? 'bg-red-600' : percent >= 90 ? 'bg-red-500' : percent >= 75 ? 'bg-yellow-500' : theme.bar}`}
                     style={{ width: `${Math.min(percent, 100)}%` }}
                 />
             </div>
             <div className="flex justify-between items-center text-xs">
-                <p className={`${percent >= 100 ? 'text-red-600 font-bold' : 'text-slate-400'}`}>
-                    {percent >= 100 ? 'Limit Exhausted' : `${percent.toFixed(1)}% used`}
+                <p className={`${percent >= 100 ? 'text-red-600 font-semibold' : 'text-slate-400'}`}>
+                    {percent >= 100 ? 'Limit Exhausted' : `${percent.toFixed(0)}% of ${title.toLowerCase().includes('sandbox') ? 'sandbox' : 'production'} limit used`}
                 </p>
                 {percent >= 100 && record.status === 'Free' && (
                     <span className="text-red-600 font-medium">Upgrade Required</span>
@@ -76,16 +90,10 @@ export default function UsageBilling() {
 
     const fetchUsage = async () => {
         try {
-            const token = localStorage.getItem('token');
-            const response = await fetch('http://localhost:8000/billing/usage', {
-                headers: { 'Authorization': `Bearer ${token}` }
-            });
-
-            if (!response.ok) throw new Error('Failed to fetch usage data');
-            const data = await response.json();
-            setUsage(data);
+            const response = await api.get('/billing/usage');
+            setUsage(response.data);
         } catch (err: any) {
-            setError(err.message);
+            setError(err.response?.data?.detail || err.message);
         } finally {
             setLoading(false);
         }
@@ -93,14 +101,8 @@ export default function UsageBilling() {
 
     const fetchPayments = async () => {
         try {
-            const token = localStorage.getItem('token');
-            const response = await fetch('http://localhost:8000/billing/payments', {
-                headers: { 'Authorization': `Bearer ${token}` }
-            });
-            if (response.ok) {
-                const data = await response.json();
-                setPayments(data);
-            }
+            const response = await api.get('/billing/payments');
+            setPayments(response.data);
         } catch (err) {
             console.error('Failed to fetch payments', err);
         }
@@ -117,23 +119,13 @@ export default function UsageBilling() {
         setUpgrading(true);
         setError('');
         try {
-            const token = localStorage.getItem('token');
-            const response = await fetch('http://localhost:8000/billing/upgrade', {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    plan: selectedPlan,
-                    gateway,
-                    phone_number: phoneNumber
-                })
+            const response = await api.post('/billing/upgrade', {
+                plan: selectedPlan,
+                gateway,
+                phone_number: phoneNumber
             });
 
-            const result = await response.json();
-            if (!response.ok) throw new Error(result.detail || 'Upgrade failed');
-
+            const result = response.data;
             setPaymentResult(result);
 
             if (gateway === 'LIPILA') {
@@ -142,14 +134,17 @@ export default function UsageBilling() {
                 // Keep modal open to show invoice
             } else {
                 // Redirect for Stripe/Card
-                if (result.checkout_url) {
+                if (result.status === 'PAID') {
+                    // Simulation success - just show the modal success state
+                    fetchUsage();
+                } else if (result.checkout_url) {
                     window.location.href = result.checkout_url;
                 }
             }
 
             fetchUsage();
         } catch (err: any) {
-            alert(err.message);
+            alert(err.response?.data?.detail || err.message);
         } finally {
             setUpgrading(false);
         }
@@ -182,12 +177,9 @@ export default function UsageBilling() {
             </div>
 
             {usage.payment_status !== 'PAID' && (
-                <div className="bg-slate-900 text-white p-6 rounded-2xl flex items-center justify-between gap-6 shadow-xl relative overflow-hidden group">
-                    <div className="absolute right-0 top-0 opacity-10 -translate-y-1/2 translate-x-1/4 group-hover:scale-110 transition-transform">
-                        <Rocket size={200} />
-                    </div>
+                <div className="bg-slate-900 text-white p-6 rounded-lg flex items-center justify-between gap-6 relative overflow-hidden group">
                     <div className="relative z-10">
-                        <h3 className="text-xl font-bold mb-2">Unlock Production API Access 🚀</h3>
+                        <h3 className="text-xl font-semibold mb-2">Unlock Production API Access</h3>
                         <p className="text-slate-400 text-sm max-w-xl leading-relaxed">
                             You’re currently using the sandbox. Complete payment to unlock live decision processing for your MFI.
                             Our production engine is strictly conservative and rationally consistent.
@@ -198,7 +190,7 @@ export default function UsageBilling() {
                             const starter = document.getElementById('plan-starter');
                             starter?.scrollIntoView({ behavior: 'smooth' });
                         }}
-                        className="bg-white text-slate-900 px-6 py-3 rounded-xl font-bold shrink-0 hover:bg-slate-100 transition-all relative z-10 active:scale-95"
+                        className="bg-white text-slate-900 px-6 py-2 rounded-lg font-semibold shrink-0 hover:bg-slate-100 transition-all relative z-10 active:scale-95"
                     >
                         Activate Now
                     </button>
@@ -224,10 +216,13 @@ export default function UsageBilling() {
                             <div className="w-12 h-12 bg-slate-100 rounded-full flex items-center justify-center mb-3 text-slate-400">
                                 <Shield size={24} />
                             </div>
-                            <h4 className="font-bold text-slate-900">Production API Locked</h4>
+                            <h4 className="font-semibold text-slate-900">Production API Locked</h4>
                             <p className="text-[10px] text-slate-500 mt-1 max-w-[200px]">
                                 Payment {usage.payment_status.toLowerCase()} for {usage.current_plan}.
                                 Complete payment to enable live requests.
+                            </p>
+                            <p className="text-[9px] text-slate-400 mt-2 font-medium">
+                                Rest assured: No live traffic is processed until activation.
                             </p>
                         </div>
                     )}
@@ -251,10 +246,11 @@ export default function UsageBilling() {
                     <div id="plan-starter">
                         <PlanCard
                             name="STARTER"
-                            price="$49"
+                            price="$1"
                             limit="1,000"
                             features={["Production Access", "Email Support"]}
                             currentPlan={usage.current_plan}
+                            paymentStatus={usage.payment_status}
                             onUpgrade={() => handlePlanSelect('STARTER')}
                             loading={upgrading}
                         />
@@ -268,6 +264,7 @@ export default function UsageBilling() {
                             limit="5,000"
                             features={["Production Access", "Priority Support", "Behavioral Intel"]}
                             currentPlan={usage.current_plan}
+                            paymentStatus={usage.payment_status}
                             onUpgrade={() => handlePlanSelect('GROWTH')}
                             loading={upgrading}
                             highlight
@@ -281,6 +278,7 @@ export default function UsageBilling() {
                         limit="Unlimited"
                         features={["Custom Limits", "SLA Support", "Dedicated Account Manager"]}
                         currentPlan={usage.current_plan}
+                        paymentStatus={usage.payment_status}
                         onUpgrade={() => alert("Please contact sales for Enterprise upgrades.")}
                         loading={false}
                     />
@@ -393,18 +391,23 @@ export default function UsageBilling() {
 
                                     {selectedGateway === 'LIPILA' && (
                                         <div className="mt-6 animate-in slide-in-from-top-2 duration-300">
-                                            <label className="block text-sm font-medium text-slate-700 mb-2">
+                                            <label
+                                                htmlFor="phone-number-field"
+                                                className="block text-sm font-medium text-slate-700 mb-2"
+                                            >
                                                 Phone Number (Zambia)
                                             </label>
                                             <div className="relative">
                                                 <input
-                                                    type="tel"
+                                                    id="phone-number-field"
+                                                    type="text"
+                                                    autoFocus
                                                     placeholder="097xxxxxxx / 096xxxxxxx"
-                                                    className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none transition-all pr-12"
+                                                    className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none transition-all pr-12 bg-white text-slate-900 relative z-10"
                                                     value={phoneNumber}
                                                     onChange={(e) => setPhoneNumber(e.target.value)}
                                                 />
-                                                <Smartphone className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
+                                                <Smartphone className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 z-20 pointer-events-none" size={20} />
                                             </div>
                                             <p className="text-[10px] text-slate-500 mt-2">
                                                 You will receive a prompt on your phone to confirm the transaction.
@@ -415,7 +418,7 @@ export default function UsageBilling() {
                                     <button
                                         onClick={() => handleUpgrade(selectedGateway)}
                                         disabled={upgrading || (selectedGateway === 'LIPILA' && !phoneNumber)}
-                                        className="w-full mt-8 bg-slate-900 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg"
+                                        className="w-full mt-8 bg-slate-900 text-white py-3 rounded-lg font-semibold flex items-center justify-center gap-2 hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-sm"
                                     >
                                         {upgrading ? (
                                             <>
@@ -425,7 +428,6 @@ export default function UsageBilling() {
                                         ) : (
                                             <>
                                                 Pay Now
-                                                <Rocket size={18} />
                                             </>
                                         )}
                                     </button>
@@ -523,22 +525,25 @@ const GatewayOption = ({ id, name, icon: Icon, description, selected, onSelect }
     );
 };
 
-const PlanCard = ({ name, price, limit, features, currentPlan, onUpgrade, loading, highlight = false }: any) => {
-    const isCurrent = currentPlan === name;
+const PlanCard = ({ name, price, limit, features, currentPlan, paymentStatus, onUpgrade, loading, highlight = false }: any) => {
+    const isSelected = currentPlan === name;
+    const isPaid = isSelected && paymentStatus === 'PAID';
 
     // Logic: Highlight (Blue) only if it's NOT the current plan.
-    // Current Plan (Green) takes precedence.
-    const showHighlight = highlight && !isCurrent;
+    // Paid Plan (Green) takes precedence.
+    const showHighlight = highlight && !isSelected;
 
     return (
-        <div className={`border rounded-xl p-6 flex flex-col relative transition-all duration-200 
-            ${isCurrent
+        <div className={`border rounded-lg p-6 flex flex-col relative transition-all duration-200 
+            ${isPaid
                 ? 'border-green-500 ring-2 ring-green-100 bg-green-50/10'
-                : showHighlight
-                    ? 'border-primary ring-1 ring-primary shadow-lg shadow-primary/5'
-                    : 'border-slate-200 hover:border-slate-300'
+                : isSelected
+                    ? 'border-yellow-500 bg-yellow-50/5'
+                    : showHighlight
+                        ? 'border-primary ring-1 ring-primary shadow-sm shadow-primary/5'
+                        : 'border-slate-200 hover:border-slate-300'
             } 
-            ${isCurrent ? 'scale-[1.02]' : ''}
+            ${isPaid ? 'scale-[1.01]' : ''}
         `}>
             {/* Badges */}
             {showHighlight && (
@@ -547,15 +552,21 @@ const PlanCard = ({ name, price, limit, features, currentPlan, onUpgrade, loadin
                 </div>
             )}
 
-            {isCurrent && (
+            {isPaid && (
                 <div className="absolute -top-3 left-1/2 -translate-x-1/2 bg-green-600 text-white text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wider flex items-center gap-1">
                     <div className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
                     Active Plan
                 </div>
             )}
 
+            {isSelected && !isPaid && (
+                <div className="absolute -top-3 left-1/2 -translate-x-1/2 bg-yellow-600 text-white text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wider flex items-center gap-1">
+                    Pending Payment
+                </div>
+            )}
+
             <div className="mb-4 mt-2">
-                <h4 className={`text-lg font-bold ${isCurrent ? 'text-green-900' : 'text-slate-900'}`}>{name}</h4>
+                <h4 className={`text-lg font-semibold ${isPaid ? 'text-green-900' : isSelected ? 'text-yellow-900' : 'text-slate-900'}`}>{name}</h4>
                 <div className="flex items-baseline gap-1 mt-2">
                     <span className="text-3xl font-bold text-slate-900">{price}</span>
                     {price !== "Custom" && <span className="text-slate-500">/mo</span>}
@@ -566,7 +577,7 @@ const PlanCard = ({ name, price, limit, features, currentPlan, onUpgrade, loadin
             <ul className="space-y-3 mb-8 flex-1">
                 {features.map((feat: string, i: number) => (
                     <li key={i} className="flex items-center gap-2 text-sm text-slate-600">
-                        <div className={`w-1.5 h-1.5 rounded-full ${isCurrent ? 'bg-green-500' : 'bg-primary'}`} />
+                        <div className={`w-1.5 h-1.5 rounded-full ${isPaid ? 'bg-green-500' : isSelected ? 'bg-yellow-500' : 'bg-primary'}`} />
                         {feat}
                     </li>
                 ))}
@@ -574,15 +585,17 @@ const PlanCard = ({ name, price, limit, features, currentPlan, onUpgrade, loadin
 
             <button
                 onClick={onUpgrade}
-                disabled={isCurrent || loading}
-                className={`w-full py-2 rounded-lg font-bold transition-all ${isCurrent
+                disabled={isPaid || loading}
+                className={`w-full py-2 rounded-lg font-semibold transition-all ${isPaid
                     ? 'bg-green-100 text-green-700 cursor-default border border-green-200'
-                    : showHighlight
-                        ? 'bg-primary text-white hover:bg-primary/90 shadow-md shadow-primary/20'
-                        : 'bg-slate-900 text-white hover:bg-slate-800'
+                    : isSelected
+                        ? 'bg-yellow-600 text-white hover:bg-yellow-700 shadow-sm'
+                        : showHighlight
+                            ? 'bg-primary text-white hover:bg-primary/90 shadow-sm shadow-primary/20'
+                            : 'bg-slate-900 text-white hover:bg-slate-800'
                     }`}
             >
-                {isCurrent ? 'Current Plan' : loading ? 'Processing...' : 'Upgrade'}
+                {isPaid ? 'Current Plan' : isSelected ? 'Complete Payment' : loading ? 'Processing...' : 'Upgrade'}
             </button>
         </div>
     );

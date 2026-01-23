@@ -1,14 +1,14 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Shield, Lock, Mail, AlertCircle, ArrowRight } from 'lucide-react';
-import { useAuth, api } from '../context/AuthContext';
+import { auth } from '../firebase';
+import { signInWithEmailAndPassword } from 'firebase/auth';
 
 export default function Login() {
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(false);
-    const { login } = useAuth();
     const navigate = useNavigate();
 
     const handleSubmit = async (e: React.FormEvent) => {
@@ -17,17 +17,17 @@ export default function Login() {
         setLoading(true);
 
         try {
-            const formData = new URLSearchParams();
-            formData.append('username', email.trim());
-            formData.append('password', password);
-
-            const res = await api.post('/auth/login', formData, {
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-            });
-            await login(res.data.access_token);
+            await signInWithEmailAndPassword(auth, email.trim(), password);
             navigate('/');
         } catch (err: any) {
-            setError(err.response?.data?.detail || 'Login failed. Please check your credentials.');
+            console.error("Login error:", err);
+            let message = 'Login failed. Please check your credentials.';
+            if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password') {
+                message = 'Invalid email or password.';
+            } else if (err.code === 'auth/too-many-requests') {
+                message = 'Too many failed attempts. Please try again later.';
+            }
+            setError(message);
         } finally {
             setLoading(false);
         }

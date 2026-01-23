@@ -1,9 +1,19 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../context/AuthContext';
-import { Save, RefreshCw, Eye, EyeOff, Globe, ToggleLeft, ToggleRight, CheckCircle, AlertCircle } from 'lucide-react';
+import { Save, RefreshCw, Eye, EyeOff, Globe, ToggleLeft, ToggleRight, CheckCircle, AlertCircle, Key, Shield, Copy } from 'lucide-react';
+
+interface APIKeyRecord {
+    key_hash: string;
+    key_prefix: string;
+    name: string;
+    environment: string;
+    status: string;
+    created_at: string;
+}
 
 export default function Settings() {
     const [settings, setSettings] = useState<any>({ webhook_url: '', feature_flags: {} });
+    const [apiKeys, setApiKeys] = useState<APIKeyRecord[]>([]);
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [showSecret, setShowSecret] = useState(false);
@@ -11,6 +21,7 @@ export default function Settings() {
 
     useEffect(() => {
         fetchSettings();
+        fetchApiKeys();
     }, []);
 
     const fetchSettings = async () => {
@@ -21,6 +32,15 @@ export default function Settings() {
             console.error("Failed to fetch settings", err);
         } finally {
             setLoading(false);
+        }
+    };
+
+    const fetchApiKeys = async () => {
+        try {
+            const res = await api.get('/api-keys');
+            setApiKeys(res.data || []);
+        } catch (err) {
+            console.error("Failed to fetch API keys", err);
         }
     };
 
@@ -64,6 +84,17 @@ export default function Settings() {
         } finally {
             setSaving(false);
         }
+    };
+
+    const getStatusBadge = (status: string) => {
+        if (status === 'ACTIVE') return 'bg-green-50 text-green-700 border-green-200';
+        if (status === 'REVOKED') return 'bg-red-50 text-red-700 border-red-200';
+        return 'bg-slate-50 text-slate-600 border-slate-200';
+    };
+
+    const getEnvBadge = (env: string) => {
+        if (env === 'PRODUCTION' || env === 'production') return 'bg-purple-50 text-purple-700';
+        return 'bg-amber-50 text-amber-700';
     };
 
     if (loading) return <div className="p-8">Loading settings...</div>;
@@ -133,6 +164,72 @@ export default function Settings() {
                         <p className="text-xs text-slate-400 mt-1.5">Used to verify that events originated from Loan Officer AI.</p>
                     </div>
                 </div>
+            </div>
+
+            {/* API Keys Section */}
+            <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm">
+                <div className="flex items-center gap-3 mb-6">
+                    <div className="p-2 bg-emerald-50 text-emerald-600 rounded-lg">
+                        <Key size={20} />
+                    </div>
+                    <div>
+                        <h2 className="text-lg font-semibold text-slate-900">Your API Keys</h2>
+                        <p className="text-sm text-slate-500">API keys you've created for integration. Manage keys in the API Keys page.</p>
+                    </div>
+                </div>
+
+                {apiKeys.length === 0 ? (
+                    <div className="text-center py-8 text-slate-400">
+                        <Key size={32} className="mx-auto mb-2 opacity-50" />
+                        <p className="text-sm">No API keys created yet.</p>
+                        <a href="/api-keys" className="text-primary text-sm font-medium hover:underline">Create your first key →</a>
+                    </div>
+                ) : (
+                    <div className="space-y-3">
+                        {apiKeys.slice(0, 5).map((key) => (
+                            <div key={key.key_hash} className="flex items-center justify-between p-4 bg-slate-50 rounded-lg border border-slate-100">
+                                <div className="flex items-center gap-4">
+                                    <div className="p-2 bg-white rounded border border-slate-200">
+                                        <Shield size={16} className="text-slate-500" />
+                                    </div>
+                                    <div>
+                                        <div className="font-medium text-slate-900">{key.name}</div>
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-xs text-slate-500 font-mono">{key.key_prefix}••••••••</span>
+                                            <button
+                                                onClick={() => {
+                                                    navigator.clipboard.writeText(key.key_prefix);
+                                                    setMessage({ type: 'success', text: `Copied prefix. Full key only available at creation.` });
+                                                    setTimeout(() => setMessage(null), 3000);
+                                                }}
+                                                className="p-1 hover:bg-slate-200 rounded transition-colors group relative"
+                                                title="Copy prefix (full key only available at creation)"
+                                            >
+                                                <Copy size={12} className="text-slate-400" />
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="flex items-center gap-3">
+                                    <span className={`px-2 py-1 text-xs font-semibold rounded ${getEnvBadge(key.environment)}`}>
+                                        {key.environment}
+                                    </span>
+                                    <span className={`px-2 py-1 text-xs font-semibold rounded border ${getStatusBadge(key.status)}`}>
+                                        {key.status}
+                                    </span>
+                                </div>
+                            </div>
+                        ))}
+                        <p className="text-xs text-slate-400 mt-2 italic">
+                            💡 Full API keys are only shown once at creation for security. Visit the <a href="/api-keys" className="text-primary hover:underline">API Keys page</a> to create a new key.
+                        </p>
+                        {apiKeys.length > 5 && (
+                            <a href="/api-keys" className="block text-center text-primary text-sm font-medium hover:underline py-2">
+                                View all {apiKeys.length} keys →
+                            </a>
+                        )}
+                    </div>
+                )}
             </div>
 
             {/* Feature Flags Section */}
