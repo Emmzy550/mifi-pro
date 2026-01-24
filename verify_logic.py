@@ -32,7 +32,7 @@ def run_test(name: str, raw_data: dict):
         f.write(f"     Flags: {risk_results['flags']}\n")
 
         # 3. Decision
-        decision_results = DecisionAgent.recommend(risk_results, borrower)
+        decision_results = DecisionAgent.recommend(risk_results, borrower, 30)
         f.write(f"[OK] Decision: {decision_results['decision']}\n")
         f.write(f"     Recommended Amount: {decision_results['recommended_amount']}\n")
 

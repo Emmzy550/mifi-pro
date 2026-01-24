@@ -1,83 +1,84 @@
-# Customer API Setup Guide
-
-This guide is for **IT teams and developers** at lending institutions who want to integrate the Loan Officer AI Agent with their existing systems.
-
-## Table of Contents
-
-- [Overview](#overview)
-- [Prerequisites](#prerequisites)
-- [Getting Started](#getting-started)
-- [Authentication](#authentication)
-- [Basic Integration](#basic-integration)
-- [Testing Your Integration](#testing-your-integration)
-- [Going Live Checklist](#going-live-checklist)
-- [Support](#support)
-
----
+# Loan Officer AI – Customer API Documentation
 
 ## Overview
 
-### What You Can Do
+**Loan Officer AI** is a decision-support API that helps lending institutions evaluate loan applications efficiently and consistently.
 
-Integrate the Loan Officer AI with your:
-- 📱 Mobile apps
-- 💻 Web applications
-- 🖥️ Core banking systems
-- 📊 CRM platforms
+### What This API Does
 
-### Integration Methods
+- Analyzes borrower financial information
+- Provides risk assessments and loan recommendations
+- Returns structured data for your internal review
 
-1. **REST API** - Direct API calls
-2. **Webhooks** - Real-time notifications
-3. **Batch Upload** - Bulk processing
+### What This API Does NOT Do
 
----
+- **Does not approve or reject loans** – All final decisions remain with you
+- **Does not disburse funds** – You control all disbursement processes
+- **Does not replace human judgment** – Our recommendations support your expertise
 
-## Prerequisites
-
-### Technical Requirements
-
-- **Programming Knowledge**: Working knowledge of REST APIs
-- **HTTP Client**: Ability to make HTTP requests (curl, Postman, or code)
-- **JSON Processing**: Can parse and generate JSON
-- **HTTPS**: Your systems support HTTPS
-
-### What You'll Need from Your Admin
-
-- ✅ API credentials (provided after account setup)
-- ✅ Organization ID
-- ✅ Dashboard access (for testing)
+> **Important:** You are always the final decision-maker. This API provides data-driven insights to help you make informed lending decisions.
 
 ---
 
-## Getting Started
+## Quick Start
 
-### Step 1: Get API Credentials
+Get started in 3 simple steps:
 
-1. **Log in to the dashboard** with your admin account
-2. Go to **Settings → API Keys**
-3. Click **"Create New API Key"**
-4. Fill in:
-   - **Name**: e.g., "Production Mobile App"
-   - **Environment**: Choose "Test" first, then "Production" later
+1. **Generate an API Key**  
+   Log into the Partner Console → API Keys → Create New Key
 
-5. **Copy the API key** - You'll only see it once!
+2. **Send a Loan Assessment Request**  
+   POST your borrower data to `/assessment/run`
+
+3. **Receive Decision & Explanation**  
+   Review the risk score, recommendation, and detailed explanation
+
+4. **Verify with Postman**  
+   Use our [Postman Testing Guide](file:///C:/Users/SwiftVib Electronics/.gemini/antigravity/scratch/loan_officer_ai/docs/postman_guide.md) for a step-by-step walkthrough.
+
+---
+
+## Authentication
+
+All API requests require authentication using an API key.
+
+### Generating Your API Key
+
+1. Log into the **Partner Console**
+2. Navigate to **API Keys**
+3. Click **"Create New Key"**
+4. Choose environment: `test` or `production`
+5. **Copy the key immediately** – it's shown only once
+
+### Using Your API Key
+
+Include your API key in every request:
 
 ```
-Example API Key: loa_test_abc123def456ghi789jkl012
+X-API-Key: loa_live_abc123def456...
+Content-Type: application/json
 ```
 
-⚠️ **Keep this secret!** Never commit it to code repositories.
+### Security Best Practices
 
-### Step 2: Test Connection
+- Store keys securely (environment variables, secrets manager)
+- Never commit keys to source code or public repositories
+- Rotate keys quarterly or if compromised
+- Use test keys for development, production keys for live operations
 
-Try a simple health check:
+---
 
-```bash
-curl https://api.your-lender.com/api/health
-```
+## Health Check (Optional)
 
-**Expected Response:**
+### Verify API Availability
+
+**Endpoint:** `GET /api/health`
+
+**Purpose:** Confirm the API is online and view system status
+
+**Authentication:** Not required
+
+**Example Response:**
 ```json
 {
   "message": "Loan Officer AI Agent V1→V4 is online.",
@@ -87,354 +88,421 @@ curl https://api.your-lender.com/api/health
 }
 ```
 
----
-
-## Authentication
-
-### Using API Keys
-
-Include your API key in the request header:
-
-```bash
-curl -H "X-API-Key: loa_test_abc123..." \
-  https://api.your-lender.com/borrowers
-```
-
-### Error Responses
-
-**401 Unauthorized**
-```json
-{"detail": "Invalid API key"}
-```
-- Check your API key is correct
-- Verify it hasn't been revoked
-- Ensure you're using the header `X-API-Key`
+Use this endpoint for:
+- Service monitoring
+- Connectivity verification
+- Integration testing
 
 ---
 
-## Basic Integration
+## Core Endpoint – Run Loan Assessment
 
-### Use Case 1: Submit Loan Application
+### The Main Integration Point
 
-**Scenario:** A borrower completes an application in your mobile app. You want to submit it to the AI for assessment.
+**Endpoint:** `POST /assessment/run`
 
-**Step 1: Create Borrower Profile**
+**Purpose:** Submit borrower information and receive loan recommendation
 
-```bash
-POST /intake/start
-Content-Type: application/json
+**Authentication:** Required (X-API-Key header)
 
-{
-  "name": "Jane Doe",
-  "phone": "+254700000000",
-  "email": "jane@example.com",
-  "employment_type": "trader",
-  "monthly_income": 50000,
-  "monthly_expenses": 20000,
-  "existing_debt": 5000,
-  "loan_amount_requested": 15000,
-  "loan_purpose": "Business stock purchase",
-  "organization_id": "YOUR_ORG_ID"
-}
-```
+### Request Format
 
-**Response:**
 ```json
-{
-  "borrower_id": "BOR-A1B2C3D4",
-  "status": "INTAKE_COMPLETE"
-}
-```
-
-**Step 2: Run Risk Assessment**
-
-```bash
-POST /assessment/run
-Content-Type: application/json
-
 {
   "borrower_id": "BOR-A1B2C3D4"
 }
 ```
 
-**Response:**
+Or send full borrower data directly:
+
 ```json
 {
-  "assessment_id": "ASMT-X1Y2Z3A4",
+  "name": "Jane Mwangi",
+  "phone": "+254700123456",
+  "employment_type": "trader",
+  "monthly_income": 45000,
+  "monthly_expenses": 18000,
+  "existing_debt": 5000,
+  "loan_amount_requested": 25000,
+  "loan_purpose": "Purchase inventory for shop"
+}
+```
+
+### Transaction Data
+
+If available, transaction history improves assessment accuracy. Transactions may come from:
+
+- Bank statements (processed by you into structured data)
+- Mobile money records (M-Pesa, Airtel Money, etc.)
+- CSV exports from financial institutions
+
+**Important:** Send structured JSON data, not raw documents or PDFs.
+
+### Processing Time
+
+Typical response time: **2-3 seconds**
+
+---
+
+## Response Format
+
+### Example Response
+
+```json
+{
+  "assessment_id": "ASMT-X1Y2Z3W4",
   "borrower_id": "BOR-A1B2C3D4",
-  "risk_score": 45,
-  "risk_level": "MEDIUM",
-  "decision": "CONDITIONAL_APPROVAL",
-  "recommended_amount": 15000,
-  "recommended_interest_rate": 20.0,
-  "explanation": {
-    "summary": "Conditionally approved...",
-    "risk_factors": [...],
-    "recommendations": [...]
-  }
-}
-```
-
-### Use Case 2: Upload Transaction Data
-
-**Scenario:** Borrower provides bank statements. You want to upload them for enhanced assessment.
-
-```bash
-POST /behavior/upload
-Content-Type: multipart/form-data
-
-borrower_id=BOR-A1B2C3D4
-file=@transactions.csv
-```
-
-**Response:**
-```json
-{
-  "status": "SUCCESS",
-  "transaction_count": 45,
-  "behavioral_insights": {
-    "income_consistency": 0.85,
-    "transaction_stability": 0.72
+  "risk_score": 35,
+  "risk_level": "LOW",
+  "decision": "APPROVED",
+  "recommended_amount": 25000,
+  "recommended_interest_rate": 15.0,
+  "requested_amount": 25000,
+  "decision_summary": "Approved based on strong capacity.",
+  "customer_message": "Congratulations! Your loan request has been approved.",
+  "flags": [],
+  "metrics": {
+    "debt_to_income": 0.111,
+    "affordability_ratio": 0.185,
+    "capacity_based_max": 28000
   },
-  "risk_assessment": {
-    "score": 38,
-    "level": "LOW",
-    "decision": "APPROVED"
-  }
+  "policy_cap_amount": null,
+  "policy_cap_reason": null
 }
 ```
 
-### Use Case 3: Get Assessment Results
+### Understanding Response Fields
 
-**Scenario:** Retrieve a previously generated assessment.
+| Field | Description |
+|-------|-------------|
+| `decision` | **APPROVED**, **CONDITIONAL_APPROVAL**, or **REJECT** |
+| `customer_message` | Safe, ready-to-display message for the borrower |
+| `recommended_amount` | Suggested loan amount (capped by capacity) |
+| `policy_cap_amount` | The maximum safe amount if the request was capped |
+| `policy_cap_reason` | Reason for the cap (e.g. "Exceeds 30% DTI Limit") |
+| `recommended_interest_rate` | Suggested annual interest rate (%) |
 
-```bash
-GET /assessment/result/ASMT-X1Y2Z3A4
-X-API-Key: your_api_key_here
+### Capacity Guardrails (Creating Safe Loans)
+Our engine uses strictly Conservative Capacity Logic.
+- **We never recommend a loan that exceeds the borrower's repaying power.**
+- If `recommended_amount` < `requested_amount`, check `policy_cap_reason`.
+- This protects you from default and the borrower from over-indebtedness.
+
+### Decision Types
+
+**APPROVED**
+- Low risk profile
+- Strong repayment capacity
+- **Your action:** Proceed with standard loan terms
+
+**CONDITIONAL_APPROVAL**
+- Medium risk profile
+- Acceptable with conditions
+- **Your action:** Consider higher interest rate or reduced amount
+
+**REJECT**
+- High risk profile
+- Insufficient capacity to repay
+- **Your action:** Decline or request additional documentation
+
+> **Note:** You may override any recommendation based on your expertise and customer knowledge.
+
+### About Explanations
+
+The `explanation` field contains detailed reasoning for internal review. **Do not share raw explanations directly with borrowers.** Use them to:
+- Inform your decision-making process
+- Document your approval rationale
+- Identify areas needing further review
+
+---
+
+## Common Errors & How to Fix Them
+
+### HTTP 401 Unauthorized
+
+**Cause:** Missing or invalid API key
+
+**Fix:**
+- Verify `X-API-Key` header is present
+- Check key hasn't been revoked
+- Ensure using correct key for environment (test vs production)
+
+**Example:**
+```
+X-API-Key: loa_live_abc123...  ✅ Correct
+Authorization: Bearer xxx      ❌ Wrong header name
 ```
 
 ---
 
-## Testing Your Integration
+### HTTP 403 Forbidden
 
-### Test Environment
+**Cause:** API key revoked or inactive
 
-Always test in the **test environment** first:
-
-```
-Base URL: https://api-test.your-lender.com
-```
-
-Use test API keys (starting with `loa_test_`)
-
-### Test Scenarios
-
-**Scenario 1: Low Risk Borrower (Should Approve)**
-```json
-{
-  "monthly_income": 100000,
-  "monthly_expenses": 30000,
-  "existing_debt": 5000,
-  "loan_amount_requested": 20000
-}
-```
-
-**Scenario 2: High Risk Borrower (Should Reject)**
-```json
-{
-  "monthly_income": 10000,
-  "monthly_expenses": 8000,
-  "existing_debt": 5000,
-  "loan_amount_requested": 50000
-}
-```
-
-**Scenario 3: Medium Risk (Conditional Approval)**
-```json
-{
-  "monthly_income": 50000,
-  "monthly_expenses": 25000,
-  "existing_debt": 10000,
-  "loan_amount_requested": 25000
-}
-```
-
-### Testing Checklist
-
-- [ ] Health check returns 200
-- [ ] Can create borrower profile
-- [ ] Can run assessment
-- [ ] Can retrieve assessment results
-- [ ] Can upload transaction files
-- [ ] Error handling works (400, 401, 404, 500)
-- [ ] Response times are acceptable (< 3 seconds)
-- [ ] All required fields validated
+**Fix:**
+- Check key status in Partner Console
+- Generate new key if needed
+- Verify organization access hasn't changed
 
 ---
 
-## Going Live Checklist
+### HTTP 422 Validation Error
 
-### Pre-Launch
+**Cause:** Missing required fields or invalid data types
 
-- [ ] **Testing Complete** - All test scenarios pass
-- [ ] **Error Handling** - Your app handles all API errors gracefully
-- [ ] **API Keys Secured** - Production keys stored in environment variables
-- [ ] **Rate Limiting** - Implemented backoff/retry logic
-- [ ] **Logging** - Request/response logging for debugging
+**Example Error:**
+```json
+{
+  "detail": [
+    {
+      "loc": ["body", "monthly_income"],
+      "msg": "field required",
+      "type": "value_error.missing"
+    }
+  ]
+}
+```
 
-### Security
+**Fix:**
+- Review required fields list
+- Ensure all fields have correct data types
+- Check for typos in field names
 
-- [ ] **HTTPS Only** - All requests use HTTPS
-- [ ] **API Key Storage** - Never in source code or client apps
-- [ ] **Input Validation** - Validate user input before sending to API
-- [ ] **Data Encryption** - Sensitive data encrypted in transit and at rest
-
-### Production Setup
-
-1. **Generate Production API Key**
-   - Use "production" environment
-   - Store securely (AWS Secrets Manager, Azure Key Vault, etc.)
-
-2. **Update Base URL**
-   ```
-   https://api.your-lender.com  # Production
-   ```
-
-3. **Configure Webhooks** (optional)
-   - Set webhook URL in dashboard
-   - Verify webhook signatures
-
-4. **Monitor Performance**
-   - Set up alerts for API errors
-   - Track response times
-   - Monitor success/fail rates
-
-### Launch
-
-- [ ] Deploy to production
-- [ ] Run smoke tests
-- [ ] Process 5-10 real applications manually
-- [ ] Monitor for 24 hours
-- [ ] Scale up gradually
+**Required Fields:**
+- `name`, `phone`, `employment_type`
+- `monthly_income`, `monthly_expenses`, `existing_debt`
+- `loan_amount_requested`, `loan_purpose`
 
 ---
 
-## Code Examples
+### HTTP 400 Bad Request
 
-### Python
+**Cause:** Malformed JSON
 
-```python
-import requests
+**Fix:**
+- Validate JSON formatting (use online validator)
+- Check for missing commas, brackets, or quotes
+- Ensure proper encoding (UTF-8)
 
-API_KEY = "loa_live_abc123..."
-BASE_URL = "https://api.your-lender.com"
+---
 
-headers = {
-    "X-API-Key": API_KEY,
-    "Content-Type": "application/json"
-}
+---
 
-# Create borrower
-borrower_data = {
-    "name": "Jane Doe",
-    "phone": "+254700000000",
-    "monthly_income": 50000,
-    # ... other fields
-}
+### HTTP 402 Payment Required
 
-response = requests.post(
-    f"{BASE_URL}/intake/start",
-    json=borrower_data,
-    headers=headers
-)
+**Cause:** Organization has reached its plan limit (Production only)
 
-borrower_id = response.json()["borrower_id"]
+**Fix:**
+- Upgrade your plan
+- Top-up credits in the dashboard
 
-# Run assessment
-assessment_response = requests.post(
-    f"{BASE_URL}/assessment/run",
-    json={"borrower_id": borrower_id},
-    headers=headers
-)
+### HTTP 429 Too Many Requests
 
-assessment = assessment_response.json()
-print(f"Decision: {assessment['decision']}")
-```
+**Cause:** Rate limit exceeded OR Sandbox usage limit reached.
 
-### JavaScript/Node.js
+**Fix:**
+- Reduce request frequency
+- If in Sandbox: Upgrade to Production for unlimited volume
+- Contact support for higher limits if needed
 
-```javascript
-const axios = require('axios');
+---
 
-const API_KEY = 'loa_live_abc123...';
-const BASE_URL = 'https://api.your-lender.com';
+### HTTP 500 Internal Server Error
 
-const client = axios.create({
-  baseURL: BASE_URL,
-  headers: {
-    'X-API-Key': API_KEY,
-    'Content-Type': 'application/json'
-  }
-});
+**Cause:** Temporary system issue
 
-async function submitApplication(borrowerData) {
-  // Create borrower
-  const intakeRes = await client.post('/intake/start', borrowerData);
-  const borrowerId = intakeRes.data.borrower_id;
-  
-  // Run assessment
-  const assessmentRes = await client.post('/assessment/run', {
-    borrower_id: borrowerId
-  });
-  
-  return assessmentRes.data;
-}
+**Fix:**
+- Retry after 1-2 minutes
+- Check status page for incidents
+- Contact support if persists
 
-// Usage
-const result = await submitApplication({
-  name: 'Jane Doe',
-  phone: '+254700000000',
-  monthly_income: 50000,
-  // ... other fields
-});
+---
 
-console.log(`Decision: ${result.decision}`);
-```
+## Common Missing or Incorrect Data
+
+### Frequent Integration Issues
+
+**1. Missing Borrower Income**
+- **Problem:** `monthly_income` not provided or set to 0
+- **Result:** Assessment will likely return REJECT
+- **Fix:** Ensure accurate income data is collected
+
+**2. Expenses Greater Than Income**
+- **Problem:** `monthly_expenses > monthly_income`
+- **Result:** Automatic REJECT or very high risk score
+- **Fix:** Validate data before submission
+
+**3. No Transaction Data Provided**
+- **Problem:** Assessment based only on stated income/expenses
+- **Result:** Less accurate risk assessment
+- **Fix:** When possible, include transaction history for better accuracy
+
+**4. Incorrect Phone Number Format**
+- **Problem:** Phone missing country code or contains invalid characters
+- **Result:** Validation error (422)
+- **Fix:** Use international format: `+254700123456`
+
+**5. Sending Documents Instead of Structured Data**
+- **Problem:** Uploading PDFs or images directly
+- **Result:** API cannot process unstructured data
+- **Fix:** Extract data from documents first, then send structured JSON
+
+**6. Negative or Zero Loan Amounts**
+- **Problem:** `loan_amount_requested <= 0`
+- **Result:** Validation error
+- **Fix:** Ensure positive loan amounts
+
+**7. Missing Loan Purpose**
+- **Problem:** `loan_purpose` empty or generic ("personal use")
+- **Result:** Lower quality assessment
+- **Fix:** Collect specific purpose ("school fees", "business inventory", etc.)
+
+### Data Quality Responsibility
+
+- **You are responsible for data accuracy** – The API processes data as provided
+- **Missing or inconsistent data** may result in CONDITIONAL or REJECT decisions
+- **Better data = better recommendations** – Complete, accurate data improves assessment quality
+
+---
+
+## Best Practices
+
+### 1. Always Test in Sandbox First
+
+- Use `test` environment for all development
+- Use test API keys (starting with `loa_test_`)
+- Verify integration fully before production
+
+### 2. Perform Human Review Before Approval
+
+- **Never auto-approve based solely on API response**
+- Review explanation and metrics
+- Apply your institutional knowledge
+- Document your final decision
+
+### 3. Secure API Keys
+
+- Store in environment variables or secrets manager
+- Rotate keys quarterly
+- Revoke unused keys immediately
+- Never log full API keys
+
+### 4. Log Assessment Responses
+
+- Keep assessment records for audit purposes
+- Store assessment_id for reference
+- Maintain decision history
+- Support regulatory compliance
+
+### 5. Do Not Expose Raw Explanations to Borrowers
+
+- Explanations are for internal review
+- Translate technical details into customer-friendly language
+- Focus on constructive feedback
+- Avoid sharing raw metrics or scores
+
+### 6. Validate Data Before Submission
+
+- Check required fields are present
+- Ensure data types are correct
+- Verify phone number format
+- Confirm loan amounts are positive
+
+### 7. Implement Error Handling
+
+- Gracefully handle API errors
+- Retry on temporary failures (500, 503)
+- Log errors for troubleshooting
+- Provide user-friendly error messages
 
 ---
 
 ## Support
 
-### Documentation
+### Technical Support
 
-- **Developer Docs**: [/documentation](http://localhost:8000/documentation)
-- **API Reference**: [/docs](http://localhost:8000/docs) (Swagger UI)
-- **Interactive Explorer**: [/redoc](http://localhost:8000/redoc)
+**Email:** support@yourdomain.com  
+**Response Time:** Within 24 hours (business days)
 
-### Getting Help
+### When Contacting Support
 
-**Technical Support:**
-- Email: dev-support@your-lender.com
-- Response Time: 24 hours (business days)
-- Emergency: [Support phone]
+Please include:
+- Organization ID
+- Assessment ID (if applicable)
+- Request/response examples (remove sensitive data)
+- Error messages received
+- Steps to reproduce the issue
 
-**Best Practices:**
-- Search documentation first
-- Include request/response examples
-- Provide error messages
-- Share your code (remove API keys!)
+### Additional Resources
+
+- **Partner Console:** Manage API keys, view analytics
+- **Interactive API Explorer:** Test endpoints in browser
+- **Integration Guide:** Detailed technical documentation
 
 ---
 
-## Next Steps
+## Testing with Postman
 
-1. ✅ Get your test API key
-2. ✅ Run your first test request
-3. ✅ Build your integration
-4. ✅ Test thoroughly
-5. ✅ Get production API key
-6. ✅ Launch!
+We provide a comprehensive Postman collection and guide to help you test the integration without writing any code.
 
-**Good luck with your integration!** 🚀
+### Prerequisites
 
-For more technical details, see the [Developer Documentation](./architecture.md).
+1.  **Install Postman**: Download it from [postman.com](https://www.postman.com/downloads/).
+2.  **API Key**: Obtain your test API key from the Partner Console.
+3.  **Base URL**: Your local development server is usually at `http://localhost:8000`.
+
+### Step-by-Step Guide
+
+Our [Detailed Postman Guide](file:///C:/Users/SwiftVib Electronics/.gemini/antigravity/scratch/loan_officer_ai/docs/postman_guide.md) covers:
+
+- **Environment Setup**: Setting up variables for Base URL and API Keys.
+- **Workflow Testing**:
+    1.  **Intake**: Create a borrower profile.
+    2.  **Data Enrichment**: Upload behavioral transaction data.
+    3.  **Assessment**: Run the engine and analyze the JSON response.
+
+### Troubleshooting Common Postman Issues
+
+- **403 Forbidden**: Ensure both `Authorization: Bearer <KEY>` and `X-API-KEY: <KEY>` headers are present and checked.
+- **422 Unprocessable Content**: Ensure you have selected **Body** → **raw** → **JSON** in Postman.
+
+---
+
+## Appendix: Full Request Example
+
+```bash
+curl -X POST https://api.loanofficerai.com/assessment/run \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: loa_live_abc123def456..." \
+  -d '{
+    "name": "Jane Mwangi",
+    "phone": "+254700123456",
+    "employment_type": "trader",
+    "monthly_income": 45000,
+    "monthly_expenses": 18000,
+    "existing_debt": 5000,
+    "loan_amount_requested": 25000,
+    "loan_purpose": "Purchase inventory for shop"
+  }'
+```
+
+**Expected Response:**
+```json
+{
+  "assessment_id": "ASMT-XXX",
+  "decision": "APPROVED",
+  "risk_score": 35,
+  "risk_level": "LOW",
+  "recommended_amount": 25000,
+  "recommended_interest_rate": 15.0,
+  ...
+}
+```
+
+---
+
+**You're ready to integrate!**
+
+For additional help, contact support@yourdomain.com
+
+**Version:** 2.0.0 | **Last Updated:** January 2026

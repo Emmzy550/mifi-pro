@@ -12,6 +12,25 @@ All modifications should be logged and reviewed by compliance team.
 from typing import Dict, Any
 import os
 
+# Basic .env loader (since python-dotenv is not a dependency)
+def _load_dotenv(path=".env"):
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            for line in f:
+                if "=" in line and not line.strip().startswith("#"):
+                    try:
+                        key, value = line.strip().split("=", 1)
+                        # Remove quotes if present
+                        value = value.strip("'").strip('"')
+                        # CRITICAL: Always prioritize .env values for Lipila and Secret keys
+                        # BUT: Only if the value in .env is NOT empty!
+                        if value:
+                             if key not in os.environ or key.startswith("LIPILA_"):
+                                 os.environ[key] = value
+                    except: continue
+
+_load_dotenv()
+
 # ============================================================================
 # FEATURE FLAGS
 # ============================================================================
@@ -194,6 +213,26 @@ LOG_ML_PREDICTIONS_ALWAYS: bool = True
 AUDIT_LOG_RETENTION_DAYS: int = 2555  # 7 years for regulatory compliance
 
 # ============================================================================
+# SECURITY & AUTHENTICATION
+# ============================================================================
+# Crucial for JWT signing and session security.
+# WARNING: NEVER hardcode this in production. Use environment variables.
+
+SECRET_KEY: str = os.getenv("SECRET_KEY", "DEVELOPMENT_INSECURE_KEY_12345")
+
+# Lipila Gateway Configuration
+
+# ============================================================================
+# BILLING & PAYMENTS
+# ============================================================================
+# Exchange rate for converting USD plans to Zambian Kwacha (ZMW)
+# Default conservative rate if not provided in env.
+USD_TO_ZMW_RATE: float = float(os.getenv("USD_TO_ZMW_RATE", "28.5"))
+
+LIPILA_SECRET_KEY: str = os.getenv("LIPILA_SECRET_KEY", "")
+LIPILA_BASE_URL: str = os.getenv("LIPILA_BASE_URL", "https://blz.lipila.io/api/v1")
+
+# ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
 
@@ -218,6 +257,11 @@ def get_config_snapshot() -> Dict[str, Any]:
             "max_dti": MAX_DEBT_TO_INCOME_RATIO,
             "affordability_target": AFFORDABILITY_RATIO_TARGET,
             "base_rate": BASE_INTEREST_RATE
+        },
+        "security": {
+            # Never include raw SECRET_KEY in logs
+            "secret_key_configured": SECRET_KEY != "DEVELOPMENT_INSECURE_KEY_12345",
+            "lipila_configured": bool(LIPILA_SECRET_KEY)
         }
     }
 
@@ -227,6 +271,12 @@ def validate_config() -> bool:
     Called at startup to catch configuration errors early.
     """
     errors = []
+    
+    # 0. SECURITY CHECK
+    # Enforce strong secret in non-local environments
+    env_name = os.getenv("ENVIRONMENT", "DEVELOPMENT").upper()
+    if env_name in ["PRODUCTION", "STAGING"] and SECRET_KEY == "DEVELOPMENT_INSECURE_KEY_12345":
+        errors.append(f"SECURITY ERROR: Hardcoded SECRET_KEY detected in {env_name} environment!")
     
     # Ensemble weights must sum to 1.0
     if abs((ML_WEIGHT + RULE_WEIGHT) - 1.0) > 0.01:
@@ -256,7 +306,11 @@ def validate_config() -> bool:
             print(f"  - {error}")
         return False
     
-    print("[OK] Configuration validated successfully")
+    # Production check for Lipila
+    if env_name in ["PRODUCTION", "STAGING"] and not LIPILA_SECRET_KEY:
+        print(f"WARNING: LIPILA_SECRET_KEY is missing in {env_name} environment!")
+    
+    print(f"[OK] Configuration validated successfully (Env: {env_name})")
     return True
 
 # Validate on import

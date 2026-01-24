@@ -91,7 +91,29 @@ MICRO_MULTIPLIER = 0.5
 MIN_DEPOSIT_VOLUME_FOR_MICRO = 300
 
 # ====================================================================
-# SAFETY LIMITS
+# LOAN DURATION POLICY
+# ====================================================================
+# Duration constraints for loan terms
+
+# Minimum loan duration allowed (days)
+MIN_DURATION_DAYS = 7
+
+# Maximum loan duration allowed (days)
+MAX_DURATION_DAYS = 365
+
+# Maximum duration for starter loans (days)
+# WHY: Starter borrowers get shorter terms to build repayment history faster
+STARTER_LOAN_MAX_DURATION_DAYS = 30
+
+# Duration-based interest rate adjustments (percentage points)
+# Loans shorter than 30 days get a discount, longer than 180 days get a premium
+SHORT_TENOR_THRESHOLD_DAYS = 30
+LONG_TENOR_THRESHOLD_DAYS = 180
+SHORT_TENOR_DISCOUNT = 2.0  # -2% for very short terms
+LONG_TENOR_PREMIUM = 3.0    # +3% for long terms
+
+# ====================================================================
+# POLICY LIMITS
 # ====================================================================
 # Hard caps to prevent unreasonable lending
 
@@ -170,7 +192,7 @@ def validate_config():
     if MIN_TRANSACTION_COUNT < 1:
         raise ValueError("Minimum transaction count must be at least 1")
     
-    print("✓ Capacity configuration validated successfully")
+    print("[OK] Capacity configuration validated successfully")
 
 
 # Run validation on import

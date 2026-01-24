@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Plus, Trash2, Copy, Check } from 'lucide-react';
 
 import { api } from '../context/AuthContext';
+import toast from 'react-hot-toast';
 
 export default function APIKeys() {
     const [keys, setKeys] = useState<any[]>([]);
@@ -41,13 +42,13 @@ export default function APIKeys() {
         } catch (err: any) {
             const errorData = err.response?.data?.detail;
             if (errorData?.error === 'SANDBOX_KEY_EXISTS') {
-                alert("Only one Sandbox API key is allowed. Use the existing key or rotate it.");
+                toast.error("Only one Sandbox API key is allowed. Use the existing key or rotate it.");
             } else if (errorData?.error === 'PRODUCTION_KEY_EXISTS') {
-                alert("Only one Production API key is allowed. Please revoke the existing key to rotate.");
+                toast.error("Only one Production API key is allowed. Please revoke the existing key to rotate.");
             } else if (errorData?.error === 'BILLING_NOT_ACTIVE') {
-                alert("Activate billing to create a Production API key.");
+                toast.error("Activate billing to create a Production API key.");
             } else {
-                alert(errorData?.message || "Failed to create key");
+                toast.error(errorData?.message || "Failed to create key");
             }
         }
     };
@@ -57,8 +58,9 @@ export default function APIKeys() {
         try {
             await api.post('/api-keys/revoke', { key_hash: hash });
             fetchKeys();
+            toast.success("API key revoked.");
         } catch (err) {
-            alert("Failed to revoke key");
+            toast.error("Failed to revoke key");
         }
     };
 

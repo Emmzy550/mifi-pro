@@ -1,6 +1,6 @@
 import React from 'react';
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Key, Shield, Settings, LogOut, FileText, BookOpen, CreditCard, Lock } from 'lucide-react';
+import { LayoutDashboard, Key, Shield, Settings, LogOut, FileText, BookOpen, CreditCard, Lock, ClipboardList } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
 const SidebarItem = ({ icon: Icon, label, path }: { icon: any, label: string, path: string }) => {
@@ -44,6 +44,7 @@ export default function Layout() {
                 <nav className="flex-1 p-4 space-y-1">
                     <SidebarItem icon={LayoutDashboard} label="Overview" path="/" />
                     <SidebarItem icon={Key} label="API Keys" path="/keys" />
+                    <SidebarItem icon={ClipboardList} label="Manual Assessments" path="/manual-assessments" />
                     <SidebarItem path="/decisions" icon={FileText} label="Decisions" />
                     <SidebarItem path="/audit-logs" icon={Shield} label="Audit Logs" />
                     <SidebarItem path="/documentation" icon={BookOpen} label="Documentation" />

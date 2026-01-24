@@ -34,8 +34,6 @@ class CapacityAgent:
         result = {
             "is_valid": False,
             "capacity_based_max": 0.0,
-            "capacity_anchor_amount": 0.0,
-            "capacity_anchor_reason": "POLICY_DEFAULT",
             "observed_deposit_volume": 0.0,
             "transaction_count": 0,
             "history_days": 0,
@@ -108,8 +106,7 @@ class CapacityAgent:
                     result["micro_loan_exception"] = True
                     result["capacity_based_max"] = requested_amount
                     result["capacity_multiplier_used"] = cap_config.MICRO_MULTIPLIER
-                    result["capacity_anchor_amount"] = requested_amount
-                    result["capacity_anchor_reason"] = "MICRO_STARTER_POLICY"
+                    # Legacy anchor fields removed
                     print(f"INFO: Micro-starter exception applied for borrower {borrower_id}")
                 else:
                     result["rejection_reason"] = "INSUFFICIENT_OBSERVATION_WINDOW" if result["insufficient_observation"] else validation_result["reason"]
@@ -137,7 +134,6 @@ class CapacityAgent:
             
             result["capacity_multiplier_used"] = capacity_multiplier
             capacity_based_max = result["observed_deposit_volume"] * capacity_multiplier
-            result["capacity_anchor_reason"] = "AFFORDABILITY_LIMIT"
             
             # STEP 5: CHECK GENERAL STARTER LOAN ELIGIBILITY
             starter_loan_eligible = CapacityAgent._check_starter_loan_eligibility(
@@ -149,10 +145,10 @@ class CapacityAgent:
             if starter_loan_eligible:
                 if capacity_based_max > cap_config.STARTER_LOAN_CAP:
                     capacity_based_max = cap_config.STARTER_LOAN_CAP
-                    result["capacity_anchor_reason"] = "STARTER_LOAN_CAP"
+
             
             result["capacity_based_max"] = round(capacity_based_max, 2)
-            result["capacity_anchor_amount"] = result["capacity_based_max"]
+            # Legacy anchor fields removed
 
         # STEP 6: MARK AS VALID
         result["is_valid"] = True

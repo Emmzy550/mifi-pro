@@ -7,8 +7,11 @@ from fastapi import HTTPException, Security, Depends
 from fastapi.security import APIKeyHeader, OAuth2PasswordBearer
 from starlette.status import HTTP_403_FORBIDDEN, HTTP_401_UNAUTHORIZED
 from passlib.context import CryptContext
+import firebase_admin
+from firebase_admin import auth as firebase_auth
 from jose import jwt, JWTError
 
+import config
 from utils.db import Database
 from models.user import User, UserRole
 from models.api_key import APIKey, KeyStatus
@@ -16,7 +19,7 @@ from models.organization import OrgStatus
 from agents.audit_agent import AuditAgent
 
 # Configuration for Auth
-SECRET_KEY = "CHANGE_THIS_IN_PRODUCTION_SECRET_KEY"
+SECRET_KEY = config.SECRET_KEY
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
@@ -142,41 +145,131 @@ class AuthAgent:
     @classmethod
     async def get_current_user(cls, token: str = Depends(oauth2_scheme)) -> User:
         """
-        Validates JWT token for Dashboard access.
+        Validates Authentication:
+        1. Checks for local HS256 JWT (Internal API usage)
+        2. Falls back to Firebase ID Token (Dashboard Frontend)
         """
         credentials_exception = HTTPException(
             status_code=HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
+        
+        if not token:
+            print("[AUTH DEBUG] No token provided")
+            raise credentials_exception
+
         try:
+            # Force DB/Firebase Initialization
+            Database.get_db()
+        except Exception as db_error:
+            print(f"[AUTH DEBUG] Database initialization failed: {db_error}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database initialization failed: {str(db_error)}"
+            )
+
+        email = None
+        
+        # 1. ATTEMPT LOCAL JWT (HS256)
+        try:
+            print("[AUTH DEBUG] Attempting local HS256 JWT decoding...")
             payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-            email: str = payload.get("sub")
-            if email is None:
-                raise credentials_exception
+            email = payload.get("sub")
+            if email:
+                print(f"[AUTH DEBUG] Valid local JWT found for: {email}")
         except JWTError:
+            # This is expected for standard dashboard users who send Firebase tokens
+            print("[AUTH DEBUG] Local JWT decode failed. Attempting Firebase ID token...")
+        except Exception as e:
+            print(f"[AUTH DEBUG] Unexpected local JWT error: {e}")
+
+        # 2. ATTEMPT FIREBASE ID TOKEN (RS256)
+        if not email:
+            try:
+                # Decodes and verifies the token using Firebase Public Keys
+                decoded_token = firebase_auth.verify_id_token(token)
+                email = decoded_token.get("email")
+                if email:
+                     print(f"[AUTH DEBUG] Valid Firebase ID token found for: {email}")
+            except Exception as e:
+                print(f"[AUTH DEBUG] Firebase token verification failed: {e}")
+                raise credentials_exception
+        
+        if not email:
+            print("[AUTH DEBUG] All auth methods failed.")
             raise credentials_exception
         
-        user = Database.get_user_by_email(email)
-        if user is None:
-            raise credentials_exception
+        try:
+            print(f"[AUTH DEBUG] Looking up user by email: {email}")
+            user = Database.get_user_by_email(email)
+            if user is None:
+                print(f"[AUTH DEBUG] User {email} not found in Firestore Users collection")
+                raise credentials_exception
+            print(f"[AUTH DEBUG] Found user: {user.id}, org={user.organization_id}")
+        except HTTPException:
+            raise
+        except Exception as user_err:
+            print(f"[AUTH DEBUG] User lookup failed: {user_err}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"User lookup failed: {str(user_err)}"
+            )
             
-        # Check Organization Status
-        org = Database.get_organization(user.organization_id)
-        print(f"DEBUG AUTH: Checking Org {user.organization_id} for user {email}")
-        if not org:
-            print(f"DEBUG AUTH: Org {user.organization_id} NOT FOUND")
-            raise HTTPException(status_code=HTTP_403_FORBIDDEN, detail="Organization not found")
-        
-        print(f"DEBUG AUTH: Org Status is {org.status} (Type: {type(org.status)})")
-        if org.status != OrgStatus.ACTIVE:
-             print(f"DEBUG AUTH: Org Status {org.status} is NOT ACTIVE")
-             raise HTTPException(
-                status_code=HTTP_403_FORBIDDEN, detail="Organization is suspended or invalid"
-             )
-             
-        print(f"Auth Debug: Password verified.")
+        try:
+            # Check Organization Status
+            print(f"[AUTH DEBUG] Looking up organization: {user.organization_id}")
+            org = Database.get_organization(user.organization_id)
+            if not org:
+                print(f"[AUTH DEBUG] Organization {user.organization_id} not found")
+                raise HTTPException(status_code=HTTP_403_FORBIDDEN, detail="Organization not found")
+            
+            if org.status != OrgStatus.ACTIVE:
+                # Handle cases where OrgStatus is still a string in old records or Enum
+                status_val = org.status.value if hasattr(org.status, 'value') else org.status
+                if status_val != "ACTIVE":
+                    print(f"[AUTH DEBUG] Organization status is {status_val}, not ACTIVE")
+                    raise HTTPException(
+                        status_code=HTTP_403_FORBIDDEN, detail="Organization is suspended or invalid"
+                    )
+        except HTTPException:
+            raise
+        except Exception as org_err:
+            print(f"[AUTH DEBUG] Organization lookup failed: {org_err}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Organization lookup failed: {str(org_err)}"
+            )
+                 
+        print(f"[AUTH DEBUG] Authentication successful for {email}")
         return user
+
+    @classmethod
+    def create_firebase_user(cls, email: str, password: str, display_name: Optional[str] = None) -> str:
+        """
+        Creates a user in Firebase Authentication.
+        Returns the Firebase UID.
+        """
+        # Ensure Firebase is initialized
+        Database.get_db()
+        
+        try:
+            user = firebase_auth.create_user(
+                email=email,
+                password=password,
+                display_name=display_name
+            )
+            print(f"DEBUG AUTH: Created Firebase user {user.uid} for {email}")
+            return user.uid
+        except firebase_admin.exceptions.AlreadyExistsError:
+            # If user already exists in Firebase, we should probably try to get their UID
+            # and reuse it, or raise an error if this is unexpected.
+            user = firebase_auth.get_user_by_email(email)
+            print(f"DEBUG AUTH: Firebase user {email} already exists. Reusing UID {user.uid}")
+            return user.uid
+        except Exception as e:
+            print(f"DEBUG AUTH: Failed to create Firebase user: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to create authentication record: {str(e)}")
 
     @classmethod
     async def authenticate_user(cls, email: str, password: str) -> Optional[User]:
@@ -185,13 +278,11 @@ class AuthAgent:
             print(f"Auth Debug: User {email} not found in DB")
             return None
         
-        print(f"Auth Debug: Found user {user.id}. Verifying password (len: {len(password)})...")
         # Verify password
         if not cls.verify_password(password, user.password_hash):
             print(f"Auth Debug: Password verification failed for {email}.")
             return None
             
-        print(f"Auth Debug: Password verified.")
         return user
 
     @classmethod

@@ -29,7 +29,7 @@ def debug_pipeline():
     
     # 3. Decision Agent
     print("Running DecisionAgent...")
-    decision_results = DecisionAgent.recommend(risk_results, borrower)
+    decision_results = DecisionAgent.recommend(risk_results, borrower, 30)
     print(f"Decision Results: {decision_results}")
     
     # 4. Explanation Agent

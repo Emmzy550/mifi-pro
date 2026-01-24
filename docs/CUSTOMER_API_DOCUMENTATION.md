@@ -158,16 +158,16 @@ Typical response time: **2-3 seconds**
   "recommended_amount": 25000,
   "recommended_interest_rate": 15.0,
   "requested_amount": 25000,
-  "explanation": {
-    "summary": "Strong financial health with manageable debt levels...",
-    "risk_factors": [...],
-    "recommendations": [...]
-  },
+  "decision_summary": "Approved based on strong capacity.",
+  "customer_message": "Congratulations! Your loan request has been approved.",
   "flags": [],
   "metrics": {
     "debt_to_income": 0.111,
-    "affordability_ratio": 0.185
-  }
+    "affordability_ratio": 0.185,
+    "capacity_based_max": 28000
+  },
+  "policy_cap_amount": null,
+  "policy_cap_reason": null
 }
 ```
 
@@ -176,13 +176,17 @@ Typical response time: **2-3 seconds**
 | Field | Description |
 |-------|-------------|
 | `decision` | **APPROVED**, **CONDITIONAL_APPROVAL**, or **REJECT** |
-| `risk_score` | 0-100 scale (lower is better: 0-40=LOW, 41-70=MEDIUM, 71-100=HIGH) |
-| `risk_level` | Text summary: LOW, MEDIUM, or HIGH |
-| `recommended_amount` | Suggested loan amount (may differ from requested) |
+| `customer_message` | Safe, ready-to-display message for the borrower |
+| `recommended_amount` | Suggested loan amount (capped by capacity) |
+| `policy_cap_amount` | The maximum safe amount if the request was capped |
+| `policy_cap_reason` | Reason for the cap (e.g. "Exceeds 30% DTI Limit") |
 | `recommended_interest_rate` | Suggested annual interest rate (%) |
-| `explanation` | Detailed reasoning (for internal review, not customer-facing) |
-| `flags` | Warning indicators (e.g., "HIGH_DEBT", "LOW_INCOME") |
-| `metrics` | Key financial ratios used in assessment |
+
+### Capacity Guardrails (Creating Safe Loans)
+Our engine uses strictly Conservative Capacity Logic.
+- **We never recommend a loan that exceeds the borrower's repaying power.**
+- If `recommended_amount` < `requested_amount`, check `policy_cap_reason`.
+- This protects you from default and the borrower from over-indebtedness.
 
 ### Decision Types
 
@@ -282,13 +286,23 @@ Authorization: Bearer xxx      ❌ Wrong header name
 
 ---
 
+---
+
+### HTTP 402 Payment Required
+
+**Cause:** Organization has reached its plan limit (Production only)
+
+**Fix:**
+- Upgrade your plan
+- Top-up credits in the dashboard
+
 ### HTTP 429 Too Many Requests
 
-**Cause:** Rate limit exceeded (default: 100 requests/minute)
+**Cause:** Rate limit exceeded OR Sandbox usage limit reached.
 
 **Fix:**
 - Reduce request frequency
-- Implement exponential backoff
+- If in Sandbox: Upgrade to Production for unlimited volume
 - Contact support for higher limits if needed
 
 ---

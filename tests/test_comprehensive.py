@@ -49,7 +49,7 @@ def test_rule_only_mode():
         )
         
         risk_results = RiskAgent.evaluate(borrower)
-        decision_results = DecisionAgent.recommend(risk_results, borrower)
+        decision_results = DecisionAgent.recommend(risk_results, borrower, 30)
         
         print(f"\n✓ Borrower: {borrower.name}")
         print(f"  Risk Score: {risk_results['risk_score']:.2f} ({risk_results['risk_level']})")
@@ -92,7 +92,7 @@ def test_ensemble_mode():
         )
         
         risk_results = RiskAgent.evaluate(borrower)
-        decision_results = DecisionAgent.recommend(risk_results, borrower)
+        decision_results = DecisionAgent.recommend(risk_results, borrower, 30)
         
         print(f"\n✓ Borrower: {borrower.name}")
         print(f"  Risk Score: {risk_results['risk_score']:.2f} ({risk_results['risk_level']})")
@@ -132,7 +132,7 @@ def test_critical_flag_override():
     )
     
     risk_results = RiskAgent.evaluate(borrower)
-    decision_results = DecisionAgent.recommend(risk_results, borrower)
+    decision_results = DecisionAgent.recommend(risk_results, borrower, 30)
     
     print(f"\n✓ Borrower: {borrower.name}")
     print(f"  Risk Score: {risk_results['risk_score']:.2f} ({risk_results['risk_level']})")
@@ -214,7 +214,7 @@ def test_behavioral_v2_integration():
     
     # Run assessment
     risk_results = RiskAgent.evaluate(borrower)
-    decision_results = DecisionAgent.recommend(risk_results, borrower)
+    decision_results = DecisionAgent.recommend(risk_results, borrower, 30)
     explanation = ExplanationAgent.generate(risk_results, decision_results, borrower)
     
     print(f"\n✓ Borrower: {borrower.name}")
@@ -226,7 +226,9 @@ def test_behavioral_v2_integration():
     
     # Verify behavioral metrics are present
     assert risk_results['metrics'].get('behavioral_stability', 0) > 0, "Behavioral stability should be calculated"
-    assert "BEHAVIORAL INTELLIGENCE" in explanation or risk_results['metrics'].get('behavioral_stability', 0) == 0, "Explanation should include behavioral section"
+    # Fix: explanation is a dict, check 'explanation' or 'officer_view' field
+    explanation_text = explanation.get("explanation", "") + explanation.get("officer_view", "")
+    assert "BEHAVIORAL INTELLIGENCE" in explanation_text or risk_results['metrics'].get('behavioral_stability', 0) == 0, "Explanation should include behavioral section"
     
     print("\n✅ Behavioral V2 integration test PASSED")
 

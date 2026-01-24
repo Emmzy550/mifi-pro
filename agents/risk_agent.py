@@ -85,7 +85,7 @@ class RiskAgent:
             
         is_affordable, _ = check_affordability(borrower)
         if not is_affordable:
-            flags.append("Critical: Estimated unability to repay")
+            flags.append("Critical: Estimated inability to repay")
             
         # Check specific regulatory/policy flags
         _, critical_flags_list = check_critical_flags(borrower)
@@ -103,7 +103,7 @@ class RiskAgent:
         # ====================================================================
         # STEP 2: ML PREDICTION (OPTIONAL - V4)
         # ====================================================================
-        ml_prob = 0.0
+        ml_score = 0.0
         ml_feature_importance = []
         
         if config.ENABLE_ML_RISK_SCORING:
@@ -114,9 +114,10 @@ class RiskAgent:
                 # Simplified: Just pass borrower for V1.
                 ml_result = MLRiskAgent.predict(borrower)
                 if "error" not in ml_result:
-                    ml_prob = ml_result["prob_default"]
-                    ml_feature_importance = ml_result["feature_importance"]
-                    print(f"DEBUG: ML Prediction: {ml_prob}")
+                    # STRICT: Rename to raw_score
+                    ml_score = ml_result.get("prob_default", 0.0) # Assume agent still returns prob_default key internally
+                    ml_feature_importance = ml_result.get("feature_importance", [])
+                    print(f"DEBUG: ML Risk Signal: {ml_score}")
                 else:
                     print(f"WARN: ML Prediction failed: {ml_result['error']}")
             except Exception as e:
@@ -173,9 +174,9 @@ class RiskAgent:
             # ... (Rest of logic) ...
 
             
-            if config.ENABLE_ML_RISK_SCORING and ml_prob > 0:
+            if config.ENABLE_ML_RISK_SCORING and ml_score > 0:
                 # Weighted ensemble
-                final_score = (config.RULE_WEIGHT * rule_score) + (config.ML_WEIGHT * ml_prob)
+                final_score = (config.RULE_WEIGHT * rule_score) + (config.ML_WEIGHT * ml_score)
                 final_score += behavioral_penalty
                 override_applied = False
                 override_reason = None
@@ -246,8 +247,7 @@ class RiskAgent:
             "transaction_count": capacity_results["transaction_count"],
             "history_days": capacity_results["history_days"],
             "capacity_based_max": capacity_results["capacity_based_max"],
-            "capacity_anchor_amount": capacity_results["capacity_anchor_amount"],
-            "capacity_anchor_reason": capacity_results["capacity_anchor_reason"],
+            # Legacy anchor fields removed
             "capacity_multiplier_used": capacity_results["capacity_multiplier_used"],
             "starter_loan_applied": capacity_results["starter_loan_applied"],
             "micro_loan_exception": capacity_results.get("micro_loan_exception", False),
@@ -269,17 +269,18 @@ class RiskAgent:
             # Detailed metrics for transparency
             "metrics": {
                 **metrics,
-                "ml_prob_default": ml_prob,
+                "ml_raw_risk_score": ml_score, 
+                "ml_score_interpretation": "Uncalibrated model output used as one of several risk signals, not a probability of default.",
                 "ml_feature_importance": ml_feature_importance,
-                "behavioral_stability": behavioral_results["behavioral_stability"],
-                "saving_trend": behavioral_results["saving_trend"],
-                "utility_compliance": behavioral_results["utility_compliance"],
+                "behavioral_stability": behavioral_results.get("behavioral_stability", 0.0),
+                "saving_trend": behavioral_results.get("saving_trend", 0.0),
+                "utility_compliance": behavioral_results.get("utility_compliance", 0.0),
                 "behavioral_status": behavioral_results.get("behavioral_status", "UNKNOWN")
             },
             
             # Component scores for comparison
             "rule_based_score": rule_score,
-            "ml_based_score": ml_prob,
+            "ml_based_score": ml_score,
             
             # Governance metadata
             "data_source": data_source,

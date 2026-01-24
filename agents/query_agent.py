@@ -45,14 +45,15 @@ class QueryAgent:
         
         return {
             "answer": f"Your loan was capped at ${assessment.recommended_amount:,.0f} due to {reason_str}.",
-            "fact": f"Capacity Anchor: ${assessment.capacity_anchor_amount:,.0f} ({assessment.capacity_anchor_reason})"
+            "fact": f"Policy Limit: ${assessment.policy_cap_amount:,.0f} ({assessment.policy_cap_reason})" if assessment.policy_cap_amount else f"Capacity Limit: ${assessment.capacity_based_max:,.0f}"
         }
 
     @staticmethod
     def _handle_what_policy(assessment: Assessment) -> Dict[str, Any]:
         return {
             "answer": f"This decision was made under policy version {assessment.policy_version}.",
-            "details": f"Primary Policy: {assessment.capacity_anchor_reason}. Capacity Multiplier: {assessment.metrics.get('capacity_multiplier_used', 'N/A')}x."
+            "answer": f"This decision was made under policy version {assessment.policy_version}.",
+            "details": f"Primary Constraint: {assessment.policy_cap_reason or 'Affordability'}. Capacity Multiplier: {assessment.metrics.get('capacity_multiplier_used', 'N/A')}x."
         }
 
     @staticmethod

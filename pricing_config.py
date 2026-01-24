@@ -13,7 +13,7 @@ PLAN_CONFIG = {
     },
     "STARTER": {
         "monthly_limit": 1000,
-        "price": 49,
+        "price": 1,
         "name": "Starter",
         "production_access": True,
         "currency": "USD",

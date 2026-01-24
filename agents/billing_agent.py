@@ -54,6 +54,9 @@ class BillingAgent:
         # Load Usage Record
         record = Database.get_usage_record(org.id, environment)
         record = BillingAgent.check_usage_period(record)
+        
+        # DEBUG LOGGING (Temporary)
+        print(f"[BILLING_CHECK] Org: {org.id}, Env: {environment}, Usage: {record.assessment_count}, OrgLimit: {org.monthly_limit}")
 
         # Rule 1: PRODUCTION requires ACTIVE billing status
         # Note: Enterprise might be "ACTIVE" billing status even if custom check
@@ -93,9 +96,8 @@ class BillingAgent:
         
         limit = 0
         if environment == OrgEnvironment.SANDBOX:
-             # Force Sandbox-specific limit from config (usually 10) regardless of Plan?
-             # Yes, Sandbox is usually fixed.
-             limit = PLAN_CONFIG["SANDBOX"]["monthly_limit"]
+             # Use org.monthly_limit if set (Super Admin override), else default to Sandbox config (10)
+             limit = org.monthly_limit if org.monthly_limit is not None else PLAN_CONFIG["SANDBOX"]["monthly_limit"]
         else:
              limit = BillingAgent.get_plan_limit(org)
         
@@ -152,6 +154,10 @@ class BillingAgent:
     @staticmethod
     def get_full_usage_summary(org: Organization) -> Dict:
         """Aggregation for the Usage & Billing dashboard."""
+        
+        # Force reload of DB in case of external updates (Mock Mode)
+        Database.reload_db()
+
         # Refactored to use direct lookups instead of list query (avoid index issues)
         sandbox = Database.get_usage_record(org.id, OrgEnvironment.SANDBOX)
         production = Database.get_usage_record(org.id, OrgEnvironment.PRODUCTION)
@@ -165,10 +171,18 @@ class BillingAgent:
             effective_limit = 1000000000 # Return large number for frontend "Unlimited" check
 
 
+        # Refresh Org to get latest limits
+        fresh_org = Database.get_organization(org.id) or org
+        
+        # Fix: Support Sandbox overrides in summary
+        # If a custom limit is set on the org, it applies to Sandbox too (for now)
+        print(f"DEBUG: BillingAgent loaded org {org.id} with monthly_limit: {fresh_org.monthly_limit}")
+        sandbox_limit = fresh_org.monthly_limit if fresh_org.monthly_limit is not None else PLAN_CONFIG["SANDBOX"]["monthly_limit"]
+        
         return {
             "sandbox": {
                 "usage": sandbox.assessment_count,
-                "limit": PLAN_CONFIG["SANDBOX"]["monthly_limit"],
+                "limit": sandbox_limit,
                 "status": "Free"
             },
             "production": {

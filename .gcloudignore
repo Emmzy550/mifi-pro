@@ -1,0 +1,20 @@
+# This file specifies files that are *not* uploaded to Google Cloud
+# using gcloud. It follows the same syntax as .gitignore, with the addition of
+# "#!include" directives.
+
+.gcloudignore
+.git
+.gitignore
+
+node_modules
+
+# Include external gitignore rules first
+#!include:.gitignore
+
+# then EXPLICITLY ALLOW things we need (overriding any excludes from above)
+!requirements.txt
+!Dockerfile
+!Procfile
+!firebase_main.py
+!main_cloudrun.py
+!frontend/dist

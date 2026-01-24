@@ -1,0 +1,72 @@
+# Exclude unnecessary files and directories
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+node_modules/
+.git/
+.gitignore
+venv/
+.venv/
+ENV/
+env/
+
+# Exclude frontend build artifacts
+frontend/
+assets/
+static/
+
+# Exclude test files
+tests/
+test_*.py
+*_test.py
+verify_*.py
+debug_*.py
+check_*.py
+inspect_*.py
+create_*.py
+migrate_*.py
+reconcile_*.py
+repair_*.py
+reset_*.py
+seed_*.py
+fix_*.py
+find_*.py
+final_*.py
+diagnostic_*.py
+demo_*.py
+safety_*.py
+
+# Exclude documentation
+docs/
+*.md
+README.md
+
+# Exclude HTML/CSS/JS files (not needed for backend)
+*.html
+*.css
+*.js
+*.json
+!ml_models/*.json
+
+# Exclude logs and temp files
+*.log
+*.txt
+!requirements.txt
+server_output
+usage_*.json
+test_output.json
+synthetic_transactions.json
+
+# Exclude secrets
+serviceAccountKey.json
+.env
+.firebaserc
+firebase.json
+
+# Exclude config files
+.github/
+.dockerignore
+.gcloudignore
+Procfile

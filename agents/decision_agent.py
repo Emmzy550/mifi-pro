@@ -32,38 +32,33 @@ class DecisionAgent:
     """
     
     @staticmethod
-    def recommend(risk_data: dict, borrower: Borrower) -> dict:
+    def recommend(risk_data: dict, borrower: Borrower, requested_duration_days: int) -> dict:
         """
-        Determines the loan recommendation and terms with CAPACITY ANCHORING.
+        Determines the loan recommendation and terms with STRICT DECISION INVARIANTS.
         
         CRITICAL CHANGE (Bank-Grade):
-        All loan amounts are now HARD-CAPPED at capacity_based_max.
-        This limit cannot be bypassed by ML, risk scores, or any other factor.
-        
-        DECISION LOGIC:
-        1. Check for critical flags → REJECT
-        2. Enforce capacity_based_max (NON-NEGOTIABLE)
-        3. Check for starter loan eligibility
-        4. Apply risk-based adjustments to interest rates
-        5. Validate explanation consistency
+        - All loan amounts are HARD-CAPPED at capacity_based_max.
+        - All loan durations are HARD-CAPPED at policy maximums.
+        - Outcomes are strictly APPROVE, REJECT, or REFER.
         
         Args:
             risk_data: Output from RiskAgent.evaluate()
             borrower: Borrower profile with loan request
+            requested_duration_days: Loan duration in days
             
         Returns:
             Dictionary containing:
-            - decision: APPROVE/CONDITIONAL/REJECT
-            - recommended_amount: Loan amount (capacity-constrained)
-            - recommended_interest_rate: APR based on risk
+            - decision: APPROVE/REJECT/REFER
+            - recommended_amount: Loan amount (or None for REFER)
+            - recommended_duration_days: Approved duration (or None for REJECT/REFER)
+            - recommended_interest_rate: APR based on risk and duration
+            - interest_rate_basis: Breakdown of rate calculation
             - decision_metadata: Audit trail of all decision factors
         """
         import lending_config.capacity_config as cap_config
         
-        flag = None
         risk_level = risk_data["risk_level"]
         flags = risk_data["flags"]
-        risk_score = risk_data["risk_score"]
         capacity_validation = risk_data["capacity_validation"]
         
         # Extract capacity metrics
@@ -74,113 +69,126 @@ class DecisionAgent:
         # Start with optimistic defaults
         decision = Decision.APPROVE
         recommended_amount = borrower.loan_amount_requested
-        interest_rate = config.BASE_INTEREST_RATE
         
         # Track decision metadata for audit trail
         decision_metadata = {
             "requested_amount": borrower.loan_amount_requested,
+            "requested_duration_days": requested_duration_days,
             "capacity_based_max": capacity_based_max,
-            "capacity_anchor_amount": capacity_validation.get("capacity_anchor_amount", 0.0),
-            "capacity_anchor_reason": capacity_validation.get("capacity_anchor_reason", "POLICY_DEFAULT"),
+            "policy_cap_amount": None,
+            "policy_cap_reason": None,
             "starter_loan_applied": starter_loan_applied,
             "observed_deposit_volume": observed_deposit_volume,
             "transaction_count": capacity_validation.get("transaction_count", 0),
             "deposit_transaction_count": capacity_validation.get("audit_trail", {}).get("deposit_volume_calculation", {}).get("deposit_count", 0),
             "deposit_source": "MOBILE_MONEY_DEPOSITS_ONLY",
             "observation_window_days": capacity_validation.get("observation_window_days", 30),
-            "policy_version": "v1.2.0-human-first",
+            "policy_version": "v1.5.0-duration-handling",
             "blocking_factors": [],
             "adjustments_applied": []
         }
         
         # ====================================================================
-        # RULE 1: HARD REJECTION (Critical Flags or Invalid Capacity)
+        # RULE 1: DURATION POLICY ENFORCEMENT
         # ====================================================================
-        if any("CRITICAL" in f.upper() for f in flags) or risk_level == "HIGH" or any("OBSERVATION_WINDOW" in f.upper() for f in flags):
-            is_insufficient_window = any("OBSERVATION_WINDOW" in f.upper() for f in flags)
-            
-            if is_insufficient_window:
-                decision = Decision.WAIT
-                decision_metadata["capacity_anchor_reason"] = "INSUFFICIENT_OBSERVATION_WINDOW"
-                decision_metadata["blocking_factors"].append("INSUFFICIENT_OBSERVATION_WINDOW")
-            else:
-                decision = Decision.REJECT
-                critical_flags = [f for f in flags if "CRITICAL" in f.upper()]
-                decision_metadata["blocking_factors"].extend([f.upper() for f in critical_flags])
-                if risk_level == "HIGH":
-                    decision_metadata["blocking_factors"].append("HIGH_RISK_SCORE")
+        
+        if requested_duration_days < cap_config.MIN_DURATION_DAYS:
+            decision = Decision.REJECT
+            decision_metadata["blocking_factors"].append("DURATION_POLICY_VIOLATION")
+            decision_metadata["duration_rejection_reason"] = (
+                f"Requested duration ({requested_duration_days} days) below minimum ({cap_config.MIN_DURATION_DAYS} days)"
+            )
+            return {
+                "decision": decision,
+                "recommended_amount": 0.0,
+                "recommended_duration_days": None,
+                "recommended_interest_rate": 0.0,
+                "interest_rate_basis": None,
+                "decision_metadata": decision_metadata
+            }
 
-            recommended_amount = 0
-            interest_rate = 0
-            print(f"DEBUG: Outcome: {decision}")
+        # Calculate recommended duration
+        max_allowed_duration = cap_config.MAX_DURATION_DAYS
+        if starter_loan_applied:
+            max_allowed_duration = min(max_allowed_duration, cap_config.STARTER_LOAN_MAX_DURATION_DAYS)
+
+        recommended_duration = min(requested_duration_days, max_allowed_duration)
+
+        # Track duration adjustments
+        if recommended_duration < requested_duration_days:
+            if starter_loan_applied:
+                decision_metadata["adjustments_applied"].append({
+                    "type": "DURATION_ADJUSTED_STARTER_POLICY",
+                    "requested": requested_duration_days,
+                    "recommended": recommended_duration,
+                    "reason": "Starter loan policy limits duration to build repayment history"
+                })
+            else:
+                decision_metadata["adjustments_applied"].append({
+                    "type": "DURATION_POLICY_CAP_APPLIED",
+                    "requested": requested_duration_days,
+                    "recommended": recommended_duration,
+                    "reason": f"Duration capped at policy maximum of {cap_config.MAX_DURATION_DAYS} days"
+                })
+
+        # ====================================================================
+        # RULE 2: HARD REJECTION / REFERRAL
+        # ====================================================================
+        
+        # 2A. INSUFFICIENT DATA → REFER (Manual Review)
+        is_insufficient_window = any("OBSERVATION_WINDOW" in f.upper() for f in flags)
+        
+        if is_insufficient_window:
+            decision = Decision.REFER
+            decision_metadata["blocking_factors"].append("INSUFFICIENT_OBSERVATION_WINDOW")
+            
+            return {
+                "decision": decision,
+                "recommended_amount": None,
+                "recommended_duration_days": None,
+                "recommended_interest_rate": 0,
+                "interest_rate_basis": None,
+                "decision_metadata": decision_metadata
+            }
+            
+        # 2B. CRITICAL RISK → REJECT
+        if any("CRITICAL" in f.upper() for f in flags) or risk_level == "HIGH":
+            decision = Decision.REJECT
+            critical_flags = [f for f in flags if "CRITICAL" in f.upper()]
+            decision_metadata["blocking_factors"].extend([f.upper() for f in critical_flags])
+            
+            if risk_level == "HIGH":
+                decision_metadata["blocking_factors"].append("HIGH_RISK_SCORE")
+                
+            if not decision_metadata["blocking_factors"]:
+                 decision_metadata["blocking_factors"].append("POLICY_RISK_THRESHOLD_EXCEEDED")
+
+            return {
+                "decision": decision,
+                "recommended_amount": 0.0,
+                "recommended_duration_days": None,
+                "recommended_interest_rate": 0.0,
+                "interest_rate_basis": None,
+                "decision_metadata": decision_metadata
+            }
         
         # ====================================================================
-        # RULE 2: CAPACITY-BASED MAXIMUM (NON-NEGOTIABLE ANCHOR)
+        # RULE 3: CAPACITY-BASED APPROVAL (With Caps)
         # ====================================================================
-        # This is the CORE of bank-grade lending
-        # NO OTHER FACTOR can override this limit
         
-        elif capacity_based_max > 0:
+        if capacity_based_max > 0:
             # Apply hard cap to requested amount
             if recommended_amount > capacity_based_max:
-                decision_metadata["blocking_factors"].append("CAPACITY_SAFETY_LIMIT")
                 decision_metadata["adjustments_applied"].append({
                     "type": "CAPACITY_CAP",
                     "original": recommended_amount,
                     "capped_to": capacity_based_max,
-                    "reason": f"Exceeded safety limit based on observed transaction activity"
+                    "reason": "Exceeded safety limit based on observed transaction activity"
                 })
                 recommended_amount = capacity_based_max
-                
-                # Force CONDITIONAL if we reduced the amount
-                if decision == Decision.APPROVE:
-                    decision = Decision.CONDITIONAL
             
-            # ====================================================================
-            # RULE 3: STARTER LOAN POLICY
-            # ====================================================================
-            if starter_loan_applied:
-                decision = Decision.CONDITIONAL
-                interest_rate = config.BASE_INTEREST_RATE + cap_config.STARTER_INTEREST_PREMIUM
-                
-                # Check for Micro-Starter Exception specifically
-                is_micro_starter = capacity_validation.get("micro_loan_exception", False)
-                
-                if is_micro_starter:
-                    # Add flag to risk_data flags so ExplanationAgent sees it
-                    starter_flag = "STARTER_LOAN_APPROVED_LIMITED_HISTORY"
-                    if starter_flag not in risk_data["flags"]:
-                        risk_data["flags"].append(starter_flag)
-                        
-                    decision_metadata["blocking_factors"].append("MICRO_STARTER_POLICY_CAP")
-                    decision_metadata["adjustments_applied"].append({
-                        "type": "MICRO_STARTER_LOAN",
-                        "premium_added": cap_config.STARTER_INTEREST_PREMIUM,
-                        "micro_cap": cap_config.MICRO_LOAN_CAP,
-                        "micro_multiplier": cap_config.MICRO_MULTIPLIER,
-                        "reason": "Approved under Micro-Starter exception due to limited history"
-                    })
-                else:
-                    decision_metadata["blocking_factors"].append("STARTER_LOAN_CAP")
-                    decision_metadata["adjustments_applied"].append({
-                        "type": "STARTER_LOAN",
-                        "premium_added": cap_config.STARTER_INTEREST_PREMIUM,
-                        "reason": "Approved under Starter Loan policy due to limited history or deposit activity"
-                    })
-                
-                print(f"DEBUG: Starter loan for {borrower.id}: "
-                      f"${recommended_amount:.0f} at {interest_rate}%" + 
-                      (" (MICRO)" if is_micro_starter else ""))
-            
-            # ====================================================================
-            # RULE 4: RISK-BASED ADJUSTMENTS
-            # ====================================================================
-            # These can adjust interest rates but NOT amounts (already capped)
-            
-            elif any("WARNING" in f.upper() for f in flags) or risk_level == "MEDIUM":
-                decision = Decision.CONDITIONAL
-                
-                # Apply additional haircut for medium risk (on top of capacity cap)
+            # Risk Haircut for Medium Risk
+            if any("WARNING" in f.upper() for f in flags) or risk_level == "MEDIUM":
                 risk_adjusted_amount = recommended_amount * config.CONDITIONAL_AMOUNT_MULTIPLIER
                 if risk_adjusted_amount < recommended_amount:
                     decision_metadata["adjustments_applied"].append({
@@ -190,62 +198,74 @@ class DecisionAgent:
                         "multiplier": config.CONDITIONAL_AMOUNT_MULTIPLIER
                     })
                     recommended_amount = risk_adjusted_amount
-                    # Update capacity anchor if risk further constrained it
-                    decision_metadata["capacity_anchor_amount"] = recommended_amount
-                    decision_metadata["capacity_anchor_reason"] = "RISK_ADJUSTED_LIMIT"
-                    decision_metadata["blocking_factors"].append("MEDIUM_RISK_HAIRCUT")
-                
-                # Increase interest rate for risk premium
-                interest_rate = config.CONDITIONAL_INTEREST_RATE
-                
-                print(f"DEBUG: Conditional approval for {borrower.id}: "
-                      f"${recommended_amount:.0f} at {interest_rate}% (medium risk)")
+                    
+                    if decision_metadata["policy_cap_amount"] is None:
+                        decision_metadata["policy_cap_amount"] = recommended_amount
+                        decision_metadata["policy_cap_reason"] = f"RISK_HAIRCUT_{risk_level}"
             
-            elif any("CAUTION" in f.upper() for f in flags):
-                decision = Decision.CONDITIONAL
-                interest_rate = config.CAUTION_INTEREST_RATE
-                decision_metadata["adjustments_applied"].append({
-                    "type": "BEHAVIORAL_CAUTION",
-                    "rate_adjustment": "BASE + CAUTION_PREMIUM"
-                })
-                
-                print(f"DEBUG: Conditional approval for {borrower.id}: "
-                      f"${recommended_amount:.0f} at {interest_rate}% (behavioral caution)")
-            
-            else:
-                # Full approval - within capacity, no flags
-                decision = Decision.APPROVE
-                interest_rate = config.BASE_INTEREST_RATE
-                
-                print(f"DEBUG: Approving {borrower.id}: "
-                      f"${recommended_amount:.0f} at {interest_rate}%")
-        
+            # Clean Approval (no more amount adjustments needed)
+            decision = Decision.APPROVE
         else:
-            # No capacity available (should have been rejected in RiskAgent)
             decision = Decision.REJECT
             recommended_amount = 0
-            interest_rate = 0
-            decision_metadata["adjustments_applied"].append("NO_CAPACITY_AVAILABLE")
             decision_metadata["blocking_factors"].append("INSUFFICIENT_TRANSACTION_HISTORY")
-        
-        # ====================================================================
-        # RULE 5: FINAL VALIDATION & POLISH
-        # ====================================================================
-        # Policy: Lack of time ≠ bad behavior (Decision MUST be WAIT or CONDITIONAL)
-        if "INSUFFICIENT_OBSERVATION_WINDOW" in decision_metadata["blocking_factors"]:
-            if decision == Decision.REJECT:
-                decision = Decision.WAIT
+            return {
+                "decision": decision,
+                "recommended_amount": 0.0,
+                "recommended_duration_days": None,
+                "recommended_interest_rate": 0.0,
+                "interest_rate_basis": None,
+                "decision_metadata": decision_metadata
+            }
 
-        # Ensure we never exceed capacity_based_max
-        if recommended_amount > capacity_based_max and capacity_based_max > 0:
-            print(f"WARNING: Amount {recommended_amount} exceeds capacity {capacity_based_max}. Forcing cap.")
-            recommended_amount = capacity_based_max
-            decision_metadata["adjustments_applied"].append("SAFETY_CAP_ENFORCED")
+        # ====================================================================
+        # RULE 4: INTEREST RATE CALCULATION (Explainable)
+        # ====================================================================
         
+        rate_adjustments = []
+        final_rate = config.BASE_INTEREST_RATE
+
+        # Risk-based adjustment
+        if any("WARNING" in f.upper() for f in flags) or risk_level == "MEDIUM":
+            premium = config.CONDITIONAL_INTEREST_RATE - config.BASE_INTEREST_RATE
+            rate_adjustments.append({"type": "MEDIUM_RISK_PREMIUM", "value": premium})
+            final_rate += premium
+        elif any("CAUTION" in f.upper() for f in flags):
+            premium = config.CAUTION_INTEREST_RATE - config.BASE_INTEREST_RATE
+            rate_adjustments.append({"type": "CAUTION_PREMIUM", "value": premium})
+            final_rate += premium
+
+        # Starter loan premium
+        if starter_loan_applied:
+            rate_adjustments.append({"type": "STARTER_LOAN_PREMIUM", "value": cap_config.STARTER_INTEREST_PREMIUM})
+            final_rate += cap_config.STARTER_INTEREST_PREMIUM
+
+        # Duration-based adjustment
+        if recommended_duration <= cap_config.SHORT_TENOR_THRESHOLD_DAYS:
+            rate_adjustments.append({"type": "SHORT_TENOR_DISCOUNT", "value": -cap_config.SHORT_TENOR_DISCOUNT})
+            final_rate -= cap_config.SHORT_TENOR_DISCOUNT
+        elif recommended_duration >= cap_config.LONG_TENOR_THRESHOLD_DAYS:
+            rate_adjustments.append({"type": "LONG_TENOR_PREMIUM", "value": cap_config.LONG_TENOR_PREMIUM})
+            final_rate += cap_config.LONG_TENOR_PREMIUM
+
+        interest_rate_basis = {
+            "base_rate": config.BASE_INTEREST_RATE,
+            "adjustments": rate_adjustments,
+            "final_rate": final_rate
+        }
+
+        # FINAL SAFETY CHECK
+        if decision == Decision.APPROVE and recommended_amount <= 0:
+             decision = Decision.REJECT
+             decision_metadata["blocking_factors"].append("CALCULATED_AMOUNT_ZERO")
+             recommended_amount = 0
+
         return {
             "decision": decision,
-            "recommended_amount": round(recommended_amount, 2),
-            "recommended_interest_rate": interest_rate,
+            "recommended_amount": round(recommended_amount, 2) if recommended_amount else None,
+            "recommended_duration_days": int(recommended_duration) if decision == Decision.APPROVE else None,
+            "recommended_interest_rate": final_rate,
+            "interest_rate_basis": interest_rate_basis,
             "decision_metadata": decision_metadata
         }
 

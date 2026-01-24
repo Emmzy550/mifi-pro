@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { CreditCard, TrendingUp, Calendar, AlertCircle, Shield, Rocket, X, Globe, Smartphone, Landmark, CheckCircle2 } from 'lucide-react';
 import { useAuth, api } from '../context/AuthContext';
+import toast from 'react-hot-toast';
 
 interface UsageRecord {
     usage: number;
@@ -144,7 +145,7 @@ export default function UsageBilling() {
 
             fetchUsage();
         } catch (err: any) {
-            alert(err.response?.data?.detail || err.message);
+            toast.error(err.response?.data?.detail || err.message);
         } finally {
             setUpgrading(false);
         }
@@ -279,7 +280,7 @@ export default function UsageBilling() {
                         features={["Custom Limits", "SLA Support", "Dedicated Account Manager"]}
                         currentPlan={usage.current_plan}
                         paymentStatus={usage.payment_status}
-                        onUpgrade={() => alert("Please contact sales for Enterprise upgrades.")}
+                        onUpgrade={() => toast.success("Please contact sales for Enterprise upgrades.")}
                         loading={false}
                     />
                 </div>

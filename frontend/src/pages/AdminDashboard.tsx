@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useAuth, api } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import { X, Activity, Shield, Key, BarChart, AlertTriangle, CheckCircle2, RefreshCw, Slash, Settings } from 'lucide-react';
+import toast from 'react-hot-toast';
 
 export default function AdminDashboard() {
     const { user } = useAuth();
@@ -103,13 +104,13 @@ export default function AdminDashboard() {
                 setNewOrgName('');
                 setNewOrgAdminEmail('');
                 fetchOrgs();
-                alert("Organization created successfully.");
+                toast.success("Organization created successfully.");
             }
         } catch (e: any) {
             console.error(e);
             // Show specific error from backend (e.g. Email exists)
             const errorMsg = e.response?.data?.detail || "Failed to create organization. Please try again.";
-            alert(errorMsg);
+            toast.error(errorMsg);
         } finally {
             setLoading(false);
         }
@@ -122,7 +123,7 @@ export default function AdminDashboard() {
             await fetchPlatformStats();
         } catch (e) {
             console.error(e);
-            alert("Failed to update AI settings");
+            toast.error("Failed to update AI settings");
         } finally {
             setLoading(false);
         }
@@ -138,7 +139,7 @@ export default function AdminDashboard() {
             setNewLimit(res.data.organization.monthly_limit || 0);
         } catch (e) {
             console.error(e);
-            alert("Failed to fetch organization details.");
+            toast.error("Failed to fetch organization details.");
         } finally {
             setDetailsLoading(false);
         }
@@ -156,7 +157,7 @@ export default function AdminDashboard() {
             fetchOrgs(); // Refresh list
         } catch (e) {
             console.error(e);
-            alert("Failed to update organization status.");
+            toast.error("Failed to update organization status.");
         } finally {
             setActionLoading(false);
         }
@@ -170,10 +171,10 @@ export default function AdminDashboard() {
         try {
             const res = await api.post(`/admin/organizations/${orgDetails.organization.id}/rotate-keys`);
             setRotatedKey(res.data.new_key);
-            alert("API keys rotated successfully. Please copy the new key below.");
+            toast.success("API keys rotated successfully.");
         } catch (e) {
             console.error(e);
-            alert("Failed to rotate API keys.");
+            toast.error("Failed to rotate API keys.");
         } finally {
             setActionLoading(false);
         }
@@ -186,10 +187,10 @@ export default function AdminDashboard() {
             await api.patch(`/admin/organizations/${orgDetails.organization.id}`, { monthly_limit: newLimit });
             await fetchOrgDetails(orgDetails.organization.id);
             fetchOrgs(); // Refresh list
-            alert("Limit updated successfully.");
+            toast.success("Limit updated successfully.");
         } catch (e) {
             console.error(e);
-            alert("Failed to update usage limit.");
+            toast.error("Failed to update usage limit.");
         } finally {
             setActionLoading(false);
         }

@@ -11,6 +11,9 @@ import Settings from './pages/Settings';
 import Documentation from './pages/Documentation';
 import UsageBilling from './pages/UsageBilling';
 import AdminDashboard from './pages/AdminDashboard';
+import ManualAssessments from './pages/ManualAssessments';
+import DecisionReview from './pages/DecisionReview';
+import { Toaster } from 'react-hot-toast';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
     const { user, isLoading } = useAuth();
@@ -24,6 +27,7 @@ function PrivateRoute({ children }: { children: React.ReactNode }) {
 export default function App() {
     return (
         <BrowserRouter>
+            <Toaster position="top-right" />
             <AuthProvider>
                 <Routes>
                     <Route path="/login" element={<Login />} />
@@ -35,7 +39,9 @@ export default function App() {
                     }>
                         <Route index element={<Dashboard />} />
                         <Route path="keys" element={<APIKeys />} />
+                        <Route path="manual-assessments" element={<ManualAssessments />} />
                         <Route path="decisions" element={<Decisions />} />
+                        <Route path="decisions/:assessmentId" element={<DecisionReview />} />
                         <Route path="audit-logs" element={<AuditLogs />} />
                         <Route path="documentation" element={<Documentation />} />
                         <Route path="usage-billing" element={<UsageBilling />} />

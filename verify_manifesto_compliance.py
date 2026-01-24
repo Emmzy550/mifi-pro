@@ -43,7 +43,7 @@ def test_human_first_compliance():
         
         # 1. Pipeline Execution
         risk_results = RiskAgent.evaluate(borrower)
-        decision_results = DecisionAgent.recommend(risk_results, borrower)
+        decision_results = DecisionAgent.recommend(risk_results, borrower, 30)
         explanation_results = ExplanationAgent.generate(risk_results, decision_results, borrower)
         
         # 2. Structural Integrity (Structured Messages)

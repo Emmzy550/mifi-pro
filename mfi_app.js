@@ -118,7 +118,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const totalCount = data.length;
         const avgRisk = data.reduce((acc, curr) => acc + curr.risk_score, 0) / totalCount;
-        const avgPD = data.reduce((acc, curr) => acc + (curr.metrics.ml_prob_default || 0), 0) / totalCount;
+        const avgPD = data.reduce((acc, curr) => acc + (curr.metrics.ml_raw_risk_score || 0), 0) / totalCount;
         const approvals = data.filter(a => a.decision === 'APPROVE').length;
         const approvalRate = (approvals / totalCount) * 100;
 

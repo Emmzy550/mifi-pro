@@ -89,6 +89,17 @@ class Organization(BaseModel):
             if v_upper == "SUSPENDED": return BillingStatus.SUSPENDED
         return v
 
+    @field_validator('payment_status', mode='before')
+    @classmethod
+    def normalize_payment_status(cls, v):
+        if isinstance(v, str):
+            v_upper = v.upper()
+            if v_upper == "UNPAID": return PaymentStatus.UNPAID
+            if v_upper == "PENDING": return PaymentStatus.PENDING
+            if v_upper == "PAID": return PaymentStatus.PAID
+            if v_upper == "FAILED": return PaymentStatus.FAILED
+        return v
+
     class Config:
         json_schema_extra = {
             "example": {

@@ -8,7 +8,7 @@ This guide provides step-by-step instructions on how to test the **Borrower Inta
 
 Before sending requests, ensure you have the following information:
 
-1.  **Base URL**: `http://127.0.0.1:8000` (Update if your server is running elsewhere).
+1.  **Base URL**: `https://api-139601123738.us-central1.run.app` (Deployed Production API)
 2.  **API Key**: You need an active API key. You can find or create one in the Dashboard settings.
 
 ### Required Headers
@@ -55,7 +55,7 @@ The engine needs a borrower profile to analyze.
 
 To test how the engine handles behavioral data (Mobile Money, Utilities), upload context for the borrower.
 
-*   **Endpoint**: `POST {{BaseURLam 
+*   **Endpoint**: `POST {{BaseURL}}/behavior/upload`
 *   **Body Type**: `JSON`
 
 ### Request Body Example:

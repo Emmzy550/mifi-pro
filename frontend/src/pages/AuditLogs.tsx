@@ -77,8 +77,15 @@ export default function AuditLogs() {
                                         {log.actor}
                                     </div>
                                 </td>
-                                <td className="px-6 py-4 text-slate-500 font-mono text-xs max-w-xs truncate">
-                                    {JSON.stringify(log.details)}
+                                <td className="px-6 py-4 text-slate-500 font-mono text-xs max-w-sm">
+                                    {log.event_type === 'BORROWER_SMS_SENT' ? (
+                                        <div className="space-y-1">
+                                            <div className="font-bold text-slate-700">SMS ID: {log.details.assessment_id}</div>
+                                            <div className="italic text-slate-400">Status: {log.details.status} | {log.details.environment}</div>
+                                        </div>
+                                    ) : (
+                                        <div className="truncate">{JSON.stringify(log.details)}</div>
+                                    )}
                                 </td>
                             </tr>
                         ))}

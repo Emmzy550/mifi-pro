@@ -35,106 +35,86 @@ class ExplanationAgent:
         # =========================================================
         # SECTION 1: EXECUTIVE SUMMARY
         # =========================================================
+        # =========================================================
+        # SECTION 1: EXECUTIVE SUMMARY
+        # =========================================================
         requested_amt = borrower.loan_amount_requested if borrower else None
         
         is_starter = "STARTER_LOAN_APPROVED_LIMITED_HISTORY" in flags
-        is_equality = requested_amt is not None and abs(requested_amt - decision_results['recommended_amount']) < 0.01
+        is_equality = requested_amt is not None and abs(requested_amt - (decision_results.get('recommended_amount') or 0)) < 0.01
 
-        if decision == "APPROVE" or decision == "CONDITIONAL" or decision == "WAIT":
-            is_insufficient_window = (decision_metadata.get("capacity_anchor_reason") == "INSUFFICIENT_OBSERVATION_WINDOW" or 
-                                     any("OBSERVATION_WINDOW" in f.upper() for f in blocking_factors))
+        # HANDLE REFER (Manual Review)
+        if decision == "REFER":
+            decision_summary = "Application deferred for manual review."
+            summary = "Automated processing was paused due to data requirements or policy flags."
             
-            if is_insufficient_window and decision == "WAIT":
-                summary = "Application deferred due to insufficient observation window (verified income present)."
-                customer_summary = "We’ve successfully verified your income, but we need to observe account activity over a longer period."
-                
-                win_days = decision_metadata.get('observation_window_days', 0)
-                win_str = "1 day" if win_days == 1 else f"{win_days} days"
-                
-                policy_justification = f"Income verified but observation window ({win_str}) is below the required 30-day threshold."
-                action_item = "Please continue using your account and feel free to reapply once you have 30 days of consistent activity."
-            
-            if decision == "APPROVE" and not is_insufficient_window:
-                decision_summary = "Application recommended for approval based on policy compliance."
-                if is_equality:
-                    summary = "This applicant demonstrates a stable financial profile with favorable behavioral indicators."
-                    customer_summary = "Great news! Your application meets our standard criteria, and we're happy to recommend approval for the full amount."
-                    policy_justification = f"The requested amount is within the system's policy-defined capacity anchor of ${decision_results['recommended_amount']:,.0f}."
-                    action_item = "No further action needed from the borrower at this time."
-                elif requested_amt:
-                    summary = f"This applicant demonstrates stable financial activity. Requested: ${requested_amt:,.0f} | Recommended: ${decision_results['recommended_amount']:,.0f}."
-                    customer_summary = f"We've reviewed your activity and can offer you a loan of ${decision_results['recommended_amount']:,.0f}."
-                    policy_justification = f"The recommended amount was anchored to the institutional safety limit of ${decision_results['recommended_amount']:,.0f}."
-                    action_item = "Review the modified loan amount and accept if it meets your needs."
-                else:
-                    summary = "This applicant demonstrates a stable financial profile with favorable behavioral indicators."
-                    customer_summary = "Your financial profile shows consistent activity supporting this approval."
-            
-            elif decision == "WAIT":
-                decision_summary = "Application deferred to allow for further observation."
-                if not is_insufficient_window:
-                     summary = "Request parked for more data."
-                     customer_summary = "We're currently reviewing your request and will update you shortly."
+            customer_summary = "We are reviewing your application manually and will contact you shortly."
+            action_item = "No immediate action required. Our team will reach out if we need more documents."
+            policy_justification = "System could not automatically adjudicate based on available data (e.g., insufficient observation window)."
 
-            elif decision == "CONDITIONAL":
-                decision_summary = "Approved with modifications to align with institutional safety policies."
-                
-                if is_starter:
-                    recommended_amt = decision_results['recommended_amount']
-                    deposit_volume = metrics.get("observed_deposit_volume", 0)
-                    
-                    if is_equality:
-                        summary = "Applicant approved for conditional entry-level credit."
-                        customer_summary = "Welcome! Since you're new to our system, we've approved you for a starter loan to help you build your record."
-                        policy_justification = f"Approved under Micro-Starter policy with loan size capped at the policy limit of ${recommended_amt:,.0f}."
-                        action_item = "Repay this starter loan on time to unlock higher limits in the future."
-                    elif deposit_volume > 0:
-                        summary = f"Applicant approved for conditional entry-level credit. Requested: ${requested_amt:,.0f} | Recommended: ${recommended_amt:,.0f}."
-                        customer_summary = f"We've started you with a loan of ${recommended_amt:,.0f} while you establish your transaction history with us."
-                        policy_justification = f"The amount was restricted to the policy anchor of ${recommended_amt:,.0f} per Micro-Starter guidelines."
-                        action_item = "Consistent transaction activity will help us increase your limits over time."
-                    else:
-                        summary = "Applicant approved for conditional entry-level credit based on minimum safety bounds."
-                        customer_summary = "We've approved a small starter loan to help us begin understanding your credit journey."
-                        policy_justification = "Amount restricted to starter limits due to limited verifiable deposit history."
-                        action_item = "Start building your credit history with this initial loan."
-                elif requested_amt:
-                    recommended_amt = decision_results['recommended_amount']
-                    summary = f"This applicant shows acceptable risk with adjusted terms. Requested: ${requested_amt:,.0f} | Recommended: ${recommended_amt:,.0f}."
-                    customer_summary = f"We can offer you a loan of ${recommended_amt:,.0f} at this time to ensure it remains comfortable for your budget."
-                    policy_justification = f"The requested amount was adjusted to the policy anchor of ${recommended_amt:,.0f} to align with safety requirements."
-                    action_item = "Consider the adjusted amount and interest rate provided."
-                else:
-                    summary = "Conditional approval recommended with adjusted terms."
-                    customer_summary = "We've offered modified terms that align with our safety guidelines."
-        else:
-            decision_summary = "Application declined as it does not currently meet policy thresholds."
-            
-            is_insufficient_window = (decision_metadata.get("capacity_anchor_reason") == "INSUFFICIENT_OBSERVATION_WINDOW" or 
-                                     any("OBSERVATION_WINDOW" in f.upper() for f in blocking_factors))
+            is_insufficient_window = any("OBSERVATION_WINDOW" in f.upper() for f in blocking_factors)
             
             if is_insufficient_window:
-                summary = "Application deferred due to insufficient observation window (verified income present)."
-                customer_summary = "We’ve successfully verified your income, but we need to observe account activity over a longer period."
-                
                 win_days = decision_metadata.get('observation_window_days', 0)
                 win_str = "1 day" if win_days == 1 else f"{win_days} days"
-                
                 policy_justification = f"Income verified but observation window ({win_str}) is below the required 30-day threshold."
-                action_item = "Please continue using your account and feel free to reapply once you have 30 days of consistent activity."
-            elif metrics.get("observed_deposit_volume", 0) == 0:
+                customer_summary = "We verified your income, but we need to see a longer history of activity before proceeding."
+                action_item = "Please continue using your account to build history."
+
+        # HANDLE APPROVE (Strict Invariant: amount > 0)
+        elif decision == "APPROVE":
+            decision_summary = "Application approved based on policy compliance."
+            
+            # Common policy justification for all approvals
+            # FIX: Distinguish between Capacity and Policy Cap
+            if decision_metadata.get("policy_cap_amount") and decision_metadata.get("policy_cap_amount") == decision_results['recommended_amount']:
+                 policy_justification = f"The amount is capped at the policy limit of ${decision_results['recommended_amount']:,.0f} (Reason: {decision_metadata.get('policy_cap_reason', 'Policy Limit')})."
+            else:
+                 policy_justification = f"The recommended amount is within the policy-defined lending limit of ${decision_results['recommended_amount']:,.0f}."
+            
+            action_item = "Review the offer details and accept to proceed."
+            
+            if is_equality:
+                summary = "This applicant demonstrates a stable financial profile with favorable behavioral indicators."
+                customer_summary = "Great news! Your application meets our standard criteria, and we're happy to recommend approval for the full amount."
+            else:
+                summary = f"Applicant approved with adjusted terms. Requested: ${requested_amt:,.0f} | Recommended: ${decision_results['recommended_amount']:,.0f}."
+                customer_summary = f"We've reviewed your request and can offer a loan of ${decision_results['recommended_amount']:,.0f}."
+                
+                # Logic for Starter/Risk adjustments
+                if is_starter:
+                    customer_summary = "Welcome! Since you're new to our system, we've approved you for a starter loan to help you build your record."
+                    policy_justification = f"Approved under Micro-Starter policy with loan size restricted to the policy limit of ${decision_results['recommended_amount']:,.0f}."
+                else:
+                    customer_summary = f"We've approved a loan of ${decision_results['recommended_amount']:,.0f} which aligns with our current lending limits for your account."
+
+                # Duration adjustment context for customer
+                req_dur = decision_metadata.get("requested_duration_days")
+                rec_dur = decision_results.get("recommended_duration_days")
+                if req_dur and rec_dur and rec_dur < req_dur:
+                    if is_starter:
+                        customer_summary += " This loan is approved for a shorter period to help build your repayment history."
+                    else:
+                        customer_summary += f" We've adjusted your loan term to {rec_dur} days to align with our lending policy."
+
+        # HANDLE REJECT (Strict Invariant: amount == 0)
+        else: # REJECT
+            decision_summary = "Application declined as it does not currently meet policy thresholds."
+            summary = "Application does not meet lending thresholds for approval."
+            
+            customer_summary = "We cannot proceed with this application at the present time."
+            action_item = "Feel free to reapply in 3-6 months as your transaction record grows."
+            policy_justification = "Application does not meet minimum eligibility criteria for a capacity assessment."
+            
+            if metrics.get("observed_deposit_volume", 0) == 0:
                 summary = "Application declined due to insufficient financial history."
                 customer_summary = "We weren't able to find enough recent transaction activity to establish a lending limit at this time."
                 policy_justification = "No verifiable deposit activity was found within the required observation window."
                 action_item = "Ensure you have at least 30 days of consistent activity before reapplying."
-            elif requested_amt:
-                summary = f"This applicant's risk profile exceeds institutional safety thresholds."
-                customer_summary = "We aren't able to approve this request right now as it doesn't meet our current policy requirements."
-                policy_justification = "Application does not meet minimum eligibility criteria for a capacity anchor."
-                action_item = "Feel free to reapply in 3-6 months as your transaction record grows."
-            else:
-                summary = "Application does not meet safety thresholds."
-                customer_summary = "We cannot proceed with this application at the present time."
+            elif any("CRITICAL" in f for f in flags):
+                summary = "Application declined due to critical policy violations."
+                customer_summary = "We cannot approve this request due to specific policy restrictions on your account."
+
         
         # ---------------------------------------------------------
         # ASSEMBLE VIEWS (STRICT SEPARATION OF CONCERNS)
@@ -150,20 +130,19 @@ class ExplanationAgent:
         # Refine key reasons based on decision for customer
         if decision == "REJECT":
             if metrics.get("observed_deposit_volume", 0) == 0:
-                customer_message["key_reasons"] = "We couldn't verify enough recent deposit activity to establish a limit today."
+                customer_message["key_reasons"] = "We couldn't verify enough recent deposit activity to establish a lending limit today."
             else:
-                customer_message["key_reasons"] = "Your current transaction activity doesn't quite meet our safety thresholds for this particular request."
+                customer_message["key_reasons"] = "Your current transaction activity doesn't quite meet our lending thresholds for this particular request."
         elif is_starter:
-            customer_message["key_reasons"] = "As you're establishing your record with us, we've started with a safe limit that can grow over time."
+            customer_message["key_reasons"] = "As you're establishing your record with us, we've started with a safe lending limit that can grow over time."
 
         # 2. INTERNAL DECISION NOTES (For Officers & Risk Teams)
         officer_guidance = []
         if decision == "APPROVE":
             officer_guidance.append("Proceed with standard documentation.")
-        elif decision == "CONDITIONAL":
-            officer_guidance.append(f"Offer ${decision_results['recommended_amount']:,.0f} at {decision_results.get('recommended_interest_rate'):.1f}%.")
-            officer_guidance.append("Monitor repayment performance closely.")
-        else:
+        elif decision == "REFER":
+            officer_guidance.append("Manual review required. Check document completeness.")
+        else: # REJECT
             officer_guidance.append("Decline politely. Suggest reapplication after history improves.")
 
         internal_notes = {
@@ -184,22 +163,41 @@ class ExplanationAgent:
             f"Policy: {internal_notes['policy_context']}\n"
             f"Guidance: {internal_notes['guidance']}\n"
             f"Blocking Factors: {', '.join(blocking_factors) if blocking_factors else 'None'}\n"
-            f"Risk Score: {risk_score * 100:.1f}%"
+            f"Risk Score: {risk_score * 100:.1f}%\n"
+            f"Data Source: {risk_results.get('data_source', 'Internal Records')}"
         )
+        
+        # Add Duration to Officer View if adjusted
+        req_dur = decision_metadata.get("requested_duration_days")
+        rec_dur = decision_results.get("recommended_duration_days")
+        if req_dur and rec_dur and req_dur != rec_dur:
+            duration_note = f"Requested: {req_dur} days | Recommended: {rec_dur} days"
+            duration_adjustments = [a for a in decision_metadata.get("adjustments_applied", []) 
+                                   if "DURATION" in str(a.get("type", ""))]
+            if duration_adjustments:
+                reason = duration_adjustments[0].get("reason", "policy adjustment")
+                duration_note += f" ({reason})"
+            officer_view_str += f"\nDURATION: {duration_note}"
         
         # Audit View (Technical justification)
         audit_view = (
             f"POLICY_VERSION: {policy_version}\n"
             f"DECISION: {decision}\n"
-            f"ANCHOR_AMOUNT: {decision_metadata.get('capacity_anchor_amount', 0)}\n"
-            f"ANCHOR_REASON: {decision_metadata.get('capacity_anchor_reason', 'N/A')}\n"
+            f"AFFORDABILITY_CAPACITY: {decision_metadata.get('capacity_based_max', 0)}\n"
+            f"POLICY_LIMIT: {decision_metadata.get('policy_cap_amount', 'N/A')}\n"
+            f"LIMIT_REASON: {decision_metadata.get('policy_cap_reason', 'N/A')}\n"
             f"OBSERVED_DEPOSIT_VOLUME: {metrics.get('observed_deposit_volume', 0):.2f}\n"
             f"TRANSACTION_COUNT: {metrics.get('transaction_count', 0)}\n"
             f"DTI_RATIO: {metrics.get('dti_ratio', 'N/A')}\n"
             f"RISK_SCORE: {risk_score:.4f}\n"
+            f"REQUESTED_DURATION_DAYS: {decision_metadata.get('requested_duration_days', 'N/A')}\n"
+            f"RECOMMENDED_DURATION_DAYS: {decision_results.get('recommended_duration_days', 'N/A')}\n"
             f"BLOCKING_FACTORS: {blocking_factors}\n"
             f"JUSTIFICATION: {policy_justification}"
         )
+        
+        if decision_results.get("interest_rate_basis"):
+            audit_view += f"\nINTEREST_RATE_BASIS: {decision_results['interest_rate_basis']}"
 
         # Behavioral intelligence
         behavioral_stability = metrics.get("behavioral_stability", 0)

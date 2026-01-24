@@ -53,7 +53,7 @@ def test_policy():
     behavioral_results = BehavioralAgentV2.analyze_transactions(short_txs)
     
     risk_results = RiskAgent.evaluate(borrower, external_behavioral_results=behavioral_results)
-    decision_results = DecisionAgent.recommend(risk_results, borrower)
+    decision_results = DecisionAgent.recommend(risk_results, borrower, 30)
     explanation = ExplanationAgent.generate(risk_results, decision_results, borrower)
     
     print(f"Risk Level: {risk_results['risk_level']}")
@@ -64,7 +64,7 @@ def test_policy():
     
     # Assertions for Policy Upgrade (FINAL POLISH)
     assert risk_results['risk_level'] == "MEDIUM"
-    assert decision_results['decision'] == Decision.WAIT
+    assert decision_results['decision'] == Decision.REFER
     assert risk_results['metrics'].get('behavioral_status') == "INSUFFICIENT_DATA"
     assert "verified your income" in explanation['customer_message']['summary']
     assert "5 days" in explanation['internal_notes']['policy_context']
@@ -73,7 +73,7 @@ def test_policy():
     no_txs = []
     behavioral_results_no = BehavioralAgentV2.analyze_transactions(no_txs)
     risk_results_no = RiskAgent.evaluate(borrower, external_behavioral_results=behavioral_results_no)
-    decision_results_no = DecisionAgent.recommend(risk_results_no, borrower)
+    decision_results_no = DecisionAgent.recommend(risk_results_no, borrower, 30)
     
     print(f"Risk Level: {risk_results_no['risk_level']}")
     print(f"Decision: {decision_results_no['decision']}")
@@ -85,14 +85,14 @@ def test_policy():
     full_txs = create_mock_transactions(40, 40)
     behavioral_results_full = BehavioralAgentV2.analyze_transactions(full_txs)
     risk_results_full = RiskAgent.evaluate(borrower, external_behavioral_results=behavioral_results_full)
-    decision_results_full = DecisionAgent.recommend(risk_results_full, borrower)
+    decision_results_full = DecisionAgent.recommend(risk_results_full, borrower, 30)
     
     print(f"Risk Level: {risk_results_full['risk_level']}")
     print(f"Decision: {decision_results_full['decision']}")
     print(f"Behavioral Status: {risk_results_full['metrics'].get('behavioral_status')}")
     
     assert risk_results_full['risk_level'] != "HIGH"
-    assert decision_results_full['decision'] == Decision.CONDITIONAL
+    assert decision_results_full['decision'] == Decision.APPROVE
     assert risk_results_full['metrics'].get('behavioral_status') == "ANALYSIS_COMPLETE"
     
     print("\n✅ ALL TESTS PASSED")

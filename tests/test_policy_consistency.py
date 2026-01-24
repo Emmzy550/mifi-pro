@@ -1,7 +1,7 @@
 
 import unittest
 from datetime import datetime
-from models.assessment import Assessment
+from models.assessment import Assessment, Decision
 from utils.explanation_validator import ExplanationValidator, ExplanationInconsistencyError
 
 class TestPolicyConsistency(unittest.TestCase):
@@ -21,13 +21,12 @@ class TestPolicyConsistency(unittest.TestCase):
         assessment = Assessment(
             assessment_id="TEST-POLICY-001",
             borrower_id="BOR-TEST",
-            decision="CONDITIONAL",
+            decision=Decision.APPROVE,
             requested_amount=50000.0,
             recommended_amount=5600.0, # Fits risk haircut
             
             # Policy Anchor
-            capacity_anchor_amount=5600.0,
-            capacity_anchor_reason="RISK_ADJUSTED_LIMIT",
+
             
             # Underlying Math (ignored by relaxed validator if explanation fits anchor)
             capacity_based_max=26000.0, 
@@ -59,12 +58,11 @@ class TestPolicyConsistency(unittest.TestCase):
         assessment = Assessment(
             assessment_id="TEST-POLICY-002",
             borrower_id="BOR-TEST",
-            decision="CONDITIONAL",
+            decision=Decision.APPROVE,
             requested_amount=10000.0,
             recommended_amount=5600.0,
             
-            capacity_anchor_amount=5600.0,
-            capacity_anchor_reason="RISK_ADJUSTED_LIMIT",
+
             
             capacity_based_max=8000.0, # Different from anchor
             observed_deposit_volume=20000.0,

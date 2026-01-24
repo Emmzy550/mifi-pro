@@ -1,5 +1,5 @@
 import unittest
-from models.assessment import Assessment
+from models.assessment import Assessment, Decision
 from utils.explanation_validator import ExplanationValidator, ExplanationInconsistencyError
 
 class TestRiskAdjustedValidation(unittest.TestCase):
@@ -17,16 +17,16 @@ class TestRiskAdjustedValidation(unittest.TestCase):
             organization_id="ORG-1",
             risk_score=0.45,
             risk_level="MEDIUM",
-            decision="CONDITIONAL",
+            decision=Decision.APPROVE,
             recommended_amount=5600.0,
             recommended_interest_rate=20.0,
             requested_amount=8000.0,
             
-            explanation="We have approved a reduced amount of $5,600 due to risk profile adjustments. Your capacity is higher but safety limits apply.",
+            explanation="We have approved a reduced amount of $5,600 due to risk profile adjustments. Your capacity is higher but policy-defined lending limits apply.",
             customer_view="We have approved a reduced amount of $5,600 due to risk profile adjustments.",
             officer_view="...",
             audit_view="...",
-            blocking_factors=["MEDIUM_RISK_HAIRCUT"],
+            blocking_factors=[],
             
             flags=[],
             metrics={},
@@ -38,9 +38,7 @@ class TestRiskAdjustedValidation(unittest.TestCase):
             # Top level fields used by validator usually? 
             # Validator uses attributes of assessment.
             capacity_based_max=26000.0,
-            capacity_anchor_amount=5600.0,
-            capacity_anchor_reason="RISK_ADJUSTED_LIMIT",
-            starter_loan_applied=False,
+
             observed_deposit_volume=10000.0
         )
         # Should not raise
@@ -59,7 +57,7 @@ class TestRiskAdjustedValidation(unittest.TestCase):
             organization_id="ORG-1",
             risk_score=0.45,
             risk_level="MEDIUM",
-            decision="CONDITIONAL",
+            decision=Decision.APPROVE,
             recommended_amount=5600.0,
             recommended_interest_rate=20.0,
             requested_amount=5600.0,
@@ -68,7 +66,7 @@ class TestRiskAdjustedValidation(unittest.TestCase):
             customer_view="...",
             officer_view="...",
             audit_view="...",
-            blocking_factors=["MEDIUM_RISK_HAIRCUT"],
+            blocking_factors=[],
             
             flags=[],
             metrics={},
@@ -77,17 +75,15 @@ class TestRiskAdjustedValidation(unittest.TestCase):
                 "capacity_anchor_amount": 5600.0
             },
             capacity_based_max=26000.0,
-            capacity_anchor_amount=5600.0,
-            capacity_anchor_reason="RISK_ADJUSTED_LIMIT",
-            starter_loan_applied=False,
+
             observed_deposit_volume=10000.0
         )
         ExplanationValidator.validate(assessment)
 
     def test_anchor_mismatch_raises_inconsistency(self):
         """
-        Scenario 3: Recommended amount does not match the anchor amount.
-        Recommended 6000 != Anchor 5600.
+        Scenario 3: Recommended amount does not match the explanation.
+        Recommended 6000. Explanation says 5,600.
         Should RAISE ExplanationInconsistencyError.
         """
         assessment = Assessment(
@@ -96,17 +92,17 @@ class TestRiskAdjustedValidation(unittest.TestCase):
             organization_id="ORG-1",
             risk_score=0.45,
             risk_level="MEDIUM",
-            decision="CONDITIONAL",
+            decision=Decision.APPROVE,
             recommended_amount=6000.0, # Mismatch with anchor 5600
             recommended_interest_rate=20.0,
             requested_amount=8000.0,
             
             # valid keywords provided, so Rule 1 and Rule 2 (keywords) would pass
-            explanation="We approved $6,000 which is a reduced limit due to risk factors.",
+            explanation="We approved $5,600 which is a reduced limit due to risk factors.",
             customer_view="...",
             officer_view="...",
             audit_view="...",
-            blocking_factors=["MEDIUM_RISK_HAIRCUT"],
+            blocking_factors=[],
             
             flags=[],
             metrics={},
@@ -117,9 +113,7 @@ class TestRiskAdjustedValidation(unittest.TestCase):
             capacity_based_max=26000.0,
             # Validation should check this or decision_metadata? 
             # Usually validator checks assessment attributes.
-            capacity_anchor_amount=5600.0,
-            capacity_anchor_reason="RISK_ADJUSTED_LIMIT",
-            starter_loan_applied=False,
+
             observed_deposit_volume=10000.0
         )
         

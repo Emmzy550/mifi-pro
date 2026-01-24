@@ -1,0 +1,99 @@
+{
+    "functions": [
+        {
+            "source": ".",
+            "codebase": "default",
+            "ignore": [
+                "node_modules",
+                ".git",
+                "firebase-debug.log",
+                "firebase-debug.*.log",
+                "*.pyc",
+                "__pycache__",
+                "venv",
+                "frontend",
+                "tests",
+                "mock_firestore.json",
+                "serviceAccountKey.json"
+            ],
+            "runtime": "python311"
+        }
+    ],
+    "hosting": {
+        "public": "frontend/dist",
+        "ignore": [
+            "firebase.json",
+            "**/.*",
+            "**/node_modules/**"
+        ],
+        "rewrites": [
+            {
+                "source": "/api/**",
+                "run": {
+                    "serviceId": "loan-officer-ai",
+                    "region": "us-central1"
+                }
+            },
+            {
+                "source": "/intake/**",
+                "run": {
+                    "serviceId": "loan-officer-ai",
+                    "region": "us-central1"
+                }
+            },
+            {
+                "source": "/assessment/**",
+                "run": {
+                    "serviceId": "loan-officer-ai",
+                    "region": "us-central1"
+                }
+            },
+            {
+                "source": "/behavior/**",
+                "run": {
+                    "serviceId": "loan-officer-ai",
+                    "region": "us-central1"
+                }
+            },
+            {
+                "source": "/documents/**",
+                "run": {
+                    "serviceId": "loan-officer-ai",
+                    "region": "us-central1"
+                }
+            },
+            {
+                "source": "/admin/**",
+                "run": {
+                    "serviceId": "loan-officer-ai",
+                    "region": "us-central1"
+                }
+            },
+            {
+                "source": "/auth/**",
+                "run": {
+                    "serviceId": "loan-officer-ai",
+                    "region": "us-central1"
+                }
+            },
+            {
+                "source": "/billing/**",
+                "run": {
+                    "serviceId": "loan-officer-ai",
+                    "region": "us-central1"
+                }
+            },
+            {
+                "source": "/org/**",
+                "run": {
+                    "serviceId": "loan-officer-ai",
+                    "region": "us-central1"
+                }
+            },
+            {
+                "source": "**",
+                "destination": "/index.html"
+            }
+        ]
+    }
+}

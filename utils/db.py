@@ -15,6 +15,7 @@ from models.usage_log import UsageLog
 from models.usage_record import UsageRecord
 from models.payment import Payment
 from models.organization import OrgEnvironment
+from models.officer_action import OfficerAction
 
 class MockFirestore:
     """A simple in-memory mock to simulate Firestore locally with basic filtering.
@@ -94,6 +95,8 @@ class MockDocument:
     def to_dict(self):
         return self.data
 
+from models.sms_log import SMSLog
+
 class Database:
     _db = None
 
@@ -102,20 +105,32 @@ class Database:
         if cls._db is None:
             service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT", "serviceAccountKey.json")
             
-            if os.path.exists(service_account_path):
-                try:
+            try:
+                if os.path.exists(service_account_path):
                     cred = credentials.Certificate(service_account_path)
-                    firebase_admin.initialize_app(cred)
+                    # Check if app is already initialized to avoid ValueError
+                    if not len(firebase_admin._apps):
+                        firebase_admin.initialize_app(cred)
                     cls._db = firestore.client()
                     print(f"DEBUG: Firestore initialized using {service_account_path}")
-                except Exception as e:
-                    print(f"WARNING: Real Firestore failed, falling back to Mock. Error: {e}")
-                    cls._db = MockFirestore()
-            else:
-                print("DEBUG: serviceAccountKey.json not found. Falling back to Mock Firestore.")
-
+                else:
+                    # Production / Cloud Functions: Use Application Default Credentials
+                    print("DEBUG: Service key not found. Attempting Application Default Credentials (ADC)...")
+                    if not len(firebase_admin._apps):
+                        firebase_admin.initialize_app()
+                    cls._db = firestore.client()
+                    print("DEBUG: Firestore initialized using ADC")
+            except Exception as e:
+                print(f"WARNING: Real Firestore failed, falling back to Mock. Error: {e}")
                 cls._db = MockFirestore()
         return cls._db
+
+    @classmethod
+    def reload_db(cls):
+        """Forces a reload of the database connection or mock data."""
+        if cls._db and isinstance(cls._db, MockFirestore):
+            print("DEBUG: Reloading MockFirestore from disk...")
+            cls._db.load()
 
     @classmethod
     def save_borrower(cls, borrower: Borrower):
@@ -172,7 +187,13 @@ class Database:
             query = query.where("organization_id", "==", organization_id)
             
         docs = query.stream()
-        return [Assessment(**doc.to_dict()) for doc in docs]
+        results = []
+        for doc in docs:
+            try:
+                results.append(Assessment(**doc.to_dict()))
+            except Exception as e:
+                print(f"Skipping malformed assessment {doc.id}: {e}")
+        return results
 
     @classmethod
     def save_alternative_data(cls, data: AlternativeData):
@@ -415,3 +436,29 @@ class Database:
         db = cls.get_db()
         docs = db.collection("payments").where("org_id", "==", org_id).stream()
         return [Payment(**doc.to_dict()) for doc in docs]
+    @classmethod
+    def save_officer_action(cls, action: OfficerAction):
+        db = cls.get_db()
+        db.collection("officer_actions").document(action.assessment_id).set(action.model_dump(mode='json'))
+        if hasattr(db, 'save'): db.save()
+
+    @classmethod
+    def get_officer_action(cls, assessment_id: str) -> Optional[OfficerAction]:
+        db = cls.get_db()
+        doc = db.collection("officer_actions").document(assessment_id).get()
+        if doc.exists:
+            return OfficerAction(**doc.to_dict())
+        return None
+
+    @classmethod
+    def save_sms_log(cls, log: SMSLog):
+        db = cls.get_db()
+        db.collection("sms_logs").document(log.id).set(log.model_dump(mode='json'))
+        if hasattr(db, 'save'): db.save()
+
+    @classmethod
+    def list_sms_logs(cls, assessment_id: str) -> List[SMSLog]:
+        db = cls.get_db()
+        query = db.collection("sms_logs").where("assessment_id", "==", assessment_id)
+        docs = query.stream()
+        return [SMSLog(**doc.to_dict()) for doc in docs]

@@ -29,7 +29,7 @@ def test_safety_logic():
     print(f"Flags: {risk_results['flags']}")
     
     print("\n[Step 2] Decision Recommendation")
-    decision_results = DecisionAgent.recommend(risk_results, borrower)
+    decision_results = DecisionAgent.recommend(risk_results, borrower, 30)
     print(f"Decision: {decision_results['decision']}")
     print(f"Recommended Amount: {decision_results['recommended_amount']}")
 
