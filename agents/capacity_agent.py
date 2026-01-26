@@ -63,7 +63,19 @@ class CapacityAgent:
         # STEP 2: CALCULATE OBSERVED DEPOSIT VOLUME
         deposit_result = CapacityAgent._calculate_observed_deposit_volume(transactions)
         result["observed_deposit_volume"] = deposit_result["observed_deposit_volume"]
+        result["deposit_count_30d"] = deposit_result.get("deposit_count", 0)
+        result["deposit_window_start"] = deposit_result.get("period_start")
+        result["deposit_window_end"] = deposit_result.get("period_end")
+        result["deposit_window_days"] = deposit_result.get("period_days", 0)
         result["audit_trail"]["deposit_volume_calculation"] = deposit_result
+
+        statement_totals = CapacityAgent._calculate_total_deposit_volume(transactions)
+        result["statement_deposit_volume"] = statement_totals.get("total_deposit_volume", 0.0)
+        result["statement_deposit_count"] = statement_totals.get("deposit_count", 0)
+        result["statement_period_start"] = statement_totals.get("period_start")
+        result["statement_period_end"] = statement_totals.get("period_end")
+        result["statement_period_days"] = statement_totals.get("period_days", 0)
+        result["audit_trail"]["statement_deposit_totals"] = statement_totals
         
         # STEP 3: VALIDATE DATA SUFFICIENCY
         validation_result = CapacityAgent._validate_transaction_data(transactions)
@@ -229,20 +241,40 @@ class CapacityAgent:
         if not transactions:
             return {"observed_deposit_volume": 0.0, "period_days": window_days, "total_deposit_volume": 0.0, "deposit_count": 0}
         
-        now = datetime.now(timezone.utc)
-        start_date = now - timedelta(days=window_days)
+        timestamps = []
+        for tx in transactions:
+            ts = CapacityAgent._get_tx_val(tx, ["timestamp", "date"])
+            if isinstance(ts, str):
+                try:
+                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                except:
+                    ts = None
+            if ts and isinstance(ts, datetime):
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                timestamps.append(ts)
+
+        reference_now = max(timestamps) if timestamps else datetime.now(timezone.utc)
+        if reference_now.tzinfo is None:
+            reference_now = reference_now.replace(tzinfo=timezone.utc)
+
+        start_date = reference_now - timedelta(days=window_days)
         valid_deposits = []
         
         for tx in transactions:
             amount = CapacityAgent._get_tx_val(tx, ["amount"], 0.0)
             ts = CapacityAgent._get_tx_val(tx, ["timestamp", "date"])
             tx_type = str(CapacityAgent._get_tx_val(tx, ["type"], "")).upper()
+            direction = str(CapacityAgent._get_tx_val(tx, ["direction"], "")).upper()
 
             if isinstance(ts, str):
-                try: ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                except: ts = None
+                try:
+                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                except:
+                    ts = None
             
-            if tx_type == "DEPOSIT" and amount > 0:
+            is_deposit = tx_type in {"DEPOSIT", "SALARY", "CREDIT"} or direction == "INFLOW"
+            if is_deposit and amount > 0:
                 if ts:
                     if ts.tzinfo is None: ts = ts.replace(tzinfo=timezone.utc)
                     if ts >= start_date: valid_deposits.append(amount)
@@ -251,8 +283,61 @@ class CapacityAgent:
         return {
             "observed_deposit_volume": round(total_volume, 2),
             "period_days": window_days,
+            "period_start": start_date.isoformat(),
+            "period_end": reference_now.isoformat(),
             "total_deposit_volume": round(total_volume, 2),
             "deposit_count": len(valid_deposits)
+        }
+
+    @staticmethod
+    def _calculate_total_deposit_volume(transactions: List) -> Dict[str, Any]:
+        if not transactions:
+            return {
+                "total_deposit_volume": 0.0,
+                "deposit_count": 0,
+                "period_start": None,
+                "period_end": None,
+                "period_days": 0
+            }
+
+        timestamps = []
+        total_volume = 0.0
+        deposit_count = 0
+
+        for tx in transactions:
+            amount = CapacityAgent._get_tx_val(tx, ["amount"], 0.0)
+            ts = CapacityAgent._get_tx_val(tx, ["timestamp", "date"])
+            tx_type = str(CapacityAgent._get_tx_val(tx, ["type"], "")).upper()
+            direction = str(CapacityAgent._get_tx_val(tx, ["direction"], "")).upper()
+
+            if isinstance(ts, str):
+                try:
+                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                except:
+                    ts = None
+            if ts and isinstance(ts, datetime):
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                timestamps.append(ts)
+
+            is_deposit = tx_type in {"DEPOSIT", "SALARY", "CREDIT"} or direction == "INFLOW"
+            if is_deposit and amount > 0:
+                total_volume += amount
+                deposit_count += 1
+
+        period_start = min(timestamps).isoformat() if timestamps else None
+        period_end = max(timestamps).isoformat() if timestamps else None
+        period_days = 0
+        if timestamps:
+            delta = max(timestamps) - min(timestamps)
+            period_days = max(delta.days, 1) if delta.total_seconds() > 0 else 0
+
+        return {
+            "total_deposit_volume": round(total_volume, 2),
+            "deposit_count": deposit_count,
+            "period_start": period_start,
+            "period_end": period_end,
+            "period_days": period_days
         }
     
     @staticmethod

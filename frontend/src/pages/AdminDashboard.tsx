@@ -31,7 +31,7 @@ export default function AdminDashboard() {
     const [orgDetails, setOrgDetails] = useState<any>(null);
     const [detailsLoading, setDetailsLoading] = useState(false);
     const [actionLoading, setActionLoading] = useState(false);
-    const [newLimit, setNewLimit] = useState<number>(0);
+    const [newLimit, setNewLimit] = useState<string>('');
     const [rotatedKey, setRotatedKey] = useState<string | null>(null);
 
     useEffect(() => {
@@ -136,7 +136,8 @@ export default function AdminDashboard() {
         try {
             const res = await api.get(`/admin/organizations/${orgId}/details`);
             setOrgDetails(res.data);
-            setNewLimit(res.data.organization.monthly_limit || 0);
+            const limitValue = res.data.organization.monthly_limit;
+            setNewLimit(limitValue === null || limitValue === undefined ? '' : String(limitValue));
         } catch (e) {
             console.error(e);
             toast.error("Failed to fetch organization details.");
@@ -182,9 +183,15 @@ export default function AdminDashboard() {
 
     const handleUpdateLimit = async () => {
         if (!orgDetails) return;
+        const trimmed = newLimit.trim();
+        const parsedLimit = trimmed === '' ? null : Number(trimmed);
+        if (parsedLimit !== null && (!Number.isFinite(parsedLimit) || parsedLimit < 0)) {
+            toast.error("Please enter a valid non-negative limit.");
+            return;
+        }
         setActionLoading(true);
         try {
-            await api.patch(`/admin/organizations/${orgDetails.organization.id}`, { monthly_limit: newLimit });
+            await api.patch(`/admin/organizations/${orgDetails.organization.id}`, { monthly_limit: parsedLimit });
             await fetchOrgDetails(orgDetails.organization.id);
             fetchOrgs(); // Refresh list
             toast.success("Limit updated successfully.");
@@ -575,7 +582,7 @@ export default function AdminDashboard() {
                                             <input
                                                 type="number"
                                                 value={newLimit}
-                                                onChange={e => setNewLimit(parseInt(e.target.value))}
+                                                onChange={e => setNewLimit(e.target.value)}
                                                 className="flex-1 border rounded p-2 text-sm focus:ring-1 focus:ring-indigo-500 outline-none"
                                             />
                                             <button

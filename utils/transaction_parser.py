@@ -26,8 +26,12 @@ class TransactionParser(AbstractTransactionSource):
     Advanced Deterministic Parser for Loan Officer AI.
     Features: Proximity Pairing, Pipe-Support, Statement/Payslip Auto-Detection.
     """
-    
+
+    def __init__(self):
+        self.last_statement_summary: Optional[Dict[str, Any]] = None
+
     def parse(self, file_content: bytes, filename: str) -> List[Transaction]:
+        self.last_statement_summary = None
         if filename.lower().endswith('.pdf'):
             return self._parse_pdf(file_content)
         elif filename.lower().endswith('.csv'):
@@ -38,6 +42,7 @@ class TransactionParser(AbstractTransactionSource):
     def _parse_pdf(self, file_content: bytes) -> List[Transaction]:
         import PyPDF2
         import io
+        from utils.pdf_parser import PDFTransactionParser
         
         transactions = []
         try:
@@ -58,6 +63,30 @@ class TransactionParser(AbstractTransactionSource):
         if not text.strip():
             print("[DEBUG] No text extracted from PDF!", flush=True)
             return []
+
+        self.last_statement_summary = PDFTransactionParser.extract_statement_summary(text)
+
+        # Always try the bank-statement parser first (safe fallback to generic)
+        try:
+            alt_data = PDFTransactionParser.parse_pdf_text(text, borrower_id="BOR-UNKNOWN")
+            if alt_data.mobile_money_history:
+                print(f"[DEBUG] Bank statement parser found {len(alt_data.mobile_money_history)} transactions.", flush=True)
+                converted = []
+                for tx in alt_data.mobile_money_history:
+                    direction = "INFLOW" if tx.type in ["DEPOSIT", "SALARY"] else "OUTFLOW"
+                    converted.append(Transaction(
+                        transaction_id=tx.transaction_id,
+                        date=tx.timestamp,
+                        amount=tx.amount,
+                        direction=direction,
+                        type=tx.type,
+                        description=tx.counterparty or "Transaction",
+                        source_type="USER_UPLOADED",
+                        confidence_weight=0.75
+                    ))
+                return converted
+        except Exception as e:
+            print(f"[WARN] Bank statement parser failed: {e}", flush=True)
 
         # Patterns
         date_pattern = re.compile(r'(\d{1,2})[-/ ]([A-Za-z]{0,3}\d{0,3})[-/ ](\d{2,4})')
@@ -131,6 +160,9 @@ class TransactionParser(AbstractTransactionSource):
                     last_label = None 
                 except: pass
 
+        if not transactions:
+            preview = "\n".join(lines[:15])
+            print(f"[DEBUG] PDF parse produced 0 transactions. Extracted text preview:\n{preview}", flush=True)
         return transactions
 
     def _parse_csv(self, file_content: bytes) -> List[Transaction]:

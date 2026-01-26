@@ -65,33 +65,31 @@ def test_governance_approve_completeness():
 
 def test_governance_fail_fast_missing_requested_amount():
     """
-    Test C1: Missing requested_amount raises ValidationError.
+    Test C1: Missing requested_amount defaults to 0.0 for legacy compatibility.
     """
-    with pytest.raises(ValidationError) as exc:
-        Assessment(
-            borrower_id="BOR-FAIL",
-            decision=Decision.REJECT,
-            decision_timestamp=datetime.utcnow(),
-            recommended_amount=0.0,
-            decision_reason_codes=["BAD_SCORE"]
-            # requested_amount MISSING
-        )
-    assert "requested_amount" in str(exc.value)
+    assessment = Assessment(
+        borrower_id="BOR-FAIL",
+        decision=Decision.REJECT,
+        decision_timestamp=datetime.utcnow(),
+        recommended_amount=0.0,
+        decision_reason_codes=["BAD_SCORE"]
+        # requested_amount MISSING
+    )
+    assert assessment.requested_amount == 0.0
 
 def test_governance_fail_fast_missing_timestamp():
     """
-    Test C2: Missing decision_timestamp raises ValidationError.
+    Test C2: Missing decision_timestamp defaults to now for legacy compatibility.
     """
-    with pytest.raises(ValidationError) as exc:
-        Assessment(
-            borrower_id="BOR-FAIL-2",
-            decision=Decision.REJECT,
-            requested_amount=5000.0,
-            recommended_amount=0.0,
-            decision_reason_codes=["BAD_SCORE"]
-            # decision_timestamp MISSING
-        )
-    assert "decision_timestamp" in str(exc.value)
+    assessment = Assessment(
+        borrower_id="BOR-FAIL-2",
+        decision=Decision.REJECT,
+        requested_amount=5000.0,
+        recommended_amount=0.0,
+        decision_reason_codes=["BAD_SCORE"]
+        # decision_timestamp MISSING
+    )
+    assert assessment.decision_timestamp is not None
 
 def test_governance_fail_fast_reject_without_reason_codes():
     """
@@ -105,6 +103,7 @@ def test_governance_fail_fast_reject_without_reason_codes():
             requested_duration_days=30,
             decision_timestamp=datetime.utcnow(),
             recommended_amount=0.0,
+            policy_version="v1.5.0",
             decision_reason_codes=[],  # Empty
             blocking_factors=[]        # Also empty
         )

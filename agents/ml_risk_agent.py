@@ -1,6 +1,5 @@
 import xgboost as xgb
 import pandas as pd
-import shap
 import os
 import numpy as np
 from typing import Dict, Any, List
@@ -57,6 +56,11 @@ class MLRiskAgent:
         repayment_score = 1 - prob_default
 
         # SHAP Explainability (XAI)
+        try:
+            import shap
+        except ImportError:
+            return {"error": "SHAP not installed. Install shap to enable ML explanations."}
+
         explainer = shap.TreeExplainer(model)
         shap_values = explainer.shap_values(X)
         

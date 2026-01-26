@@ -163,21 +163,24 @@ class BillingAgent:
         production = Database.get_usage_record(org.id, OrgEnvironment.PRODUCTION)
 
         
-        plan_name = org.plan.value if hasattr(org.plan, 'value') else str(org.plan)
-        plan_config = PLAN_CONFIG.get(plan_name.upper(), PLAN_CONFIG["SANDBOX"])
-        
-        effective_limit = BillingAgent.get_plan_limit(org)
-        if effective_limit == float('inf'):
-            effective_limit = 1000000000 # Return large number for frontend "Unlimited" check
-
-
-        # Refresh Org to get latest limits
+        # Refresh Org to get latest limits/plan updates
         fresh_org = Database.get_organization(org.id) or org
-        
+
+        plan_name = fresh_org.plan.value if hasattr(fresh_org.plan, 'value') else str(fresh_org.plan)
+        plan_config = PLAN_CONFIG.get(plan_name.upper(), PLAN_CONFIG["SANDBOX"])
+
+        effective_limit = BillingAgent.get_plan_limit(fresh_org)
+        if effective_limit == float('inf'):
+            effective_limit = 1000000000  # Return large number for frontend "Unlimited" check
+
         # Fix: Support Sandbox overrides in summary
         # If a custom limit is set on the org, it applies to Sandbox too (for now)
-        print(f"DEBUG: BillingAgent loaded org {org.id} with monthly_limit: {fresh_org.monthly_limit}")
-        sandbox_limit = fresh_org.monthly_limit if fresh_org.monthly_limit is not None else PLAN_CONFIG["SANDBOX"]["monthly_limit"]
+        print(f"DEBUG: BillingAgent loaded org {fresh_org.id} with monthly_limit: {fresh_org.monthly_limit}")
+        sandbox_limit = (
+            fresh_org.monthly_limit
+            if fresh_org.monthly_limit is not None
+            else PLAN_CONFIG["SANDBOX"]["monthly_limit"]
+        )
         
         return {
             "sandbox": {
@@ -188,11 +191,11 @@ class BillingAgent:
             "production": {
                 "usage": production.assessment_count,
                 "limit": effective_limit,
-                "status": org.billing_status.value
+                "status": fresh_org.billing_status.value
             },
-            "current_plan": org.plan.value,
-            "billing_status": org.billing_status.value,
-            "payment_status": org.payment_status.value if hasattr(org.payment_status, 'value') else org.payment_status,
-            "period_end": org.current_period_end.isoformat()
+            "current_plan": fresh_org.plan.value if hasattr(fresh_org.plan, 'value') else str(fresh_org.plan),
+            "billing_status": fresh_org.billing_status.value,
+            "payment_status": fresh_org.payment_status.value if hasattr(fresh_org.payment_status, 'value') else fresh_org.payment_status,
+            "period_end": fresh_org.current_period_end.isoformat()
         }
 

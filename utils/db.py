@@ -9,6 +9,8 @@ from models.loan import Loan
 from models.alternative_data import AlternativeData
 from utils.encryption import EncryptionAgent
 from models.organization import Organization
+from models.decision_export import DecisionExport
+from models.decision_counterfactual import DecisionCounterfactual
 from models.api_key import APIKey
 from models.user import User
 from models.usage_log import UsageLog
@@ -91,6 +93,12 @@ class MockDocument:
 
     def get(self):
         return self
+
+    def delete(self):
+        self.data = None
+        self.exists = False
+        if self.db_instance:
+            self.db_instance.save()
 
     def to_dict(self):
         return self.data
@@ -193,7 +201,7 @@ class Database:
                 results.append(Assessment(**doc.to_dict()))
             except Exception as e:
                 print(f"Skipping malformed assessment {doc.id}: {e}")
-        return results
+        return cls._sort_assessments_by_time(results)
 
     @classmethod
     def save_alternative_data(cls, data: AlternativeData):
@@ -232,11 +240,23 @@ class Database:
             except Exception as e:
                 print(f"Skipping malformed assessment {doc.id}: {e}")
                 
-        # Sort by creation time? Assessment doesn't have a clear timestamp field at top level
-        # but the document ID usually implies time or we can rely on natural ordering.
-        # Actually, let's fix that. Assessment doesn't have created_at.
-        # For V1, we just return the list capped at limit.
+        results = cls._sort_assessments_by_time(results)
         return results[:limit]
+
+    @staticmethod
+    def _sort_assessments_by_time(assessments: List[Assessment]) -> List[Assessment]:
+        def _extract_ts(assessment: Assessment):
+            ts = getattr(assessment, "decision_timestamp", None)
+            if isinstance(ts, str):
+                try:
+                    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                except Exception:
+                    return datetime.min
+            if isinstance(ts, datetime):
+                return ts
+            return datetime.min
+
+        return sorted(assessments, key=_extract_ts, reverse=True)
 
     @classmethod
     def get_loan(cls, loan_id: str) -> Optional[Loan]:
@@ -436,6 +456,53 @@ class Database:
         db = cls.get_db()
         docs = db.collection("payments").where("org_id", "==", org_id).stream()
         return [Payment(**doc.to_dict()) for doc in docs]
+
+    # ============================================================================
+    # DECISION EXPORTS
+    # ============================================================================
+
+    @classmethod
+    def save_decision_export(cls, export: DecisionExport):
+        db = cls.get_db()
+        db.collection("decision_exports").document(export.id).set(export.model_dump(mode='json'))
+
+    @classmethod
+    def get_decision_export(cls, export_id: str) -> Optional[DecisionExport]:
+        db = cls.get_db()
+        doc = db.collection("decision_exports").document(export_id).get()
+        if doc.exists:
+            return DecisionExport(**doc.to_dict())
+        return None
+
+    @classmethod
+    def list_decision_exports(cls, decision_id: str) -> List[DecisionExport]:
+        db = cls.get_db()
+        docs = db.collection("decision_exports").where("decision_id", "==", decision_id).stream()
+        return [DecisionExport(**doc.to_dict()) for doc in docs]
+
+    @classmethod
+    def save_decision_counterfactual(cls, counterfactual: DecisionCounterfactual):
+        db = cls.get_db()
+        db.collection("decision_counterfactuals").document(counterfactual.id).set(counterfactual.model_dump(mode='json'))
+
+    @classmethod
+    def list_decision_counterfactuals(cls, decision_id: str) -> List[DecisionCounterfactual]:
+        db = cls.get_db()
+        docs = db.collection("decision_counterfactuals").where("decision_id", "==", decision_id).stream()
+        return [DecisionCounterfactual(**doc.to_dict()) for doc in docs]
+
+    @classmethod
+    def delete_decision_counterfactuals(cls, decision_id: str):
+        db = cls.get_db()
+        docs = db.collection("decision_counterfactuals").where("decision_id", "==", decision_id).stream()
+        for doc in docs:
+            try:
+                if hasattr(doc, "reference"):
+                    doc.reference.delete()
+                else:
+                    db.collection("decision_counterfactuals").document(doc.id).delete()
+            except Exception:
+                pass
     @classmethod
     def save_officer_action(cls, action: OfficerAction):
         db = cls.get_db()

@@ -14,7 +14,8 @@ import {
     Send,
     MessageSquare,
     DollarSign,
-    Calendar
+    Calendar,
+    Download
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 
@@ -38,6 +39,11 @@ export default function DecisionReview() {
     const [smsLogs, setSmsLogs] = useState<any[]>([]);
     const [smsSending, setSmsSending] = useState(false);
     const [showSmsModal, setShowSmsModal] = useState(false);
+    const [exports, setExports] = useState<any[]>([]);
+    const [exportsLoading, setExportsLoading] = useState(false);
+    const [exportBusy, setExportBusy] = useState(false);
+    const [counterfactuals, setCounterfactuals] = useState<any[]>([]);
+    const [counterfactualsLoading, setCounterfactualsLoading] = useState(false);
 
     useEffect(() => {
         const fetchAssessment = async () => {
@@ -82,6 +88,36 @@ export default function DecisionReview() {
         fetchSmsLogs();
     }, [assessmentId]);
 
+    useEffect(() => {
+        const fetchExports = async () => {
+            setExportsLoading(true);
+            try {
+                const res = await api.get(`/assessment/${assessmentId}/exports`);
+                setExports(res.data || []);
+            } catch (err) {
+                console.error("Failed to fetch exports", err);
+            } finally {
+                setExportsLoading(false);
+            }
+        };
+        const fetchCounterfactuals = async () => {
+            setCounterfactualsLoading(true);
+            try {
+                const res = await api.get(`/decisions/${assessmentId}/counterfactuals`);
+                setCounterfactuals(res.data || []);
+            } catch (err) {
+                console.error("Failed to fetch counterfactuals", err);
+            } finally {
+                setCounterfactualsLoading(false);
+            }
+        };
+
+        if (assessment?.final_decision_metadata) {
+            fetchExports();
+            fetchCounterfactuals();
+        }
+    }, [assessmentId, assessment?.final_decision_metadata]);
+
     const handleSealDecision = async () => {
         if (!confirmed && !assessment.final_decision_metadata) {
             toast.error("Please confirm compliance before sealing.");
@@ -106,10 +142,71 @@ export default function DecisionReview() {
             });
             setAssessment({ ...assessment, final_decision_metadata: res.data });
             toast.success("Decision successfully sealed and archived.");
+            try {
+                const exportRes = await api.post(`/assessment/${assessmentId}/exports/generate`);
+                setExports(exportRes.data || []);
+            } catch (exportErr) {
+                console.error("Export generation failed", exportErr);
+            }
         } catch (err: any) {
             toast.error(err.response?.data?.detail || "Failed to seal decision");
         } finally {
             setSubmitting(false);
+        }
+    };
+
+    const getLatestExport = (type: string) => {
+        const filtered = exports.filter((exp) => exp.export_type === type);
+        if (!filtered.length) return null;
+        return filtered.reduce((latest, current) => (
+            current.export_version > latest.export_version ? current : latest
+        ), filtered[0]);
+    };
+
+    const downloadExport = async (exportRecord: any) => {
+        const response = await api.get(
+            `/assessment/${assessmentId}/exports/${exportRecord.id}/download`,
+            { responseType: 'blob' }
+        );
+        const blobUrl = window.URL.createObjectURL(new Blob([response.data]));
+        const link = document.createElement('a');
+        const contentDisposition = response.headers['content-disposition'] || '';
+        const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
+        const filename = filenameMatch ? filenameMatch[1] : `decision_export.${exportRecord.export_type.toLowerCase()}`;
+        link.href = blobUrl;
+        link.setAttribute('download', filename);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(blobUrl);
+    };
+
+    const handleExport = async (type: 'PDF' | 'XLSX') => {
+        if (!assessment?.final_decision_metadata) {
+            toast.error("Finalize the decision before exporting.");
+            return;
+        }
+
+        setExportBusy(true);
+        try {
+            let exportRecord = getLatestExport(type);
+            if (!exportRecord) {
+                const res = await api.post(`/assessment/${assessmentId}/exports/generate`);
+                const fresh = res.data || [];
+                setExports(fresh);
+                exportRecord = fresh.find((exp: any) => exp.export_type === type);
+            }
+
+            if (!exportRecord) {
+                toast.error("Export not available yet. Try again.");
+                return;
+            }
+
+            await downloadExport(exportRecord);
+        } catch (err: any) {
+            toast.error(err.response?.data?.detail || "Failed to download export.");
+        } finally {
+            setExportBusy(false);
         }
     };
 
@@ -168,6 +265,26 @@ export default function DecisionReview() {
                 >
                     <ArrowLeft size={18} /> Back to Decisions
                 </button>
+                <div className="flex items-center gap-2">
+                    <button
+                        onClick={() => handleExport('PDF')}
+                        disabled={exportBusy || exportsLoading}
+                        className="px-3 py-1.5 text-xs font-bold rounded-lg border border-slate-200 text-slate-600 hover:text-slate-900 hover:border-slate-300 transition-colors disabled:opacity-50"
+                    >
+                        <span className="flex items-center gap-1">
+                            <Download size={14} /> Export PDF
+                        </span>
+                    </button>
+                    <button
+                        onClick={() => handleExport('XLSX')}
+                        disabled={exportBusy || exportsLoading}
+                        className="px-3 py-1.5 text-xs font-bold rounded-lg border border-slate-200 text-slate-600 hover:text-slate-900 hover:border-slate-300 transition-colors disabled:opacity-50"
+                    >
+                        <span className="flex items-center gap-1">
+                            <Download size={14} /> Export Excel
+                        </span>
+                    </button>
+                </div>
                 <div className="flex items-center gap-4">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest bg-slate-100 px-2 py-1 rounded">
                         Policy {assessment.policy_version || 'v1.5.0'}
@@ -295,6 +412,51 @@ export default function DecisionReview() {
                             )}
                         </div>
 
+                        {/* 4. Counterfactual Insights */}
+                        <div className="pt-6 border-t border-slate-100 space-y-4">
+                            <div className="flex items-center justify-between">
+                                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest">What Would Change This Decision?</h3>
+                                <span className="px-2 py-1 text-[9px] font-bold uppercase tracking-widest rounded bg-slate-100 text-slate-500">System Insight</span>
+                            </div>
+                            {counterfactualsLoading ? (
+                                <div className="p-4 text-xs text-slate-400 bg-slate-50 rounded-2xl border border-slate-100">
+                                    Loading policy insights...
+                                </div>
+                            ) : counterfactuals.length === 0 ? (
+                                <div className="p-4 text-xs text-slate-500 bg-slate-50 rounded-2xl border border-slate-100">
+                                    No counterfactual insights available for this decision.
+                                </div>
+                            ) : (
+                                <div className="space-y-3">
+                                    {counterfactuals.map((cf: any) => (
+                                        <div key={cf.id} className="p-4 bg-white border border-slate-100 rounded-2xl space-y-2">
+                                            <div className="flex items-center justify-between">
+                                                <p className="text-xs font-bold text-slate-700">{cf.factor_name}</p>
+                                                <span className="px-2 py-0.5 text-[9px] font-bold uppercase tracking-widest rounded bg-indigo-50 text-indigo-600">Policy Threshold</span>
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-3 text-xs text-slate-600">
+                                                <div>
+                                                    <p className="text-[10px] uppercase tracking-widest text-slate-400">Current</p>
+                                                    <p className="font-mono">{cf.current_value}</p>
+                                                </div>
+                                                <div>
+                                                    <p className="text-[10px] uppercase tracking-widest text-slate-400">Required</p>
+                                                    <p className="font-mono">{cf.required_value}</p>
+                                                </div>
+                                            </div>
+                                            <p className="text-xs text-slate-500">{cf.impact_description}</p>
+                                            <p className="text-[10px] text-slate-400 uppercase tracking-widest">
+                                                Outcome if met: <span className="text-slate-600 font-bold">{cf.outcome_if_met}</span>
+                                            </p>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                            <p className="text-[10px] text-slate-400 italic">
+                                These insights describe how system policies operate. They do not guarantee approval.
+                            </p>
+                        </div>
+
                     </div>
 
                     {/* Financial Snapshot Card */}
@@ -323,6 +485,116 @@ export default function DecisionReview() {
                             <div>
                                 <p className="text-[10px] font-bold text-slate-400 uppercase">Capacity Max</p>
                                 <p className="text-lg font-bold text-slate-900">${(assessment.capacity_based_max || 0).toLocaleString()}</p>
+                            </div>
+                            <div>
+                                <p className="text-[10px] font-bold text-slate-400 uppercase">Observed Deposits (30d)</p>
+                                <p className="text-lg font-bold text-slate-900">${(assessment.observed_deposit_volume || 0).toLocaleString()}</p>
+                            </div>
+                            <div>
+                                <p className="text-[10px] font-bold text-slate-400 uppercase">Deposit Count (30d)</p>
+                                <p className="text-lg font-bold text-slate-900">{assessment.metrics?.deposit_count_30d ?? 0}</p>
+                            </div>
+                            <div>
+                                <p className="text-[10px] font-bold text-slate-400 uppercase">Observation Window</p>
+                                <p className="text-lg font-bold text-slate-900">{assessment.metrics?.observation_window_days ?? 0} days</p>
+                                {assessment.metrics?.deposit_window_start && assessment.metrics?.deposit_window_end && (
+                                    <p className="text-[10px] text-slate-400 mt-1">
+                                        {new Date(assessment.metrics.deposit_window_start).toLocaleDateString()} – {new Date(assessment.metrics.deposit_window_end).toLocaleDateString()}
+                                    </p>
+                                )}
+                            </div>
+                            <div>
+                                <p className="text-[10px] font-bold text-slate-400 uppercase">Statement Credits (Parsed)</p>
+                                {assessment.metrics?.statement_deposit_volume !== undefined ? (
+                                    <p className="text-lg font-bold text-slate-900">
+                                        ${(assessment.metrics.statement_deposit_volume || 0).toLocaleString()}
+                                    </p>
+                                ) : (
+                                    <p className="text-sm font-semibold text-slate-500">Re-run assessment</p>
+                                )}
+                            </div>
+                            <div>
+                                <p className="text-[10px] font-bold text-slate-400 uppercase">Statement Credit Count (Parsed)</p>
+                                {assessment.metrics?.statement_deposit_count !== undefined ? (
+                                    <p className="text-lg font-bold text-slate-900">{assessment.metrics.statement_deposit_count ?? 0}</p>
+                                ) : (
+                                    <p className="text-sm font-semibold text-slate-500">Re-run assessment</p>
+                                )}
+                            </div>
+                            <div>
+                                <p className="text-[10px] font-bold text-slate-400 uppercase">Statement Period (Parsed)</p>
+                                {assessment.metrics?.statement_period_days !== undefined ? (
+                                    <>
+                                        <p className="text-lg font-bold text-slate-900">{assessment.metrics.statement_period_days ?? 0} days</p>
+                                        {assessment.metrics?.statement_period_start && assessment.metrics?.statement_period_end && (
+                                            <p className="text-[10px] text-slate-400 mt-1">
+                                                {new Date(assessment.metrics.statement_period_start).toLocaleDateString()} – {new Date(assessment.metrics.statement_period_end).toLocaleDateString()}
+                                            </p>
+                                        )}
+                                    </>
+                                ) : (
+                                    <p className="text-sm font-semibold text-slate-500">Re-run assessment</p>
+                                )}
+                            </div>
+                            <div>
+                                <p className="text-[10px] font-bold text-slate-400 uppercase">Statement Credits (Summary)</p>
+                                {assessment.metrics?.statement_summary_credit_amount !== undefined ? (
+                                    <p className="text-lg font-bold text-slate-900">
+                                        ${(assessment.metrics.statement_summary_credit_amount || 0).toLocaleString()}
+                                    </p>
+                                ) : (
+                                    <p className="text-sm font-semibold text-slate-500">Summary not found</p>
+                                )}
+                            </div>
+                            <div>
+                                <p className="text-[10px] font-bold text-slate-400 uppercase">Statement Credit Count (Summary)</p>
+                                {assessment.metrics?.statement_summary_credit_count !== undefined ? (
+                                    <p className="text-lg font-bold text-slate-900">
+                                        {assessment.metrics.statement_summary_credit_count ?? 0}
+                                    </p>
+                                ) : (
+                                    <p className="text-sm font-semibold text-slate-500">Summary not found</p>
+                                )}
+                            </div>
+                            <div>
+                                <p className="text-[10px] font-bold text-slate-400 uppercase">Statement Debits (Summary)</p>
+                                {assessment.metrics?.statement_summary_debit_amount !== undefined ? (
+                                    <p className="text-lg font-bold text-slate-900">
+                                        ${(assessment.metrics.statement_summary_debit_amount || 0).toLocaleString()}
+                                    </p>
+                                ) : (
+                                    <p className="text-sm font-semibold text-slate-500">Summary not found</p>
+                                )}
+                            </div>
+                            <div>
+                                <p className="text-[10px] font-bold text-slate-400 uppercase">Statement Debit Count (Summary)</p>
+                                {assessment.metrics?.statement_summary_debit_count !== undefined ? (
+                                    <p className="text-lg font-bold text-slate-900">
+                                        {assessment.metrics.statement_summary_debit_count ?? 0}
+                                    </p>
+                                ) : (
+                                    <p className="text-sm font-semibold text-slate-500">Summary not found</p>
+                                )}
+                            </div>
+                            <div>
+                                <p className="text-[10px] font-bold text-slate-400 uppercase">Statement Total Entries</p>
+                                {assessment.metrics?.statement_summary_total_entries !== undefined ? (
+                                    <p className="text-lg font-bold text-slate-900">
+                                        {assessment.metrics.statement_summary_total_entries ?? 0}
+                                    </p>
+                                ) : (
+                                    <p className="text-sm font-semibold text-slate-500">Summary not found</p>
+                                )}
+                            </div>
+                            <div>
+                                <p className="text-[10px] font-bold text-slate-400 uppercase">Ending Balance (Summary)</p>
+                                {assessment.metrics?.statement_summary_ending_balance !== undefined ? (
+                                    <p className="text-lg font-bold text-slate-900">
+                                        ${(assessment.metrics.statement_summary_ending_balance || 0).toLocaleString()}
+                                    </p>
+                                ) : (
+                                    <p className="text-sm font-semibold text-slate-500">Summary not found</p>
+                                )}
                             </div>
                         </div>
                     </div>

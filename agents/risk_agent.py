@@ -204,6 +204,8 @@ class RiskAgent:
             requested_amount=borrower.loan_amount_requested,
             external_transactions=external_behavioral_results.get("transactions") if external_behavioral_results else None
         )
+
+        statement_summary = external_behavioral_results.get("statement_summary") if external_behavioral_results else None
         
         # Merge metrics
         metrics.update({
@@ -211,7 +213,22 @@ class RiskAgent:
             "transaction_count": capacity_results.get("transaction_count", 0),
             "history_days": capacity_results.get("history_days", 0),
             "observation_window_days": capacity_results.get("observation_window_days", 0),
-            "capacity_based_max": capacity_results.get("capacity_based_max", 0.0)
+            "capacity_based_max": capacity_results.get("capacity_based_max", 0.0),
+            "deposit_count_30d": capacity_results.get("deposit_count_30d", 0),
+            "deposit_window_start": capacity_results.get("deposit_window_start"),
+            "deposit_window_end": capacity_results.get("deposit_window_end"),
+            "deposit_window_days": capacity_results.get("deposit_window_days", 0),
+            "statement_deposit_volume": capacity_results.get("statement_deposit_volume", 0.0),
+            "statement_deposit_count": capacity_results.get("statement_deposit_count", 0),
+            "statement_period_start": capacity_results.get("statement_period_start"),
+            "statement_period_end": capacity_results.get("statement_period_end"),
+            "statement_period_days": capacity_results.get("statement_period_days", 0),
+            "statement_summary_credit_amount": (statement_summary or {}).get("credit_amount", 0.0),
+            "statement_summary_credit_count": (statement_summary or {}).get("credit_count", 0),
+            "statement_summary_debit_amount": (statement_summary or {}).get("debit_amount", 0.0),
+            "statement_summary_debit_count": (statement_summary or {}).get("debit_count", 0),
+            "statement_summary_total_entries": (statement_summary or {}).get("total_entries", 0),
+            "statement_summary_ending_balance": (statement_summary or {}).get("ending_balance", 0.0)
         })
 
         # GOVERNANCE: Handle Insufficient Observation Window
@@ -247,6 +264,21 @@ class RiskAgent:
             "transaction_count": capacity_results["transaction_count"],
             "history_days": capacity_results["history_days"],
             "capacity_based_max": capacity_results["capacity_based_max"],
+            "deposit_count_30d": capacity_results.get("deposit_count_30d", 0),
+            "deposit_window_start": capacity_results.get("deposit_window_start"),
+            "deposit_window_end": capacity_results.get("deposit_window_end"),
+            "deposit_window_days": capacity_results.get("deposit_window_days", 0),
+            "statement_deposit_volume": capacity_results.get("statement_deposit_volume", 0.0),
+            "statement_deposit_count": capacity_results.get("statement_deposit_count", 0),
+            "statement_period_start": capacity_results.get("statement_period_start"),
+            "statement_period_end": capacity_results.get("statement_period_end"),
+            "statement_period_days": capacity_results.get("statement_period_days", 0),
+            "statement_summary_credit_amount": (statement_summary or {}).get("credit_amount", 0.0),
+            "statement_summary_credit_count": (statement_summary or {}).get("credit_count", 0),
+            "statement_summary_debit_amount": (statement_summary or {}).get("debit_amount", 0.0),
+            "statement_summary_debit_count": (statement_summary or {}).get("debit_count", 0),
+            "statement_summary_total_entries": (statement_summary or {}).get("total_entries", 0),
+            "statement_summary_ending_balance": (statement_summary or {}).get("ending_balance", 0.0),
             # Legacy anchor fields removed
             "capacity_multiplier_used": capacity_results["capacity_multiplier_used"],
             "starter_loan_applied": capacity_results["starter_loan_applied"],

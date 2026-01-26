@@ -114,7 +114,8 @@ def test_assessment_model_validation():
             decision=Decision.APPROVE,
             recommended_amount=1000,
             recommended_interest_rate=15.0,
-            decision_timestamp=datetime.now()
+            decision_timestamp=datetime.now(),
+            policy_version="v1.5.0"
         )
 
     # 3. Invalid Reject (With Duration)
@@ -127,5 +128,6 @@ def test_assessment_model_validation():
             recommended_amount=0,
             recommended_duration_days=30,
             recommended_interest_rate=0.0,
-            decision_timestamp=datetime.now()
+            decision_timestamp=datetime.now(),
+            policy_version="v1.5.0"
         )

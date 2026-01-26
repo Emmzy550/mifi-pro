@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, User, ShieldCheck, ClipboardList, AlertCircle, Cpu, Send, CheckCircle2, History } from 'lucide-react';
+import { X, User, ShieldCheck, ClipboardList, AlertCircle, Cpu, Send, CheckCircle2, History, Download } from 'lucide-react';
 import { api } from '../context/AuthContext';
 import toast from 'react-hot-toast';
 
@@ -15,6 +15,9 @@ export default function DecisionDetailsModal({ assessment, onClose }: DecisionDe
     const [officerAction, setOfficerAction] = useState<any>(null);
     const [loadingAction, setLoadingAction] = useState(true);
     const [submitting, setSubmitting] = useState(false);
+    const [exports, setExports] = useState<any[]>([]);
+    const [exportsLoading, setExportsLoading] = useState(false);
+    const [exportBusy, setExportBusy] = useState(false);
 
     // Form State
     const [decision, setDecision] = useState<'APPROVE' | 'REJECT' | 'REFER'>(assessment.decision === 'CONDITIONAL' ? 'REFER' : assessment.decision);
@@ -34,7 +37,21 @@ export default function DecisionDetailsModal({ assessment, onClose }: DecisionDe
                 setLoadingAction(false);
             }
         };
+        const fetchExports = async () => {
+            setExportsLoading(true);
+            try {
+                const res = await api.get(`/assessment/${assessment.assessment_id}/exports`);
+                setExports(res.data || []);
+            } catch (e) {
+                console.error("Failed to fetch exports", e);
+            } finally {
+                setExportsLoading(false);
+            }
+        };
         fetchAction();
+        if (assessment.final_decision_metadata) {
+            fetchExports();
+        }
     }, [assessment.assessment_id]);
 
     const handleSubmitAction = async () => {
@@ -54,11 +71,73 @@ export default function DecisionDetailsModal({ assessment, onClose }: DecisionDe
             });
             setOfficerAction(res.data);
             toast.success("Final decision recorded successfully.");
+            try {
+                const exportRes = await api.post(`/assessment/${assessment.assessment_id}/exports/generate`);
+                setExports(exportRes.data || []);
+            } catch (exportErr) {
+                console.error("Export generation failed", exportErr);
+            }
         } catch (e: any) {
             const msg = e.response?.data?.detail || "Failed to record decision.";
             toast.error(msg);
         } finally {
             setSubmitting(false);
+        }
+    };
+
+    const getLatestExport = (type: string) => {
+        const filtered = exports.filter((exp) => exp.export_type === type);
+        if (!filtered.length) return null;
+        return filtered.reduce((latest, current) => (
+            current.export_version > latest.export_version ? current : latest
+        ), filtered[0]);
+    };
+
+    const downloadExport = async (exportRecord: any) => {
+        const response = await api.get(
+            `/assessment/${assessment.assessment_id}/exports/${exportRecord.id}/download`,
+            { responseType: 'blob' }
+        );
+        const blobUrl = window.URL.createObjectURL(new Blob([response.data]));
+        const link = document.createElement('a');
+        const contentDisposition = response.headers['content-disposition'] || '';
+        const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
+        const filename = filenameMatch ? filenameMatch[1] : `decision_export.${exportRecord.export_type.toLowerCase()}`;
+        link.href = blobUrl;
+        link.setAttribute('download', filename);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(blobUrl);
+    };
+
+    const handleExport = async (type: 'PDF' | 'XLSX') => {
+        if (!assessment.final_decision_metadata) {
+            toast.error("Finalize the decision before exporting.");
+            return;
+        }
+
+        setExportBusy(true);
+        try {
+            let exportRecord = getLatestExport(type);
+            if (!exportRecord) {
+                const res = await api.post(`/assessment/${assessment.assessment_id}/exports/generate`);
+                const fresh = res.data || [];
+                setExports(fresh);
+                exportRecord = fresh.find((exp: any) => exp.export_type === type);
+            }
+
+            if (!exportRecord) {
+                toast.error("Export not available yet. Try again.");
+                return;
+            }
+
+            await downloadExport(exportRecord);
+        } catch (e: any) {
+            const msg = e.response?.data?.detail || "Failed to download export.";
+            toast.error(msg);
+        } finally {
+            setExportBusy(false);
         }
     };
 
@@ -76,8 +155,8 @@ export default function DecisionDetailsModal({ assessment, onClose }: DecisionDe
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
             <div className="bg-white rounded-2xl shadow-xl w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col font-sans">
                 {/* Header */}
-                <div className="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-white sticky top-0">
-                    <div>
+                <div className="px-6 py-4 border-b border-slate-200 flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center bg-white sticky top-0">
+                    <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-3">
                             <h2 className="text-xl font-bold text-slate-900 tracking-tight">Assessment Decision</h2>
                             <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold border ${getStatusColor(assessment.decision)}`}>
@@ -86,9 +165,29 @@ export default function DecisionDetailsModal({ assessment, onClose }: DecisionDe
                         </div>
                         <p className="text-sm text-slate-400 font-mono mt-0.5">Reference: {assessment.assessment_id}</p>
                     </div>
-                    <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
-                        <X size={20} className="text-slate-500" />
-                    </button>
+                    <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto sm:justify-end">
+                        <button
+                            onClick={() => handleExport('PDF')}
+                            disabled={exportBusy || exportsLoading}
+                            className="px-3 py-1.5 text-xs font-bold rounded-lg border border-slate-200 text-slate-600 hover:text-slate-900 hover:border-slate-300 transition-colors disabled:opacity-50"
+                        >
+                            <span className="flex items-center gap-1">
+                                <Download size={14} /> Export PDF
+                            </span>
+                        </button>
+                        <button
+                            onClick={() => handleExport('XLSX')}
+                            disabled={exportBusy || exportsLoading}
+                            className="px-3 py-1.5 text-xs font-bold rounded-lg border border-slate-200 text-slate-600 hover:text-slate-900 hover:border-slate-300 transition-colors disabled:opacity-50"
+                        >
+                            <span className="flex items-center gap-1">
+                                <Download size={14} /> Export Excel
+                            </span>
+                        </button>
+                        <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-full transition-colors ml-auto sm:ml-0">
+                            <X size={20} className="text-slate-500" />
+                        </button>
+                    </div>
                 </div>
 
                 {/* Tabs */}

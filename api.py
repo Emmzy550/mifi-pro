@@ -12,6 +12,8 @@ from models.loan import Loan, LoanStatus
 from models.alternative_data import AlternativeData
 from models.organization import Organization, BillingPlan, BillingStatus, OrgEnvironment
 from models.api_key import APIKey, KeyStatus
+from models.decision_export import DecisionExport
+from models.decision_counterfactual import DecisionCounterfactual
 from models.user import User
 from models.officer_action import OfficerAction, OfficerDecision, CommChannel
 from agents.intake_agent import IntakeAgent
@@ -21,6 +23,8 @@ from agents.explanation_agent import ExplanationAgent
 from agents.query_agent import QueryAgent
 from agents.auth_agent import AuthAgent, AuthUser, ACCESS_TOKEN_EXPIRE_MINUTES, get_super_admin
 from agents.audit_agent import AuditAgent
+from agents.decision_export_agent import DecisionExportAgent
+from agents.decision_counterfactual_agent import DecisionCounterfactualAgent
 from agents.self_healing_agent import SelfHealingAgent
 from utils.db import Database
 from utils.pdf_parser import PDFTransactionParser, parse_simple_csv_format
@@ -733,6 +737,7 @@ async def _run_assessment_core(
     mobile_money_history: Optional[List[Dict[str, Any]]] = None,
     utility_history: Optional[List[Dict[str, Any]]] = None,
     airtime_usage_avg: Optional[float] = None,
+    statement_summary: Optional[Dict[str, Any]] = None,
     assessment_source: str = "API"
 ) -> Assessment:
     """
@@ -751,6 +756,8 @@ async def _run_assessment_core(
             "utility_compliance": 0.7,
             "early_warnings": []
         }
+        if statement_summary:
+            external_results["statement_summary"] = statement_summary
 
     # 1. Evaluate Risk
     risk_results = RiskAgent.evaluate(borrower, external_behavioral_results=external_results)
@@ -944,6 +951,7 @@ async def assessment_manual(
 
     # Parse primary statements
     bank_tx = await parse_upload(bank_statement)
+    bank_statement_summary = tx_parser.last_statement_summary
     momo_tx = await parse_upload(mobile_money_statement)
     all_parsed_transactions.extend(bank_tx)
     all_parsed_transactions.extend(momo_tx)
@@ -964,6 +972,7 @@ async def assessment_manual(
         borrower=borrower,
         requested_duration_days=requested_duration_days,
         mobile_money_history=history_dicts if history_dicts else None,
+        statement_summary=bank_statement_summary,
         assessment_source="MANUAL_UI"
     )
 
@@ -1501,6 +1510,28 @@ async def record_officer_action(
         "org": user.organization_id
     })
 
+    # 8. Auto-generate decision exports (best-effort)
+    try:
+        borrower = Database.get_borrower(assessment.borrower_id)
+        if borrower:
+            DecisionExportAgent.generate_exports(assessment, borrower, user.email, force=False)
+            AuditAgent.log_event("DECISION_EXPORT_GENERATED", user.email, {
+                "assessment_id": assessment_id,
+                "org": user.organization_id
+            })
+        else:
+            AuditAgent.log_event("DECISION_EXPORT_SKIPPED", user.email, {
+                "assessment_id": assessment_id,
+                "reason": "Borrower not found",
+                "org": user.organization_id
+            })
+    except Exception as export_error:
+        AuditAgent.log_event("DECISION_EXPORT_FAILED", user.email, {
+            "assessment_id": assessment_id,
+            "error": str(export_error),
+            "org": user.organization_id
+        })
+
     return action
 
 @app.get("/assessment/{assessment_id}/officer-action", response_model=Optional[OfficerAction])
@@ -1592,6 +1623,123 @@ async def get_assessment_details(
         raise HTTPException(status_code=403, detail="Unauthorized access to this assessment")
         
     return assessment
+
+
+@app.get("/assessment/{assessment_id}/exports", response_model=List[DecisionExport])
+async def list_decision_exports(
+    assessment_id: str,
+    user: AuthUser = Depends(AuthAgent.get_current_user)
+):
+    assessment = Database.get_assessment(assessment_id)
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    if assessment.organization_id != user.organization_id and user.role != "SUPER_ADMIN":
+        raise HTTPException(status_code=403, detail="Unauthorized access to this assessment")
+
+    return Database.list_decision_exports(assessment_id)
+
+
+@app.post("/assessment/{assessment_id}/exports/generate", response_model=List[DecisionExport])
+async def generate_decision_exports(
+    assessment_id: str,
+    force: bool = False,
+    user: AuthUser = Depends(AuthAgent.get_current_user)
+):
+    assessment = Database.get_assessment(assessment_id)
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    if assessment.organization_id != user.organization_id and user.role != "SUPER_ADMIN":
+        raise HTTPException(status_code=403, detail="Unauthorized access to this assessment")
+    if not assessment.final_decision_metadata:
+        raise HTTPException(status_code=400, detail="Decision is not finalized")
+
+    borrower = Database.get_borrower(assessment.borrower_id)
+    if not borrower:
+        raise HTTPException(status_code=404, detail="Borrower not found")
+
+    exports = DecisionExportAgent.generate_exports(assessment, borrower, user.email, force=force)
+    AuditAgent.log_event("DECISION_EXPORT_REQUESTED", user.email, {
+        "assessment_id": assessment_id,
+        "force": force,
+        "org": user.organization_id
+    })
+    return exports
+
+
+@app.get("/assessment/{assessment_id}/exports/{export_id}/download")
+async def download_decision_export(
+    assessment_id: str,
+    export_id: str,
+    user: AuthUser = Depends(AuthAgent.get_current_user)
+):
+    export = Database.get_decision_export(export_id)
+    if not export:
+        raise HTTPException(status_code=404, detail="Export not found")
+    if export.decision_id != assessment_id:
+        raise HTTPException(status_code=404, detail="Export not found for assessment")
+    if export.organization_id != user.organization_id and user.role != "SUPER_ADMIN":
+        raise HTTPException(status_code=403, detail="Unauthorized access to export")
+    if export.status != "READY":
+        raise HTTPException(status_code=400, detail="Export is not ready")
+    if not os.path.exists(export.file_path):
+        raise HTTPException(status_code=404, detail="Export file missing")
+
+    filename = os.path.basename(export.file_path)
+    media_type = "application/pdf" if export.export_type.value == "PDF" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    return FileResponse(export.file_path, media_type=media_type, filename=filename)
+
+
+@app.get("/decisions/{decision_id}/counterfactuals", response_model=List[DecisionCounterfactual])
+async def list_decision_counterfactuals(
+    decision_id: str,
+    user: AuthUser = Depends(AuthAgent.get_current_user)
+):
+    assessment = Database.get_assessment(decision_id)
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Decision not found")
+    if assessment.organization_id != user.organization_id and user.role != "SUPER_ADMIN":
+        raise HTTPException(status_code=403, detail="Unauthorized access to decision")
+    if not assessment.final_decision_metadata:
+        raise HTTPException(status_code=400, detail="Decision is not finalized")
+
+    borrower = Database.get_borrower(assessment.borrower_id)
+    if not borrower:
+        raise HTTPException(status_code=404, detail="Borrower not found")
+
+    counterfactuals = DecisionCounterfactualAgent.get_or_compute(assessment, borrower, force=False)
+    AuditAgent.log_event("DECISION_COUNTERFACTUALS_VIEWED", user.email, {
+        "decision_id": decision_id,
+        "org": user.organization_id
+    })
+    return counterfactuals
+
+
+@app.post("/decisions/{decision_id}/counterfactuals/recompute", response_model=List[DecisionCounterfactual])
+async def recompute_decision_counterfactuals(
+    decision_id: str,
+    user: AuthUser = Depends(AuthAgent.get_current_user)
+):
+    if user.role not in ["ORG_ADMIN", "SUPER_ADMIN"]:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    assessment = Database.get_assessment(decision_id)
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Decision not found")
+    if assessment.organization_id != user.organization_id and user.role != "SUPER_ADMIN":
+        raise HTTPException(status_code=403, detail="Unauthorized access to decision")
+    if not assessment.final_decision_metadata:
+        raise HTTPException(status_code=400, detail="Decision is not finalized")
+
+    borrower = Database.get_borrower(assessment.borrower_id)
+    if not borrower:
+        raise HTTPException(status_code=404, detail="Borrower not found")
+
+    counterfactuals = DecisionCounterfactualAgent.get_or_compute(assessment, borrower, force=True)
+    AuditAgent.log_event("DECISION_COUNTERFACTUALS_RECOMPUTED", user.email, {
+        "decision_id": decision_id,
+        "org": user.organization_id
+    })
+    return counterfactuals
 
 @app.get("/assessment/{assessment_id}/sms-logs", response_model=List[SMSLog])
 async def get_assessment_sms_logs(

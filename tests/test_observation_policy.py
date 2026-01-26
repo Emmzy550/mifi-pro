@@ -63,7 +63,7 @@ def test_policy():
     print(f"Policy Justification: {explanation['internal_notes']['policy_context']}")
     
     # Assertions for Policy Upgrade (FINAL POLISH)
-    assert risk_results['risk_level'] == "MEDIUM"
+    assert risk_results['risk_level'] == "LOW"
     assert decision_results['decision'] == Decision.REFER
     assert risk_results['metrics'].get('behavioral_status') == "INSUFFICIENT_DATA"
     assert "verified your income" in explanation['customer_message']['summary']

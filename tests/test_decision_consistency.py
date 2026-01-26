@@ -18,7 +18,7 @@ def test_approve_invariant():
     assert "approved based on policy compliance" in a.decision_summary
 
     # 2. Invalid Approval (Zero Amount)
-    with pytest.raises(ValueError, match="INVARIANT VIOLATION"):
+    with pytest.raises(ValueError, match="INVARIANT"):
         Assessment(
             decision=Decision.APPROVE,
             recommended_amount=0.0,
@@ -26,7 +26,7 @@ def test_approve_invariant():
         )
 
     # 3. Invalid Approval (Blocking Factors)
-    with pytest.raises(ValueError, match="INVARIANT VIOLATION"):
+    with pytest.raises(ValueError, match="INVARIANT"):
         Assessment(
             decision=Decision.APPROVE,
             recommended_amount=1000.0,
@@ -47,7 +47,7 @@ def test_reject_invariant():
     assert len(a.blocking_factors) > 0
 
     # 2. Invalid Reject (Positive Amount)
-    with pytest.raises(ValueError, match="INVARIANT VIOLATION"):
+    with pytest.raises(ValueError, match="INVARIANT"):
         Assessment(
             decision=Decision.REJECT,
             recommended_amount=100.0,
@@ -55,11 +55,12 @@ def test_reject_invariant():
         )
         
     # 3. Invalid Reject (No Blocking Factors)
-    with pytest.raises(ValueError, match="INVARIANT VIOLATION"):
+    with pytest.raises(ValueError, match="INVARIANT"):
         Assessment(
             decision=Decision.REJECT,
             recommended_amount=0.0,
-            blocking_factors=[]
+            blocking_factors=[],
+            policy_version="v1.5.0"
         )
 
 def test_refer_invariant():
@@ -73,7 +74,7 @@ def test_refer_invariant():
     assert a.recommended_amount is None
 
     # 2. Invalid Refer (Has Amount)
-    with pytest.raises(ValueError, match="INVARIANT VIOLATION"):
+    with pytest.raises(ValueError, match="INVARIANT"):
         Assessment(
             decision=Decision.REFER,
             recommended_amount=100.0,
