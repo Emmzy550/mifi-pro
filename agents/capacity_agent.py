@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from utils.db import Database
 from models.alternative_data import AlternativeData, MobileMoneyTransaction
 import lending_config.capacity_config as cap_config
+import lending_config.pilot_config as pilot_config  # NEW: Pilot mode configuration
 import statistics
 
 
@@ -24,7 +25,9 @@ class CapacityAgent:
         borrower_id: str,
         risk_level: str,
         requested_amount: float = 0.0,
-        external_transactions: Optional[List] = None
+        external_transactions: Optional[List] = None,
+        verified_monthly_income: Optional[float] = None,  # NEW: from payslip net_pay
+        verified_income_source: Optional[str] = None  # NEW: "PAYSLIP", "SALARY_CREDIT", etc.
     ) -> Dict[str, Any]:
         """
         Calculates the maximum loanable amount based on demonstrated capacity.
@@ -40,8 +43,12 @@ class CapacityAgent:
             "observation_window_days": 0,
             "insufficient_observation": False,
             "rejection_reason": None,
+            "rejection_details": {},  # NEW: Structured rejection info
             "starter_loan_applied": False,
             "capacity_multiplier_used": 0.0,
+            "capacity_source": "NONE",  # NEW: "VERIFIED_INCOME", "DEPOSIT_VOLUME", "NONE"
+            "verified_income_used": None,  # NEW: Amount of verified income used
+            "behavioral_transaction_count": 0,  # NEW: Spending transactions counted
             "data_source": "NONE",
             "audit_trail": {}
         }
@@ -127,8 +134,74 @@ class CapacityAgent:
                 result["rejection_reason"] = validation_result["reason"]
                 return result
         
+        # ================================================================
+        # VERIFIED INCOME OVERRIDE (PILOT MODE)
+        # ================================================================
+        # If verified income is available (from payslip), use it as primary
+        # capacity source instead of observed deposit volume
+        
+        if (pilot_config.PILOT_MODE_ENABLED and 
+            pilot_config.ALLOW_VERIFIED_INCOME_OVERRIDE and
+            verified_monthly_income is not None and
+            verified_monthly_income >= pilot_config.MIN_VERIFIED_INCOME):
+            
+            print(f"INFO: Verified income detected: {verified_monthly_income} from {verified_income_source or 'PAYSLIP'}")
+            
+            # Count behavioral transactions to validate spending patterns
+            behavioral_result = CapacityAgent._count_behavioral_transactions(transactions)
+            result["behavioral_transaction_count"] = behavioral_result["behavioral_transaction_count"]
+            result["audit_trail"]["behavioral_analysis"] = behavioral_result
+            
+            print(f"INFO: Behavioral transactions: {behavioral_result['behavioral_transaction_count']} of {behavioral_result['raw_transaction_count']}")
+            
+            # Check if we have sufficient behavioral data
+            if behavioral_result["behavioral_transaction_count"] < pilot_config.MIN_BEHAVIORAL_TRANSACTIONS:
+                result["rejection_reason"] = pilot_config.RejectionReason.INSUFFICIENT_BEHAVIORAL_DATA
+                result["rejection_details"] = {
+                    "behavioral_txn_count": behavioral_result["behavioral_transaction_count"],
+                    "required": pilot_config.MIN_BEHAVIORAL_TRANSACTIONS,
+                    "verified_income": verified_monthly_income,
+                    "verified_income_source": verified_income_source,
+                    "message": pilot_config.get_rejection_message(
+                        pilot_config.RejectionReason.INSUFFICIENT_BEHAVIORAL_DATA
+                    )
+                }
+                print(f"REJECTION: {result['rejection_details']['message']}")
+                return result
+            
+            # Use verified income as capacity base
+            try:
+                capacity_multiplier = pilot_config.get_verified_income_multiplier(risk_level)
+            except ValueError as e:
+                result["rejection_reason"] = f"Invalid risk level: {risk_level}"
+                return result
+            
+            capacity_based_max = verified_monthly_income * capacity_multiplier
+            
+            result["capacity_source"] = "VERIFIED_INCOME"
+            result["verified_income_used"] = verified_monthly_income
+            result["capacity_multiplier_used"] = capacity_multiplier
+            result["capacity_based_max"] = round(capacity_based_max, 2)
+            result["is_valid"] = True
+            
+            print(f"✓ CAPACITY APPROVED via VERIFIED_INCOME: {capacity_based_max:.2f} "
+                  f"({verified_monthly_income} * {capacity_multiplier})")
+            
+            return result
+        
+        # ================================================================
+        # DEPOSIT VOLUME PATH (Fallback or Production Mode)
+        # ================================================================
+        
         # Check minimum deposit volume threshold for NORMAL loans
-        if not micro_starter_eligible and result["observed_deposit_volume"] < cap_config.MIN_CAPACITY_THRESHOLD:
+        # Use pilot threshold if in pilot mode, otherwise production threshold
+        min_threshold = (
+            pilot_config.MIN_CAPACITY_THRESHOLD_PILOT 
+            if pilot_config.PILOT_MODE_ENABLED 
+            else cap_config.MIN_CAPACITY_THRESHOLD
+        )
+        
+        if not micro_starter_eligible and result["observed_deposit_volume"] < min_threshold:
             # If we bypassed validation for time, we still check volume
             result["rejection_reason"] = (
                 f"Observed deposit volume ({result['observed_deposit_volume']:.2f}) "
@@ -179,13 +252,110 @@ class CapacityAgent:
         return default
 
     @staticmethod
+    def _tx_is_credible(tx: Any, min_confidence: float = 0.7) -> bool:
+        confidence = CapacityAgent._get_tx_val(tx, ["confidence_score", "confidence"], 1.0)
+        flags = CapacityAgent._get_tx_val(tx, ["flags"], [])
+        if flags and "LOW_CONFIDENCE_REVIEW" in flags:
+            return False
+        try:
+            return float(confidence) >= min_confidence
+        except:
+            return True
+
+    @staticmethod
+    def _count_behavioral_transactions(transactions: List) -> Dict[str, Any]:
+        """
+        Count transactions that demonstrate financial behavior.
+        
+        Behavioral transactions include:
+        - All debits/outflows (expenses, transfers, bill payments)
+        - Mobile banking transactions (DIGITAL NFS, AIRTEL, MTN)
+        - POS purchases
+        - Airtime/utility payments
+        
+        Excludes:
+        - Reversals
+        - Standalone fee commissions (< 50 units)
+        - Duplicate entries
+        - Low confidence transactions
+        
+        Returns:
+            Dict with behavioral_count, raw_count, and percentage
+        """
+        behavioral_count = 0
+        raw_count = len(transactions)
+        matched_reasons = []
+        
+        for tx in transactions:
+            # Check credibility first
+            if not CapacityAgent._tx_is_credible(tx):
+                continue
+            
+            # Get transaction details
+            desc = str(CapacityAgent._get_tx_val(tx, ["description"], "")).upper()
+            direction = str(CapacityAgent._get_tx_val(tx, ["direction"], "")).upper()
+            tx_type = str(CapacityAgent._get_tx_val(tx, ["type"], "")).upper()
+            amount = CapacityAgent._get_tx_val(tx, ["amount"], 0.0)
+            
+            # Skip reversals
+            if 'REVERSAL' in desc:
+                continue
+            
+            # Skip standalone small commissions (but keep if it's part of behavioral pattern)
+            if 'COMMISSION' in desc and amount < 50:
+                # Still check for behavioral patterns as fallback
+                if not any(p in desc for p in ['DIGITAL', 'MOBILE', 'NFS']):
+                    continue
+            
+            # Check for outflow/debit direction (various formats)
+            is_outflow = direction in ["OUTFLOW", "DEBIT", "D", "DR"]
+            
+            if is_outflow:
+                behavioral_count += 1
+                matched_reasons.append(f"OUTFLOW: {desc[:30]}")
+                continue
+            
+            # Check specific behavioral patterns regardless of direction
+            # These indicate active account usage
+            behavioral_patterns = [
+                'DIGITAL NFS', 'MOBILE BANKING', 'POS', 
+                'AIRTEL', 'MTN', 'ZAMTEL', 'AIRTIME',
+                'BILL PAYMENT', 'TRANSFER', 'WITHDRAWAL',
+                'MBBO', 'NFS TRANSACTION', 'TOP UP', 'TOPUP',
+                'ACCOUNT MAINTENANCE', 'CHARGE', 'FEE'
+            ]
+            
+            if any(pattern in desc for pattern in behavioral_patterns):
+                behavioral_count += 1
+                matched_reasons.append(f"PATTERN: {desc[:30]}")
+                continue
+            
+            # Also count inflows as behavioral (shows active account)
+            is_inflow = direction in ["INFLOW", "CREDIT", "C", "CR"]
+            if is_inflow:
+                behavioral_count += 1
+                matched_reasons.append(f"INFLOW: {desc[:30]}")
+        
+        print(f"DEBUG: Behavioral analysis - {behavioral_count} of {raw_count} matched")
+        if matched_reasons:
+            print(f"DEBUG: Matched reasons (first 5): {matched_reasons[:5]}")
+        
+        return {
+            "behavioral_transaction_count": behavioral_count,
+            "raw_transaction_count": raw_count,
+            "behavioral_percentage": behavioral_count / raw_count if raw_count > 0 else 0
+        }
+
+
+    @staticmethod
     def _validate_transaction_data(transactions: List) -> Dict[str, Any]:
         if not transactions:
             return {"is_valid": False, "reason": "No transaction history available", "history_days": 0, "transaction_count": 0}
         
-        transaction_count = len(transactions)
+        credible_transactions = [tx for tx in transactions if CapacityAgent._tx_is_credible(tx)]
+        transaction_count = len(credible_transactions)
         timestamps = []
-        for tx in transactions:
+        for tx in credible_transactions:
             ts = CapacityAgent._get_tx_val(tx, ["timestamp", "date"])
             if isinstance(ts, str):
                 try: ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
@@ -243,6 +413,8 @@ class CapacityAgent:
         
         timestamps = []
         for tx in transactions:
+            if not CapacityAgent._tx_is_credible(tx):
+                continue
             ts = CapacityAgent._get_tx_val(tx, ["timestamp", "date"])
             if isinstance(ts, str):
                 try:
@@ -262,6 +434,8 @@ class CapacityAgent:
         valid_deposits = []
         
         for tx in transactions:
+            if not CapacityAgent._tx_is_credible(tx):
+                continue
             amount = CapacityAgent._get_tx_val(tx, ["amount"], 0.0)
             ts = CapacityAgent._get_tx_val(tx, ["timestamp", "date"])
             tx_type = str(CapacityAgent._get_tx_val(tx, ["type"], "")).upper()

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../context/AuthContext';
 import {
@@ -20,6 +20,8 @@ import { toast } from 'react-hot-toast';
 export default function ManualAssessments() {
     const navigate = useNavigate();
     const [submitting, setSubmitting] = useState(false);
+    const [pendingDocs, setPendingDocs] = useState<string[]>([]);
+    const [borrowerId, setBorrowerId] = useState<string | null>(null);
 
     // Form State
     const [formData, setFormData] = useState({
@@ -38,9 +40,11 @@ export default function ManualAssessments() {
     const [files, setFiles] = useState<{
         bank_statement: File | null;
         mobile_money_statement: File | null;
+        payslip: File | null;
     }>({
         bank_statement: null,
-        mobile_money_statement: null
+        mobile_money_statement: null,
+        payslip: null
     });
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
@@ -48,13 +52,26 @@ export default function ManualAssessments() {
         setFormData(prev => ({ ...prev, [name]: value }));
     };
 
-    const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>, type: 'bank_statement' | 'mobile_money_statement') => {
+    const handleFileChange = (
+        e: React.ChangeEvent<HTMLInputElement>,
+        type: 'bank_statement' | 'mobile_money_statement' | 'payslip'
+    ) => {
         if (e.target.files && e.target.files[0]) {
             setFiles(prev => ({ ...prev, [type]: e.target.files![0] }));
         }
     };
 
-    const removeFile = (type: 'bank_statement' | 'mobile_money_statement') => {
+    useEffect(() => {
+        if (!borrowerId || pendingDocs.length === 0 || submitting) return;
+        const required = new Set(pendingDocs);
+        const hasPayslip = required.has('PAYSLIP') ? !!files.payslip : true;
+        const hasBank = required.has('BANK_STATEMENT') ? !!files.bank_statement : true;
+        if (hasPayslip && hasBank) {
+            handleSubmit(new Event('submit') as unknown as React.FormEvent);
+        }
+    }, [borrowerId, pendingDocs, files, formData.national_id, submitting]);
+
+    const removeFile = (type: 'bank_statement' | 'mobile_money_statement' | 'payslip') => {
         setFiles(prev => ({ ...prev, [type]: null }));
     };
 
@@ -63,14 +80,24 @@ export default function ManualAssessments() {
         setSubmitting(true);
 
         const payload = new FormData();
+        if (borrowerId) {
+            payload.append('borrower_id', borrowerId);
+        }
         Object.entries(formData).forEach(([key, value]) => payload.append(key, value));
         if (files.bank_statement) payload.append('bank_statement', files.bank_statement);
         if (files.mobile_money_statement) payload.append('mobile_money_statement', files.mobile_money_statement);
+        if (files.payslip) payload.append('payslip', files.payslip);
 
         try {
             const res = await api.post('/assessment/manual', payload, {
                 headers: { 'Content-Type': 'multipart/form-data' }
             });
+            if (res.data.status === 'INCOMPLETE') {
+                setPendingDocs(res.data.missing_documents || []);
+                setBorrowerId(res.data.borrower_id || null);
+                toast.error(res.data.message || 'Additional documents are required.');
+                return;
+            }
             toast.success('Assessment completed successfully!');
             navigate(`/decisions?new_id=${res.data.assessment_id}`);
         } catch (err: any) {
@@ -103,6 +130,11 @@ export default function ManualAssessments() {
             </header>
 
             <form onSubmit={handleSubmit} className="space-y-8">
+                {pendingDocs.length > 0 && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-amber-900 text-sm font-semibold">
+                        Missing documents: {pendingDocs.join(", ")}. Upload the missing items to continue.
+                    </div>
+                )}
                 {/* SECTION 1: BORROWER & LOAN DETAILS */}
                 <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
                     <div className="bg-slate-50 px-6 py-3 border-b border-slate-200 flex items-center gap-2">
@@ -246,6 +278,30 @@ export default function ManualAssessments() {
                                         </div>
                                     </div>
                                     <button onClick={() => removeFile('mobile_money_statement')} className="text-slate-400 hover:text-red-500"><X size={18} /></button>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Payslip Upload */}
+                        <div className="space-y-3">
+                            <h3 className="text-sm font-semibold text-slate-900">Payslip (Recommended)</h3>
+                            <p className="text-xs text-slate-500">Upload latest payslip to verify income (PDF/JPG/PNG).</p>
+                            {!files.payslip ? (
+                                <label className="flex flex-col items-center justify-center h-32 border-2 border-dashed border-slate-200 rounded-xl hover:border-primary hover:bg-primary/5 cursor-pointer transition-all">
+                                    <Upload className="text-slate-400 mb-2" size={24} />
+                                    <span className="text-xs font-medium text-slate-600">Click to upload payslip</span>
+                                    <input type="file" className="hidden" accept=".pdf,.jpg,.jpeg,.png" onChange={(e) => handleFileChange(e, 'payslip')} />
+                                </label>
+                            ) : (
+                                <div className="flex items-center justify-between p-3 bg-primary/5 border border-primary/20 rounded-lg">
+                                    <div className="flex items-center gap-3">
+                                        <FileText className="text-primary" size={20} />
+                                        <div>
+                                            <div className="text-xs font-bold text-slate-900 truncate max-w-[200px]">{files.payslip.name}</div>
+                                            <div className="text-[10px] text-slate-500">{(files.payslip.size / 1024).toFixed(1)} KB</div>
+                                        </div>
+                                    </div>
+                                    <button onClick={() => removeFile('payslip')} className="text-slate-400 hover:text-red-500"><X size={18} /></button>
                                 </div>
                             )}
                         </div>

@@ -11,6 +11,10 @@ from utils.db import Database
 from pricing_config import PLAN_CONFIG
 from agents.audit_agent import AuditAgent
 
+class GatewayError(Exception):
+    """Custom exception for external payment gateway failures."""
+    pass
+
 class PaymentAgent:
     """
     Handles production payment integrations: Lipila (MoMo), Bank Transfer, and Stripe.
@@ -105,7 +109,7 @@ class PaymentAgent:
             if 'response' in locals():
                 print(f"LIPILA ERROR BODY: {response.text}")
             AuditAgent.log_event("PAYMENT_GATEWAY_ERROR", org.id, {"gateway": "LIPILA", "error": str(e)})
-            raise ValueError(f"Failed to connect to Lipila: {str(e)}")
+            raise GatewayError(f"Failed to connect to Lipila: {str(e)}")
 
         payment = Payment(
             payment_id=payment_id,
@@ -264,12 +268,12 @@ class PaymentAgent:
             error_body = e.response.text
             print(f"LIPILA CARD API ERROR BODY: {error_body}")
             AuditAgent.log_event("PAYMENT_GATEWAY_ERROR", org.id, {"gateway": "LIPILA_CARD", "error": str(e), "body": error_body})
-            raise ValueError(f"Lipila Card Error: {error_body}")
+            raise GatewayError(f"Lipila Card Error: {error_body}")
             
         except Exception as e:
             print(f"LIPILA CARD ERROR: {str(e)}")
             AuditAgent.log_event("PAYMENT_GATEWAY_ERROR", org.id, {"gateway": "LIPILA_CARD", "error": str(e)})
-            raise ValueError(f"Failed to initiate Lipila Card payment: {str(e)}")
+            raise GatewayError(f"Failed to initiate Lipila Card payment: {str(e)}")
 
         # Create Pending Payment Record
         payment = Payment(
@@ -333,7 +337,7 @@ class PaymentAgent:
         # 2. Update Status
         # Lipila status is 'Successful'
         status_val = payload.get("status", "").lower()
-        success = status_val == "successful"
+        success = status_val in ["successful", "success"]
         if success:
             payment.status = AppPaymentStatus.PAID
             # ACTIVATE PLAN

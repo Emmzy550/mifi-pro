@@ -532,14 +532,16 @@
         const dropZone = document.getElementById('dropZone');
         const fileInput = document.getElementById('fileInput');
 
-        dropZone.addEventListener('click', () => fileInput.click());
-        fileInput.addEventListener('change', () => {
-            if (fileInput.files.length > 0) {
-                document.getElementById('fileName').textContent = fileInput.files[0].name;
-                document.getElementById('fileName').classList.remove('hidden');
-                document.getElementById('btnAnalyze').disabled = false;
-            }
-        });
+        if (dropZone && fileInput) {
+            dropZone.addEventListener('click', () => fileInput.click());
+            fileInput.addEventListener('change', () => {
+                if (fileInput.files.length > 0) {
+                    document.getElementById('fileName').textContent = fileInput.files[0].name;
+                    document.getElementById('fileName').classList.remove('hidden');
+                    document.getElementById('btnAnalyze').disabled = false;
+                }
+            });
+        }
 
         async function uploadDocument() {
             const file = fileInput.files[0];

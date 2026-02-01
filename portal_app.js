@@ -3,6 +3,9 @@ const API_BASE = window.location.origin;
 document.addEventListener('DOMContentLoaded', () => {
     const borrowerForm = document.getElementById('borrowerForm');
     const submitBtn = document.getElementById('submitBtn');
+    if (!borrowerForm || !submitBtn) {
+        return;
+    }
     const btnText = submitBtn.querySelector('.btn-text');
     const loader = submitBtn.querySelector('.loader');
 
@@ -15,8 +18,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // UI Loading State
         submitBtn.disabled = true;
-        btnText.classList.add('hidden');
-        loader.classList.remove('hidden');
+        if (btnText) {
+            btnText.classList.add('hidden');
+        }
+        if (loader) {
+            loader.classList.remove('hidden');
+        }
 
         const formData = new FormData(borrowerForm);
         const data = Object.fromEntries(formData.entries());
@@ -65,8 +72,12 @@ document.addEventListener('DOMContentLoaded', () => {
             alert(`Error: ${err.message}`);
         } finally {
             submitBtn.disabled = false;
-            btnText.classList.remove('hidden');
-            loader.classList.add('hidden');
+            if (btnText) {
+                btnText.classList.remove('hidden');
+            }
+            if (loader) {
+                loader.classList.add('hidden');
+            }
         }
     });
 });

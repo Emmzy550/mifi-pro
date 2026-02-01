@@ -1,6 +1,9 @@
 document.addEventListener('DOMContentLoaded', () => {
     const loanForm = document.getElementById('loanForm');
     const runBtn = document.getElementById('runAssessmentBtn');
+    if (!loanForm || !runBtn) {
+        return;
+    }
     const btnText = runBtn.querySelector('.btn-text');
     const loader = runBtn.querySelector('.loader');
     
@@ -78,13 +81,21 @@ document.addEventListener('DOMContentLoaded', () => {
     function setLoading(isLoading) {
         if (isLoading) {
             runBtn.disabled = true;
-            btnText.textContent = 'Processing...';
-            loader.classList.remove('hidden');
+            if (btnText) {
+                btnText.textContent = 'Processing...';
+            }
+            if (loader) {
+                loader.classList.remove('hidden');
+            }
             resultsState.classList.add('hidden');
         } else {
             runBtn.disabled = false;
-            btnText.textContent = 'Run Assessment';
-            loader.classList.add('hidden');
+            if (btnText) {
+                btnText.textContent = 'Run Assessment';
+            }
+            if (loader) {
+                loader.classList.add('hidden');
+            }
         }
     }
 

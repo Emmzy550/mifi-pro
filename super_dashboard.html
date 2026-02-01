@@ -377,7 +377,9 @@
             document.getElementById('upgrade-modal').classList.add('hidden');
         }
 
-        document.getElementById('confirm-upgrade-btn').addEventListener('click', async () => {
+        const confirmUpgradeBtn = document.getElementById('confirm-upgrade-btn');
+        if (confirmUpgradeBtn) {
+        confirmUpgradeBtn.addEventListener('click', async () => {
             const newPlan = document.getElementById('upgrade-plan-select').value;
             let newLimit = 1000;
             if (newPlan === 'sandbox') newLimit = 10;
@@ -407,8 +409,11 @@
                 console.error('Upgrade error', err);
             }
         });
+        }
 
-        document.getElementById('ai-explanation-toggle').addEventListener('change', async (e) => {
+        const aiExplanationToggle = document.getElementById('ai-explanation-toggle');
+        if (aiExplanationToggle) {
+        aiExplanationToggle.addEventListener('change', async (e) => {
             const enabled = e.target.checked;
             try {
                 const res = await fetch('/admin/platform/settings', {
@@ -430,6 +435,7 @@
                 e.target.checked = !enabled;
             }
         });
+        }
 
         fetchPlatformStats();
         // Auto-refresh stats

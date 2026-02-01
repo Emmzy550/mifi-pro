@@ -29,12 +29,19 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Quick Action
-    document.getElementById('quickIntakeBtn').onclick = () => switchView('intake');
-    document.getElementById('viewAllHistory').onclick = () => switchView('history');
+    const quickIntakeBtn = document.getElementById('quickIntakeBtn');
+    if (quickIntakeBtn) {
+        quickIntakeBtn.onclick = () => switchView('intake');
+    }
+    const viewAllHistory = document.getElementById('viewAllHistory');
+    if (viewAllHistory) {
+        viewAllHistory.onclick = () => switchView('history');
+    }
 
     // Intake Form Logic
     const intakeForm = document.getElementById('proIntakeForm');
-    intakeForm.addEventListener('submit', async (e) => {
+    if (intakeForm) {
+        intakeForm.addEventListener('submit', async (e) => {
         e.preventDefault();
         const formData = new FormData(intakeForm);
         const data = Object.fromEntries(formData.entries());
@@ -88,7 +95,8 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error(err);
             alert('Failed to process. Check if local server is running.');
         }
-    });
+        });
+    }
 
     // Data Refresh Logic
     async function refreshData() {

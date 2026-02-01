@@ -14,6 +14,7 @@ import {
     Send,
     MessageSquare,
     DollarSign,
+    FileText,
     Calendar,
     Download
 } from 'lucide-react';
@@ -234,6 +235,30 @@ export default function DecisionReview() {
 
     if (loading) return <div className="p-8 text-center text-slate-500 font-medium">Loading compliance record...</div>;
     if (!assessment) return <div className="p-8 text-center text-red-500 font-bold">Assessment not found.</div>;
+
+    const summaryProfile = assessment.metrics?.summary_profile;
+    const documentSummaries = Array.isArray(assessment.metrics?.document_summaries)
+        ? assessment.metrics.document_summaries
+        : [];
+    const readiness = assessment.metrics?.readiness ?? true;
+    const missingDocuments = assessment.metrics?.missing_documents ?? [];
+    if (!summaryProfile) {
+        throw new Error("Missing summary_profile; cannot render decision summary.");
+    }
+
+    const formatShortDate = (value?: string) => {
+        if (!value) return null;
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) return null;
+        return parsed.toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' });
+    };
+
+    const formatStatementPeriod = () => {
+        const start = formatShortDate(assessment.metrics?.statement_period_start);
+        const end = formatShortDate(assessment.metrics?.statement_period_end_summary);
+        if (!start || !end) return "Not confidently determined";
+        return `${start} – ${end}`;
+    };
 
     const isSealed = !!assessment.final_decision_metadata;
     const isOverride = !isSealed ? (
@@ -459,145 +484,277 @@ export default function DecisionReview() {
 
                     </div>
 
-                    {/* Financial Snapshot Card */}
-                    <div className="bg-white border border-slate-200 rounded-3xl p-8 shadow-sm space-y-6">
-                        <div className="flex items-center gap-2 mb-2">
-                            <DollarSign size={18} className="text-slate-400" />
-                            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest">Financial Snapshot</h3>
-                        </div>
-                        <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
-                            <div>
-                                <p className="text-[10px] font-bold text-slate-400 uppercase">Avg Monthly Income</p>
-                                <p className="text-lg font-bold text-slate-900">${((assessment.observed_deposit_volume || 0) / (assessment.history_days / 30)).toLocaleString(undefined, { maximumFractionDigits: 0 })}</p>
+                    {documentSummaries.length > 0 && (
+                        <div className="bg-white border border-slate-200 rounded-3xl p-8 shadow-sm space-y-6">
+                            <div className="flex items-center gap-2 mb-2">
+                                <FileText size={18} className="text-slate-400" />
+                                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest">Document Summaries</h3>
                             </div>
-                            <div>
-                                <p className="text-[10px] font-bold text-slate-400 uppercase">Estimated Expenses</p>
-                                <p className="text-lg font-bold text-slate-900">${((assessment.observed_deposit_volume || 0) * (1 - (assessment.metrics?.surplus_ratio || 0.3)) / (assessment.history_days / 30)).toLocaleString(undefined, { maximumFractionDigits: 0 })}</p>
-                            </div>
-                            <div>
-                                <p className="text-[10px] font-bold text-slate-400 uppercase">Monthly Surplus</p>
-                                <p className="text-lg font-bold text-green-600">${((assessment.observed_deposit_volume || 0) * (assessment.metrics?.surplus_ratio || 0.3) / (assessment.history_days / 30)).toLocaleString(undefined, { maximumFractionDigits: 0 })}</p>
-                            </div>
-                            <div>
-                                <p className="text-[10px] font-bold text-slate-400 uppercase">DTI Ratio</p>
-                                <p className="text-lg font-bold text-slate-900">{((1 - (assessment.metrics?.surplus_ratio || 0.3)) * 100).toFixed(0)}%</p>
-                            </div>
-                            <div>
-                                <p className="text-[10px] font-bold text-slate-400 uppercase">Capacity Max</p>
-                                <p className="text-lg font-bold text-slate-900">${(assessment.capacity_based_max || 0).toLocaleString()}</p>
-                            </div>
-                            <div>
-                                <p className="text-[10px] font-bold text-slate-400 uppercase">Observed Deposits (30d)</p>
-                                <p className="text-lg font-bold text-slate-900">${(assessment.observed_deposit_volume || 0).toLocaleString()}</p>
-                            </div>
-                            <div>
-                                <p className="text-[10px] font-bold text-slate-400 uppercase">Deposit Count (30d)</p>
-                                <p className="text-lg font-bold text-slate-900">{assessment.metrics?.deposit_count_30d ?? 0}</p>
-                            </div>
-                            <div>
-                                <p className="text-[10px] font-bold text-slate-400 uppercase">Observation Window</p>
-                                <p className="text-lg font-bold text-slate-900">{assessment.metrics?.observation_window_days ?? 0} days</p>
-                                {assessment.metrics?.deposit_window_start && assessment.metrics?.deposit_window_end && (
-                                    <p className="text-[10px] text-slate-400 mt-1">
-                                        {new Date(assessment.metrics.deposit_window_start).toLocaleDateString()} – {new Date(assessment.metrics.deposit_window_end).toLocaleDateString()}
-                                    </p>
-                                )}
-                            </div>
-                            <div>
-                                <p className="text-[10px] font-bold text-slate-400 uppercase">Statement Credits (Parsed)</p>
-                                {assessment.metrics?.statement_deposit_volume !== undefined ? (
-                                    <p className="text-lg font-bold text-slate-900">
-                                        ${(assessment.metrics.statement_deposit_volume || 0).toLocaleString()}
-                                    </p>
-                                ) : (
-                                    <p className="text-sm font-semibold text-slate-500">Re-run assessment</p>
-                                )}
-                            </div>
-                            <div>
-                                <p className="text-[10px] font-bold text-slate-400 uppercase">Statement Credit Count (Parsed)</p>
-                                {assessment.metrics?.statement_deposit_count !== undefined ? (
-                                    <p className="text-lg font-bold text-slate-900">{assessment.metrics.statement_deposit_count ?? 0}</p>
-                                ) : (
-                                    <p className="text-sm font-semibold text-slate-500">Re-run assessment</p>
-                                )}
-                            </div>
-                            <div>
-                                <p className="text-[10px] font-bold text-slate-400 uppercase">Statement Period (Parsed)</p>
-                                {assessment.metrics?.statement_period_days !== undefined ? (
-                                    <>
-                                        <p className="text-lg font-bold text-slate-900">{assessment.metrics.statement_period_days ?? 0} days</p>
-                                        {assessment.metrics?.statement_period_start && assessment.metrics?.statement_period_end && (
-                                            <p className="text-[10px] text-slate-400 mt-1">
-                                                {new Date(assessment.metrics.statement_period_start).toLocaleDateString()} – {new Date(assessment.metrics.statement_period_end).toLocaleDateString()}
-                                            </p>
+                            <div className="space-y-4">
+                                {documentSummaries.map((summary: any, idx: number) => (
+                                    <div key={`${summary.summary_profile}-${idx}`} className="border border-slate-100 rounded-2xl p-4">
+                                        <p className="text-[10px] font-bold text-slate-400 uppercase">{summary.summary_profile}</p>
+                                        {summary.summary_profile === "PAYSLIP_SUMMARY" && (
+                                            <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mt-3">
+                                                <div>
+                                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Net Pay</p>
+                                                    <p className="text-sm font-semibold text-slate-700">
+                                                        {summary.net_pay != null ? summary.net_pay.toLocaleString() : "Not available"}
+                                                    </p>
+                                                </div>
+                                                <div>
+                                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Gross Pay</p>
+                                                    <p className="text-sm font-semibold text-slate-700">
+                                                        {summary.gross_pay != null ? summary.gross_pay.toLocaleString() : "Not available"}
+                                                    </p>
+                                                </div>
+                                                <div>
+                                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Employer</p>
+                                                    <p className="text-sm font-semibold text-slate-700">{summary.employer_name || "Not available"}</p>
+                                                </div>
+                                            </div>
                                         )}
-                                    </>
-                                ) : (
-                                    <p className="text-sm font-semibold text-slate-500">Re-run assessment</p>
-                                )}
-                            </div>
-                            <div>
-                                <p className="text-[10px] font-bold text-slate-400 uppercase">Statement Credits (Summary)</p>
-                                {assessment.metrics?.statement_summary_credit_amount !== undefined ? (
-                                    <p className="text-lg font-bold text-slate-900">
-                                        ${(assessment.metrics.statement_summary_credit_amount || 0).toLocaleString()}
-                                    </p>
-                                ) : (
-                                    <p className="text-sm font-semibold text-slate-500">Summary not found</p>
-                                )}
-                            </div>
-                            <div>
-                                <p className="text-[10px] font-bold text-slate-400 uppercase">Statement Credit Count (Summary)</p>
-                                {assessment.metrics?.statement_summary_credit_count !== undefined ? (
-                                    <p className="text-lg font-bold text-slate-900">
-                                        {assessment.metrics.statement_summary_credit_count ?? 0}
-                                    </p>
-                                ) : (
-                                    <p className="text-sm font-semibold text-slate-500">Summary not found</p>
-                                )}
-                            </div>
-                            <div>
-                                <p className="text-[10px] font-bold text-slate-400 uppercase">Statement Debits (Summary)</p>
-                                {assessment.metrics?.statement_summary_debit_amount !== undefined ? (
-                                    <p className="text-lg font-bold text-slate-900">
-                                        ${(assessment.metrics.statement_summary_debit_amount || 0).toLocaleString()}
-                                    </p>
-                                ) : (
-                                    <p className="text-sm font-semibold text-slate-500">Summary not found</p>
-                                )}
-                            </div>
-                            <div>
-                                <p className="text-[10px] font-bold text-slate-400 uppercase">Statement Debit Count (Summary)</p>
-                                {assessment.metrics?.statement_summary_debit_count !== undefined ? (
-                                    <p className="text-lg font-bold text-slate-900">
-                                        {assessment.metrics.statement_summary_debit_count ?? 0}
-                                    </p>
-                                ) : (
-                                    <p className="text-sm font-semibold text-slate-500">Summary not found</p>
-                                )}
-                            </div>
-                            <div>
-                                <p className="text-[10px] font-bold text-slate-400 uppercase">Statement Total Entries</p>
-                                {assessment.metrics?.statement_summary_total_entries !== undefined ? (
-                                    <p className="text-lg font-bold text-slate-900">
-                                        {assessment.metrics.statement_summary_total_entries ?? 0}
-                                    </p>
-                                ) : (
-                                    <p className="text-sm font-semibold text-slate-500">Summary not found</p>
-                                )}
-                            </div>
-                            <div>
-                                <p className="text-[10px] font-bold text-slate-400 uppercase">Ending Balance (Summary)</p>
-                                {assessment.metrics?.statement_summary_ending_balance !== undefined ? (
-                                    <p className="text-lg font-bold text-slate-900">
-                                        ${(assessment.metrics.statement_summary_ending_balance || 0).toLocaleString()}
-                                    </p>
-                                ) : (
-                                    <p className="text-sm font-semibold text-slate-500">Summary not found</p>
-                                )}
+                                        {summary.summary_profile === "BANK_STATEMENT_SUMMARY" && (
+                                            <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mt-3">
+                                                <div>
+                                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Closing Balance</p>
+                                                    <p className="text-sm font-semibold text-slate-700">
+                                                        {summary.closing_balance != null ? summary.closing_balance.toLocaleString() : "Not available"}
+                                                    </p>
+                                                </div>
+                                                <div>
+                                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Bank</p>
+                                                    <p className="text-sm font-semibold text-slate-700">{summary.bank_name || "Not available"}</p>
+                                                </div>
+                                                <div>
+                                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Account Holder</p>
+                                                    <p className="text-sm font-semibold text-slate-700">{summary.account_holder_name || "Not available"}</p>
+                                                </div>
+                                            </div>
+                                        )}
+                                        {summary.summary_profile === "NRC_IDENTITY_SUMMARY" && (
+                                            <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mt-3">
+                                                <div>
+                                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Full Name</p>
+                                                    <p className="text-sm font-semibold text-slate-700">{summary.full_name || "Not available"}</p>
+                                                </div>
+                                                <div>
+                                                    <p className="text-[10px] font-bold text-slate-400 uppercase">NRC</p>
+                                                    <p className="text-sm font-semibold text-slate-700">{summary.id_number || "Not available"}</p>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                ))}
                             </div>
                         </div>
-                    </div>
+                    )}
+
+                    {!readiness && (
+                        <div className="bg-amber-50 border border-amber-200 rounded-3xl p-6 text-amber-900 text-sm font-semibold">
+                            Additional documents are required to complete assessment.
+                            {missingDocuments.length > 0 && (
+                                <span> Missing: {missingDocuments.join(", ")}.</span>
+                            )}
+                        </div>
+                    )}
+
+                    {documentSummaries.length === 0 && readiness && summaryProfile === "BANK_STATEMENT_SUMMARY" && (
+                        <div className="bg-white border border-slate-200 rounded-3xl p-8 shadow-sm space-y-6">
+                            <div className="flex items-center gap-2 mb-2">
+                                <DollarSign size={18} className="text-slate-400" />
+                                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest">Bank Statement Summary</h3>
+                            </div>
+                            <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Account Holder</p>
+                                    <p className="text-lg font-bold text-slate-900">{assessment.metrics?.statement_account_holder_name || "Not available"}</p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Bank Name</p>
+                                    <p className="text-lg font-bold text-slate-900">{assessment.metrics?.statement_bank_name || "Not available"}</p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Currency</p>
+                                    <p className="text-lg font-bold text-slate-900">{assessment.metrics?.statement_currency || "Not available"}</p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Statement Period</p>
+                                    <p className="text-lg font-bold text-slate-900">{formatStatementPeriod()}</p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Opening Balance</p>
+                                    <p className="text-lg font-bold text-slate-900">
+                                        {assessment.metrics?.statement_opening_balance != null
+                                            ? assessment.metrics.statement_opening_balance.toLocaleString()
+                                            : "Not available"}
+                                    </p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Closing Balance</p>
+                                    <p className="text-lg font-bold text-slate-900">
+                                        {assessment.metrics?.statement_closing_balance != null
+                                            ? assessment.metrics.statement_closing_balance.toLocaleString()
+                                            : "Not available"}
+                                    </p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Total Money In</p>
+                                    <p className="text-lg font-bold text-slate-900">
+                                        {assessment.metrics?.statement_summary_credit_amount != null
+                                            ? assessment.metrics.statement_summary_credit_amount.toLocaleString()
+                                            : "Not available"}
+                                    </p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Total Money Out</p>
+                                    <p className="text-lg font-bold text-slate-900">
+                                        {assessment.metrics?.statement_summary_debit_amount != null
+                                            ? assessment.metrics.statement_summary_debit_amount.toLocaleString()
+                                            : "Not available"}
+                                    </p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Deposit Count</p>
+                                    <p className="text-lg font-bold text-slate-900">
+                                        {assessment.metrics?.statement_summary_credit_count != null
+                                            ? assessment.metrics.statement_summary_credit_count
+                                            : "Not available"}
+                                    </p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Salary Detected</p>
+                                    <p className="text-lg font-bold text-slate-900">
+                                        {assessment.metrics?.statement_salary_detected != null
+                                            ? assessment.metrics.statement_salary_detected ? "Yes" : "No"
+                                            : "Not available"}
+                                    </p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Salary Frequency</p>
+                                    <p className="text-lg font-bold text-slate-900">{assessment.metrics?.statement_salary_frequency || "Not confidently determined"}</p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Risk Flags</p>
+                                    <p className="text-sm font-semibold text-slate-500">
+                                        {assessment.metrics?.statement_risk_flags?.length ? assessment.metrics.statement_risk_flags.join(", ") : "No issues detected"}
+                                    </p>
+                                </div>
+                            </div>
+                            <p className="text-xs text-slate-500 italic">
+                                Loan metrics will be calculated once income is verified using payslips.
+                            </p>
+                        </div>
+                    )}
+
+                    {documentSummaries.length === 0 && readiness && summaryProfile === "PAYSLIP_SUMMARY" && (
+                        <div className="bg-white border border-slate-200 rounded-3xl p-8 shadow-sm space-y-6">
+                            <div className="flex items-center gap-2 mb-2">
+                                <DollarSign size={18} className="text-slate-400" />
+                                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest">Payslip Summary</h3>
+                            </div>
+                            <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Net Pay</p>
+                                    <p className="text-lg font-bold text-slate-900">
+                                        {assessment.metrics?.payslip_net_pay != null
+                                            ? assessment.metrics.payslip_net_pay.toLocaleString()
+                                            : "Not available"}
+                                    </p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Gross Pay</p>
+                                    <p className="text-lg font-bold text-slate-900">
+                                        {assessment.metrics?.payslip_gross_pay != null
+                                            ? assessment.metrics.payslip_gross_pay.toLocaleString()
+                                            : "Not available"}
+                                    </p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Deductions</p>
+                                    <p className="text-lg font-bold text-slate-900">
+                                        {assessment.metrics?.payslip_deductions != null
+                                            ? assessment.metrics.payslip_deductions.toLocaleString()
+                                            : "Not available"}
+                                    </p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Employer</p>
+                                    <p className="text-sm font-semibold text-slate-600">
+                                        {assessment.metrics?.payslip_employer_name || "Not available"}
+                                    </p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Pay Date</p>
+                                    <p className="text-sm font-semibold text-slate-600">
+                                        {formatShortDate(assessment.metrics?.payslip_pay_date) || "Not available"}
+                                    </p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Pay Period</p>
+                                    <p className="text-sm font-semibold text-slate-600">
+                                        {assessment.metrics?.payslip_pay_period_start && assessment.metrics?.payslip_pay_period_end
+                                            ? `${formatShortDate(assessment.metrics.payslip_pay_period_start)} – ${formatShortDate(assessment.metrics.payslip_pay_period_end)}`
+                                            : "Not available"}
+                                    </p>
+                                </div>
+                            </div>
+                            <p className="text-xs text-slate-500 italic">
+                                Loan metrics will be calculated once a combined financial snapshot is available.
+                            </p>
+                        </div>
+                    )}
+
+                    {readiness && summaryProfile === "COMBINED_FINANCIAL_SNAPSHOT" && (
+                        <div className="bg-white border border-slate-200 rounded-3xl p-8 shadow-sm space-y-6">
+                            <div className="flex items-center gap-2 mb-2">
+                                <DollarSign size={18} className="text-slate-400" />
+                                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest">Financial Snapshot</h3>
+                            </div>
+                            <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Avg Monthly Income</p>
+                                    <p className="text-lg font-bold text-slate-900">
+                                        {assessment.metrics?.combined_snapshot?.verified_monthly_income != null
+                                            ? `$${assessment.metrics.combined_snapshot.verified_monthly_income.toLocaleString()}`
+                                            : "Not available"}
+                                    </p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Estimated Expenses</p>
+                                    <p className="text-lg font-bold text-slate-900">
+                                        {assessment.metrics?.combined_snapshot?.verified_expenses != null
+                                            ? `$${assessment.metrics.combined_snapshot.verified_expenses.toLocaleString()}`
+                                            : "Not available"}
+                                    </p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Monthly Surplus</p>
+                                    <p className="text-lg font-bold text-green-600">
+                                        {assessment.metrics?.combined_snapshot?.surplus != null
+                                            ? `$${assessment.metrics.combined_snapshot.surplus.toLocaleString()}`
+                                            : "Not available"}
+                                    </p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">DTI Ratio</p>
+                                    <p className="text-lg font-bold text-slate-900">
+                                        {assessment.metrics?.combined_snapshot?.dti != null
+                                            ? `${(assessment.metrics.combined_snapshot.dti * 100).toFixed(0)}%`
+                                            : "Not available"}
+                                    </p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Capacity Max</p>
+                                    <p className="text-lg font-bold text-slate-900">
+                                        {assessment.metrics?.combined_snapshot?.capacity != null
+                                            ? `$${assessment.metrics.combined_snapshot.capacity.toLocaleString()}`
+                                            : "Not available"}
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    )}
                 </div>
 
                 {/* RIGHT PANEL: OFFICER FINAL DECISION */}

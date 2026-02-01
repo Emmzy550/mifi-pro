@@ -33,6 +33,7 @@ from rules.lending_rules import (
     check_critical_flags
 )
 from utils.scoring import calculate_risk_score, derive_risk_level
+from models.document import SummaryProfile
 
 # Conditionally import behavioral agent based on version
 if config.ENABLE_BEHAVIORAL_V2:
@@ -198,16 +199,46 @@ class RiskAgent:
         
         # STEP 5: CAPACITY VALIDATION (BANK-GRADE GUARDRAILS)
         from agents.capacity_agent import CapacityAgent
+        
+        # Extract verified income if available (from payslip via unified profile)
+        verified_monthly_income = None
+        verified_income_source = None
+        if external_behavioral_results:
+            verified_monthly_income = external_behavioral_results.get("verified_monthly_income")
+            verified_income_source = external_behavioral_results.get("verified_income_source", "PAYSLIP")
+        
         capacity_results = CapacityAgent.calculate_demonstrated_capacity(
             borrower_id=borrower.id,
             risk_level=final_level,
             requested_amount=borrower.loan_amount_requested,
-            external_transactions=external_behavioral_results.get("transactions") if external_behavioral_results else None
+            external_transactions=external_behavioral_results.get("transactions") if external_behavioral_results else None,
+            verified_monthly_income=verified_monthly_income,  # NEW: Pass verified income
+            verified_income_source=verified_income_source  # NEW: Pass source
         )
 
         statement_summary = external_behavioral_results.get("statement_summary") if external_behavioral_results else None
         
+        # Helper to extract summary fields safely from Dict or Pydantic
+        def get_summary_field(summary_obj, field, default=None):
+            if not summary_obj:
+                return default
+            if isinstance(summary_obj, dict):
+                return summary_obj.get(field, default)
+            return getattr(summary_obj, field, default) or default
+
         # Merge metrics
+        summary_profile = get_summary_field(statement_summary, "summary_profile", None)
+        if statement_summary and not summary_profile:
+            raise ValueError("Extraction contract violated: summary_profile missing")
+        if not summary_profile:
+            summary_profile = SummaryProfile.UNKNOWN.value
+        statement_period = get_summary_field(statement_summary, "statement_period", None)
+        if isinstance(statement_period, dict):
+            statement_period_start = statement_period.get("start")
+            statement_period_end = statement_period.get("end")
+        else:
+            statement_period_start = getattr(statement_period, "start", None) if statement_period else None
+            statement_period_end = getattr(statement_period, "end", None) if statement_period else None
         metrics.update({
             "observed_deposit_volume": capacity_results.get("observed_deposit_volume", 0.0),
             "transaction_count": capacity_results.get("transaction_count", 0),
@@ -223,13 +254,40 @@ class RiskAgent:
             "statement_period_start": capacity_results.get("statement_period_start"),
             "statement_period_end": capacity_results.get("statement_period_end"),
             "statement_period_days": capacity_results.get("statement_period_days", 0),
-            "statement_summary_credit_amount": (statement_summary or {}).get("credit_amount", 0.0),
-            "statement_summary_credit_count": (statement_summary or {}).get("credit_count", 0),
-            "statement_summary_debit_amount": (statement_summary or {}).get("debit_amount", 0.0),
-            "statement_summary_debit_count": (statement_summary or {}).get("debit_count", 0),
-            "statement_summary_total_entries": (statement_summary or {}).get("total_entries", 0),
-            "statement_summary_ending_balance": (statement_summary or {}).get("ending_balance", 0.0)
+            
+            # Map new BankStatementSummary fields to legacy metric names
+            "summary_profile": summary_profile,
+            "statement_summary_credit_amount": get_summary_field(statement_summary, "total_money_in", None),
+            "statement_summary_credit_count": get_summary_field(statement_summary, "deposit_count", None),
+            "statement_summary_debit_amount": get_summary_field(statement_summary, "total_money_out", None),
+            "statement_summary_debit_count": None,
+            "statement_summary_total_entries": None,
+            "statement_summary_ending_balance": get_summary_field(statement_summary, "closing_balance", None),
+            "statement_account_holder_name": get_summary_field(statement_summary, "account_holder_name", None),
+            "statement_bank_name": get_summary_field(statement_summary, "bank_name", None),
+            "statement_currency": get_summary_field(statement_summary, "currency", None),
+            "statement_period_start": statement_period_start,
+            "statement_period_end_summary": statement_period_end,
+            "statement_opening_balance": get_summary_field(statement_summary, "opening_balance", None),
+            "statement_closing_balance": get_summary_field(statement_summary, "closing_balance", None),
+            "statement_salary_detected": get_summary_field(statement_summary, "salary_detected", None),
+            "statement_salary_frequency": get_summary_field(statement_summary, "salary_frequency", None),
+            "statement_risk_flags": get_summary_field(statement_summary, "risk_flags", None)
         })
+
+        if summary_profile == "PAYSLIP_SUMMARY":
+            metrics.update({
+                "payslip_net_pay": get_summary_field(statement_summary, "net_pay", None),
+                "payslip_gross_pay": get_summary_field(statement_summary, "gross_pay", None),
+                "payslip_deductions": get_summary_field(statement_summary, "deductions", None),
+                "payslip_employer_name": get_summary_field(statement_summary, "employer_name", None),
+                "payslip_employee_name": get_summary_field(statement_summary, "employee_name", None),
+                "payslip_currency": get_summary_field(statement_summary, "currency", None),
+                "payslip_pay_period_start": get_summary_field(statement_summary, "pay_period_start", None),
+                "payslip_pay_period_end": get_summary_field(statement_summary, "pay_period_end", None),
+                "payslip_pay_date": get_summary_field(statement_summary, "pay_date", None),
+                "payslip_pay_frequency": get_summary_field(statement_summary, "pay_frequency", None),
+            })
 
         # GOVERNANCE: Handle Insufficient Observation Window
         if capacity_results.get("insufficient_observation"):
@@ -273,19 +331,41 @@ class RiskAgent:
             "statement_period_start": capacity_results.get("statement_period_start"),
             "statement_period_end": capacity_results.get("statement_period_end"),
             "statement_period_days": capacity_results.get("statement_period_days", 0),
-            "statement_summary_credit_amount": (statement_summary or {}).get("credit_amount", 0.0),
-            "statement_summary_credit_count": (statement_summary or {}).get("credit_count", 0),
-            "statement_summary_debit_amount": (statement_summary or {}).get("debit_amount", 0.0),
-            "statement_summary_debit_count": (statement_summary or {}).get("debit_count", 0),
-            "statement_summary_total_entries": (statement_summary or {}).get("total_entries", 0),
-            "statement_summary_ending_balance": (statement_summary or {}).get("ending_balance", 0.0),
+            "summary_profile": summary_profile,
+            "statement_summary_credit_amount": get_summary_field(statement_summary, "total_money_in", None),
+            "statement_summary_credit_count": get_summary_field(statement_summary, "deposit_count", None),
+            "statement_summary_debit_amount": get_summary_field(statement_summary, "total_money_out", None),
+            "statement_summary_debit_count": None,
+            "statement_summary_total_entries": None,
+            "statement_summary_ending_balance": get_summary_field(statement_summary, "closing_balance", None),
+            "statement_account_holder_name": get_summary_field(statement_summary, "account_holder_name", None),
+            "statement_bank_name": get_summary_field(statement_summary, "bank_name", None),
+            "statement_currency": get_summary_field(statement_summary, "currency", None),
+            "statement_period_start": statement_period_start,
+            "statement_period_end_summary": statement_period_end,
+            "statement_opening_balance": get_summary_field(statement_summary, "opening_balance", None),
+            "statement_closing_balance": get_summary_field(statement_summary, "closing_balance", None),
+            "statement_salary_detected": get_summary_field(statement_summary, "salary_detected", None),
+            "statement_salary_frequency": get_summary_field(statement_summary, "salary_frequency", None),
+            "statement_risk_flags": get_summary_field(statement_summary, "risk_flags", None),
             # Legacy anchor fields removed
             "capacity_multiplier_used": capacity_results["capacity_multiplier_used"],
             "starter_loan_applied": capacity_results["starter_loan_applied"],
             "micro_loan_exception": capacity_results.get("micro_loan_exception", False),
             "micro_starter_audit": capacity_results.get("audit_trail", {}).get("micro_starter"),
-            "capacity_data_source": capacity_results["data_source"]
+            "capacity_data_source": capacity_results["data_source"],
+            "combined_snapshot": None,
+            "combined_snapshot_reason": "Insufficient verified documents for combined financial snapshot"
         })
+
+        if summary_profile == "BANK_STATEMENT_SUMMARY" and metrics.get("combined_snapshot") is not None:
+            raise ValueError("SUMMARY ROUTING VIOLATION: Bank statement summary cannot include financial snapshot.")
+        if metrics.get("combined_snapshot") is not None and summary_profile != "COMBINED_FINANCIAL_SNAPSHOT":
+            raise ValueError("SUMMARY ROUTING VIOLATION: Financial snapshot requires combined summary profile.")
+
+        if summary_profile != "COMBINED_FINANCIAL_SNAPSHOT":
+            metrics["dti_ratio"] = None
+            metrics["expense_ratio"] = None
         
         # ====================================================================
         # STEP 6: RETURN COMPREHENSIVE RESULTS

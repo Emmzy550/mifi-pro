@@ -27,8 +27,11 @@ from agents.decision_export_agent import DecisionExportAgent
 from agents.decision_counterfactual_agent import DecisionCounterfactualAgent
 from agents.self_healing_agent import SelfHealingAgent
 from utils.db import Database
-from utils.pdf_parser import PDFTransactionParser, parse_simple_csv_format
 from utils.transaction_parser import TransactionParser
+from utils.document_readiness import DocumentReadinessEvaluator
+from utils.profile_builder import ProfileBuilder
+from models.document import DocumentType, Transaction as DocTransaction, SummaryProfile
+from models.unified_profile import UnifiedFinancialProfile, AssessmentReadiness
 from models.sms_log import SMSLog
 from services.sms_service import SMSService
 
@@ -37,13 +40,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 import os
 
-# PDF parsing
-try:
-    import PyPDF2
-    PDF_SUPPORT = True
-except ImportError:
-    PDF_SUPPORT = False
-    print("WARNING: PyPDF2 not installed. PDF upload will not work. Install with: pip install PyPDF2")
+# PDF parsing is handled within TransactionParser
+
 
 app = FastAPI(
     title="Loan Officer AI Agent",
@@ -330,6 +328,59 @@ def filter_assessment_for_role(assessment: Assessment, role: str) -> Dict[str, A
         target_fields = audit_fields
         
     return {k: v for k, v in total_data.items() if k in target_fields}
+
+
+def build_document_summaries(extraction_results: List[Any]) -> List[Dict[str, Any]]:
+    summaries = []
+    for result in extraction_results:
+        if result.bank_statement_summary:
+            summaries.append({
+                "summary_profile": result.bank_statement_summary.summary_profile,
+                "closing_balance": result.bank_statement_summary.closing_balance,
+                "statement_period": result.bank_statement_summary.statement_period.model_dump()
+                if result.bank_statement_summary.statement_period else None,
+                "bank_name": result.bank_statement_summary.bank_name,
+                "account_holder_name": result.bank_statement_summary.account_holder_name,
+                "currency": result.bank_statement_summary.currency,
+                "risk_flags": result.bank_statement_summary.risk_flags,
+                "raw_text_preview": result.raw_text_preview
+            })
+        if result.payslip_summary:
+            summaries.append({
+                "summary_profile": result.payslip_summary.summary_profile,
+                "net_pay": result.payslip_summary.net_pay,
+                "gross_pay": result.payslip_summary.gross_pay,
+                "deductions": result.payslip_summary.deductions,
+                "employer_name": result.payslip_summary.employer_name,
+                "employee_name": result.payslip_summary.employee_name,
+                "pay_period_start": result.payslip_summary.pay_period_start,
+                "pay_period_end": result.payslip_summary.pay_period_end,
+                "pay_date": result.payslip_summary.pay_date,
+                "pay_frequency": result.payslip_summary.pay_frequency,
+                "currency": result.payslip_summary.currency,
+                "raw_text_preview": result.raw_text_preview
+            })
+        if result.nrc_summary:
+            summaries.append({
+                "summary_profile": result.nrc_summary.summary_profile,
+                "full_name": result.nrc_summary.full_name,
+                "id_number": result.nrc_summary.id_number,
+                "date_of_birth": result.nrc_summary.date_of_birth,
+                "gender": result.nrc_summary.gender,
+                "raw_text_preview": result.raw_text_preview
+            })
+    return summaries
+
+
+def enforce_summary_profile_metrics(assessment: Assessment) -> Assessment:
+    """
+    Contract hardening: ensure summary_profile is always present in metrics.
+    """
+    if assessment.metrics is None:
+        assessment.metrics = {}
+    if not assessment.metrics.get("summary_profile"):
+        assessment.metrics["summary_profile"] = SummaryProfile.UNKNOWN.value
+    return assessment
 
 # ============================================================================
 # PARTNER DASHBOARD METRICS (Portfolio Analytics)
@@ -738,7 +789,8 @@ async def _run_assessment_core(
     utility_history: Optional[List[Dict[str, Any]]] = None,
     airtime_usage_avg: Optional[float] = None,
     statement_summary: Optional[Dict[str, Any]] = None,
-    assessment_source: str = "API"
+    assessment_source: str = "API",
+    unified_profile: Optional[UnifiedFinancialProfile] = None  # NEW: Unified profile parameter
 ) -> Assessment:
     """
     Internal shared logic for running a credit assessment.
@@ -758,6 +810,29 @@ async def _run_assessment_core(
         }
         if statement_summary:
             external_results["statement_summary"] = statement_summary
+    
+    # NEW: Extract verified income from unified_profile (if available)
+    verified_monthly_income = None
+    verified_income_source = None
+    if unified_profile:
+        # Use net_pay from payslip as verified income
+        if unified_profile.income.net_pay is not None:
+            verified_monthly_income = unified_profile.income.net_pay
+            verified_income_source = "PAYSLIP"
+            print(f"INFO: Extracted verified income from payslip: {verified_monthly_income}")
+        
+        # Pass through external_results for RiskAgent
+        if verified_monthly_income:
+            if external_results is None:
+                external_results = {
+                    "transactions": [],
+                    "behavioral_stability": 0.7,
+                    "saving_trend": 0.7,
+                    "utility_compliance": 0.7,
+                    "early_warnings": []
+                }
+            external_results["verified_monthly_income"] = verified_monthly_income
+            external_results["verified_income_source"] = verified_income_source
 
     # 1. Evaluate Risk
     risk_results = RiskAgent.evaluate(borrower, external_behavioral_results=external_results)
@@ -890,6 +965,7 @@ async def list_assessments(user: AuthUser = Depends(AuthAgent.get_api_key)):
 
 @app.post("/assessment/manual", tags=["Manual Assessments"])
 async def assessment_manual(
+    borrower_id: Optional[str] = Form(None),
     full_name: str = Form(...),
     phone: str = Form(...),
     employment_type: str = Form(...),
@@ -901,6 +977,7 @@ async def assessment_manual(
     national_id: Optional[str] = Form(None),
     bank_statement: Optional[UploadFile] = File(None),
     mobile_money_statement: Optional[UploadFile] = File(None),
+    nrc_id: Optional[UploadFile] = File(None),
     utility_bill: Optional[UploadFile] = File(None),
     payslip: Optional[UploadFile] = File(None),
     current_user: User = Depends(AuthAgent.get_current_user)
@@ -919,21 +996,26 @@ async def assessment_manual(
     if not is_allowed:
         raise HTTPException(status_code=billing_error.get("code", 429), detail=billing_error)
 
-    # 2. Create Borrower
-    borrower_id = f"BOR-{uuid.uuid4().hex[:8].upper()}"
-    borrower = Borrower(
-        id=borrower_id,
-        organization_id=current_user.organization_id,
-        name=full_name,
-        phone=phone,
-        employment_type=employment_type,
-        monthly_income=monthly_income,
-        monthly_expenses=monthly_expenses,
-        existing_debt=0, # Default for manual UI if not provided
-        loan_amount_requested=requested_amount,
-        loan_purpose=loan_purpose or "Not Specified"
-    )
-    Database.save_borrower(borrower)
+    # 2. Create or load Borrower
+    if borrower_id:
+        borrower = Database.get_borrower(borrower_id)
+        if not borrower:
+            raise HTTPException(status_code=404, detail="Borrower not found for document continuation")
+    else:
+        borrower_id = f"BOR-{uuid.uuid4().hex[:8].upper()}"
+        borrower = Borrower(
+            id=borrower_id,
+            organization_id=current_user.organization_id,
+            name=full_name,
+            phone=phone,
+            employment_type=employment_type,
+            monthly_income=monthly_income,
+            monthly_expenses=monthly_expenses,
+            existing_debt=0, # Default for manual UI if not provided
+            loan_amount_requested=requested_amount,
+            loan_purpose=loan_purpose or "Not Specified"
+        )
+        Database.save_borrower(borrower)
 
     # 3. Parse Transactions (Evidence Handling)
     tx_parser = TransactionParser()
@@ -944,39 +1026,228 @@ async def assessment_manual(
         if not file_obj: return []
         content = await file_obj.read()
         try:
-            return tx_parser.parse(content, file_obj.filename)
+            result = tx_parser.parse(content, file_obj.filename)
+            summary_profile = None
+            summary_snapshot = {}
+            if result.bank_statement_summary:
+                summary_profile = result.bank_statement_summary.summary_profile
+                summary_snapshot = {
+                    "closing_balance": result.bank_statement_summary.closing_balance,
+                    "statement_period": result.bank_statement_summary.statement_period.model_dump()
+                    if result.bank_statement_summary.statement_period else None
+                }
+            elif result.payslip_summary:
+                summary_profile = result.payslip_summary.summary_profile
+                summary_snapshot = {
+                    "net_pay": result.payslip_summary.net_pay,
+                    "gross_pay": result.payslip_summary.gross_pay,
+                    "employer_name": result.payslip_summary.employer_name
+                }
+            elif result.nrc_summary:
+                summary_profile = result.nrc_summary.summary_profile
+                summary_snapshot = {
+                    "full_name": result.nrc_summary.full_name,
+                    "id_number": result.nrc_summary.id_number
+                }
+            print(
+                f"EXTRACTION: {file_obj.filename} doc_type={result.document_type} "
+                f"summary_profile={summary_profile} summary={summary_snapshot} warnings={result.warnings}",
+                flush=True
+            )
+            is_readable = result.confidence > 0.0 or len(result.transactions) > 0
+            if not is_readable or result.warnings:
+                AuditAgent.log_event("EXTRACTION_WARNING", current_user.email, {
+                    "filename": file_obj.filename,
+                    "warnings": result.warnings,
+                    "is_readable": is_readable,
+                    "org": current_user.organization_id
+                })
+            if not is_readable:
+                print(f"WARN: Document {file_obj.filename} is unreadable: {result.warnings}")
+            return result
         except Exception as e:
+            AuditAgent.log_event("EXTRACTION_ERROR", current_user.email, {
+                "filename": file_obj.filename,
+                "error": str(e),
+                "org": current_user.organization_id
+            })
             print(f"WARN: Failed to parse {file_obj.filename}: {e}")
-            return []
+            return None
 
     # Parse primary statements
-    bank_tx = await parse_upload(bank_statement)
-    bank_statement_summary = tx_parser.last_statement_summary
-    momo_tx = await parse_upload(mobile_money_statement)
-    all_parsed_transactions.extend(bank_tx)
-    all_parsed_transactions.extend(momo_tx)
+    extraction_results = []
+    
+    res_bank = await parse_upload(bank_statement)
+    if res_bank: extraction_results.append(res_bank)
+    
+    res_momo = await parse_upload(mobile_money_statement)
+    if res_momo: extraction_results.append(res_momo)
 
-    # 4. Run Core Assessment
+    res_nrc = await parse_upload(nrc_id)
+    if res_nrc: extraction_results.append(res_nrc)
+
+    res_payslip = await parse_upload(payslip)
+    if res_payslip: extraction_results.append(res_payslip)
+    
+    all_parsed_transactions = []
+    for res in extraction_results:
+        all_parsed_transactions.extend(res.transactions)
+
+    # Use bank statement summary if available, otherwise fallback to payslip summary
+    bank_statement_summary = None
+    payslip_summary = None
+    for res in extraction_results:
+        if res.bank_statement_summary:
+            bank_statement_summary = res.bank_statement_summary
+            break
+    for res in extraction_results:
+        if res.payslip_summary:
+            payslip_summary = res.payslip_summary
+            break
+    summary_for_risk = bank_statement_summary or payslip_summary
+
+    # 4. Build Unified Financial Profile (NEW PIPELINE)
+    print("DEBUG: Building UnifiedFinancialProfile from extraction results", flush=True)
+    unified_profile = ProfileBuilder.build(
+        extraction_results=extraction_results,
+        transactions=all_parsed_transactions
+    )
+    
+    # Build document summaries for UI display
+    document_summaries = build_document_summaries(extraction_results)
+    
+    # SAFETY CHECK: Log what we're sending to the UI
+    print(f"\nDEBUG [API]: Document summaries for UI ({len(document_summaries)} docs):", flush=True)
+    for i, summary in enumerate(document_summaries, 1):
+        print(f"  Doc {i}: {summary.get('summary_profile')}", flush=True)
+        if 'bank_name' in summary:
+            print(f"    - bank_name: '{summary.get('bank_name')}'", flush=True)
+            print(f"    - account_holder_name: '{summary.get('account_holder_name')}'", flush=True)
+        if 'employer_name' in summary:
+            print(f"    - employer_name: '{summary.get('employer_name')}'", flush=True)
+    print("", flush=True)
+    
+    # 5. Assessment Gating - BLOCK if not ready
+    print(f"DEBUG: Profile assessment readiness: {unified_profile.assessment_readiness}", flush=True)
+    print(f"DEBUG: Blocking reasons: {unified_profile.blocking_reasons}", flush=True)
+    
+    if unified_profile.assessment_readiness == AssessmentReadiness.BLOCKED:
+        return {
+            "status": "BLOCKED",
+            "assessment_readiness": unified_profile.assessment_readiness.value,
+            "blocking_reasons": unified_profile.blocking_reasons,
+            "missing_documents": unified_profile.document_coverage.missing_required_documents,
+            "incomplete_documents": unified_profile.document_coverage.incomplete_documents,
+            "message": "Assessment cannot proceed. " + "; ".join(unified_profile.blocking_reasons),
+            "borrower_id": borrower_id,
+            "document_summaries": document_summaries,
+            "unified_profile": {
+                "identity": unified_profile.identity.model_dump(),
+                "income": unified_profile.income.model_dump(),
+                "banking_behavior": unified_profile.banking_behavior.model_dump(),
+                "document_coverage": unified_profile.document_coverage.model_dump()
+            },
+            "extraction_details": {
+                "document_confidence": min([r.confidence for r in extraction_results]) if extraction_results else 0.0,
+                "risk_indicators": [w for r in extraction_results for w in r.warnings],
+                "transactions": [t.model_dump() for t in all_parsed_transactions],
+                "documents": [
+                    {
+                        "filename": getattr(r, "filename", None),
+                        "document_type": r.document_type,
+                        "summary_profile": (
+                            r.bank_statement_summary.summary_profile if r.bank_statement_summary
+                            else r.payslip_summary.summary_profile if r.payslip_summary
+                            else r.nrc_summary.summary_profile if r.nrc_summary
+                            else None
+                        ),
+                        "warnings": r.warnings
+                    }
+                    for r in extraction_results
+                ]
+            },
+            "call_to_action": "Please upload the missing documents to proceed with assessment."
+        }
+    
+    # PARTIAL readiness - proceed with warnings
+    if unified_profile.assessment_readiness == AssessmentReadiness.PARTIAL:
+        print(f"WARNING: Proceeding with PARTIAL data. Reasons: {unified_profile.blocking_reasons}", flush=True)
+
+    # 6. Run Core Assessment with Unified Profile
     # Convert Transaction objects to Dicts for the core agent
     history_dicts = []
+    print(f"DEBUG: all_parsed_transactions count: {len(all_parsed_transactions)}", flush=True)
     for tx in all_parsed_transactions:
+        # Compatibility with new Bank-Grade Transaction Model
+        # New model has: date, description, amount, direction, balance, currency, confidence, flags
+        
+        # Determine amount and direction
+        t_amount = tx.amount
+        t_direction = tx.direction # "INFLOW" or "OUTFLOW"
+        
+        # Fallback for older attributes if mixed types
+        if getattr(tx, "credit", None) and tx.credit and t_direction == "OUTFLOW": # If fallback was needed
+             pass # But standardised parser guarantees amount/direction now
+        
+        # Determine ID (hash if missing)
+        t_id = getattr(tx, "transaction_id", f"TX-{hash(tx.date + tx.description + str(t_amount))}")
+        t_date = tx.date # YYYY-MM-DD
+
+        
+        # Tuple fallback (legacy safety)
+        if isinstance(tx, tuple):
+             # (id, date, amount, type, direction)
+             t_id = tx[0]
+             t_amount = tx[2]
+             t_direction = tx[4]
+             t_date = tx[1]
+
         history_dicts.append({
-            "transaction_id": tx.transaction_id,
-            "amount": tx.amount,
-            "type": tx.type,
-            "timestamp": tx.date.isoformat(),
-            "direction": tx.direction
+            "transaction_id": t_id,
+            "amount": t_amount,
+            "type": "OTHER", # new model doesn't have type enum yet
+            "timestamp": t_date if isinstance(t_date, str) else t_date.isoformat(),
+            "direction": t_direction,
+            "description": getattr(tx, "description", ""),
+            "confidence_score": getattr(tx, "confidence_score", getattr(tx, "confidence", 0.0)),
+            "flags": getattr(tx, "flags", [])
         })
 
+    # Use summary from unified profile for legacy compatibility
+    # TODO: Refactor agents to use UnifiedFinancialProfile directly
+    summary_for_risk = bank_statement_summary or payslip_summary
+    
     assessment = await _run_assessment_core(
         borrower=borrower,
         requested_duration_days=requested_duration_days,
         mobile_money_history=history_dicts if history_dicts else None,
-        statement_summary=bank_statement_summary,
-        assessment_source="MANUAL_UI"
+        statement_summary=summary_for_risk,
+        assessment_source="MANUAL_UI",
+        unified_profile=unified_profile  # NEW: Pass unified profile
     )
 
-    # 5. Persist and Meter
+    if payslip_summary:
+        assessment.metrics = assessment.metrics or {}
+        assessment.metrics.update({
+            "summary_profile": "PAYSLIP_SUMMARY",
+            "payslip_net_pay": payslip_summary.net_pay,
+            "payslip_gross_pay": payslip_summary.gross_pay,
+            "payslip_deductions": payslip_summary.deductions,
+            "payslip_employer_name": payslip_summary.employer_name,
+            "payslip_employee_name": payslip_summary.employee_name,
+            "payslip_currency": payslip_summary.currency,
+            "payslip_pay_period_start": payslip_summary.pay_period_start,
+            "payslip_pay_period_end": payslip_summary.pay_period_end,
+            "payslip_pay_date": payslip_summary.pay_date,
+            "payslip_pay_frequency": payslip_summary.pay_frequency
+        })
+
+    assessment.metrics = assessment.metrics or {}
+    assessment.metrics["document_summaries"] = document_summaries
+    assessment.metrics["readiness"] = True
+    assessment.metrics["missing_documents"] = []
+
+    # 6. Persist and Meter
     Database.save_assessment(assessment)
     BillingAgent.meter_usage(
         org=org, 
@@ -986,7 +1257,44 @@ async def assessment_manual(
         assessment_id=assessment.assessment_id
     )
 
-    return assessment
+    return {
+        "assessment": assessment,
+        "extraction_details": {
+            "document_confidence": min([r.confidence for r in extraction_results]) if extraction_results else 0.0,
+            "risk_indicators": [w for r in extraction_results for w in r.warnings],
+            "transactions": [t.model_dump() for t in all_parsed_transactions],
+            "documents": [
+                {
+                    "filename": getattr(r, "filename", None),
+                    "document_type": r.document_type,
+                    "summary_profile": (
+                        r.bank_statement_summary.summary_profile if r.bank_statement_summary
+                        else r.payslip_summary.summary_profile if r.payslip_summary
+                        else r.nrc_summary.summary_profile if r.nrc_summary
+                        else None
+                    ),
+                    "summary": (
+                        {
+                            "closing_balance": r.bank_statement_summary.closing_balance,
+                            "statement_period": r.bank_statement_summary.statement_period.model_dump()
+                            if r.bank_statement_summary.statement_period else None
+                        } if r.bank_statement_summary else
+                        {
+                            "net_pay": r.payslip_summary.net_pay,
+                            "gross_pay": r.payslip_summary.gross_pay,
+                            "employer_name": r.payslip_summary.employer_name
+                        } if r.payslip_summary else
+                        {
+                            "full_name": r.nrc_summary.full_name,
+                            "id_number": r.nrc_summary.id_number
+                        } if r.nrc_summary else None
+                    ),
+                    "warnings": r.warnings
+                }
+                for r in extraction_results
+            ]
+        }
+    }
 
 @app.get("/org/decisions", response_model=List[Assessment])
 async def get_org_decisions(
@@ -998,7 +1306,7 @@ async def get_org_decisions(
     """
     # Use the helper we just added to DB
     assessments = Database.get_assessments_by_org(current_user.organization_id, limit=limit)
-    return assessments
+    return [enforce_summary_profile_metrics(a) for a in assessments]
 
 @app.get("/org/audit-logs", response_model=List[Dict])
 async def get_org_audit_logs(
@@ -1116,6 +1424,8 @@ async def upgrade_billing_plan(
         return payment_init
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except PaymentAgent.GatewayError as e:
+        raise HTTPException(status_code=502, detail=f"Payment Gateway Error: {str(e)}")
     except Exception as e:
         import traceback
         print(traceback.format_exc())
@@ -1151,7 +1461,7 @@ async def confirm_manual_payment(
     # Simulate a successful webhook payload
     payload = {
         "transaction_id": payment.transaction_id or payment.reference_code,
-        "status": "SUCCESS",
+        "status": "Successful",
         "metadata": {"payment_id": payment_id}
     }
     
@@ -1622,7 +1932,7 @@ async def get_assessment_details(
     if assessment.organization_id != user.organization_id and user.role != "SUPER_ADMIN":
         raise HTTPException(status_code=403, detail="Unauthorized access to this assessment")
         
-    return assessment
+    return enforce_summary_profile_metrics(assessment)
 
 
 @app.get("/assessment/{assessment_id}/exports", response_model=List[DecisionExport])
@@ -1800,103 +2110,143 @@ async def upload_transaction_document(
         content = await file.read()
         filename = file.filename.lower()
         
-        # Parse based on file type
-        alt_data = None
+        # Use Standardized TransactionParser
+        parser = TransactionParser()
+        extraction_result = parser.parse(content, filename)
         
-        if filename.endswith('.pdf'):
-            if not PDF_SUPPORT:
-                raise HTTPException(
-                    status_code=400,
-                    detail="PDF support not installed. Please install PyPDF2: pip install PyPDF2"
+        # Validation (document-specific)
+        if not extraction_result.transactions:
+            if extraction_result.document_type == DocumentType.PAYSLIP:
+                summary = extraction_result.payslip_summary
+                is_success = bool(summary and (summary.net_pay is not None or summary.gross_pay is not None))
+                if is_success:
+                    return JSONResponse(
+                        status_code=200,
+                        content={
+                            "status": "SUCCESS",
+                            "message": "Payslip extracted successfully (no transactions expected).",
+                            "data_summary": {
+                                "doc_type": extraction_result.document_type,
+                                "summary_profile": summary.summary_profile,
+                                "net_pay": summary.net_pay,
+                                "gross_pay": summary.gross_pay
+                            },
+                            "warnings": extraction_result.warnings
+                        }
+                    )
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "status": "WARNING",
+                        "message": "Payslip could not extract net/gross pay.",
+                        "warnings": extraction_result.warnings
+                    }
                 )
-            
-            # Extract text from PDF
-            try:
-                pdf_reader = PyPDF2.PdfReader(io.BytesIO(content))
-                text = ""
-                for page in pdf_reader.pages:
-                    text += page.extract_text()
-                
-                # Parse transactions from text
-                alt_data = PDFTransactionParser.parse_pdf_text(text, borrower_id)
-                
-            except Exception as e:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Failed to parse PDF: {str(e)}. Ensure the PDF contains readable text."
+            if extraction_result.document_type == DocumentType.NRC_ID:
+                summary = extraction_result.nrc_summary
+                is_success = bool(summary and (summary.id_number or summary.full_name))
+                if is_success:
+                    return JSONResponse(
+                        status_code=200,
+                        content={
+                            "status": "SUCCESS",
+                            "message": "NRC extracted successfully (no transactions expected).",
+                            "data_summary": {
+                                "doc_type": extraction_result.document_type,
+                                "summary_profile": summary.summary_profile,
+                                "full_name": summary.full_name,
+                                "id_number": summary.id_number
+                            },
+                            "warnings": extraction_result.warnings
+                        }
+                    )
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "status": "WARNING",
+                        "message": "NRC could not extract identity details.",
+                        "warnings": extraction_result.warnings
+                    }
                 )
-        
-        elif filename.endswith('.csv') or filename.endswith('.txt'):
-            # Parse CSV/TXT format
-            text = content.decode('utf-8')
-            alt_data = parse_simple_csv_format(text, borrower_id)
-        
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail="Unsupported file format. Please upload PDF, CSV, or TXT file."
-            )
-        
-        # Validate parsed data
-        if not alt_data.mobile_money_history and not alt_data.utility_history:
+            if extraction_result.document_type == DocumentType.BANK_STATEMENT:
+                summary = extraction_result.bank_statement_summary
+                is_success = bool(summary and summary.closing_balance is not None and summary.statement_period is not None)
+                if is_success:
+                    return JSONResponse(
+                        status_code=200,
+                        content={
+                            "status": "SUCCESS",
+                            "message": "Bank statement summary extracted (no transactions parsed).",
+                            "data_summary": {
+                                "doc_type": extraction_result.document_type,
+                                "summary_profile": summary.summary_profile,
+                                "closing_balance": summary.closing_balance,
+                                "statement_period": summary.statement_period.model_dump() if summary.statement_period else None
+                            },
+                            "warnings": extraction_result.warnings
+                        }
+                    )
             return JSONResponse(
                 status_code=200,
                 content={
                     "status": "WARNING",
                     "message": "No transactions found in the document. Please check the format.",
-                    "help": {
-                        "csv_format": "Date,Type,Amount,Description",
-                        "example": "2024-01-15,DEPOSIT,5000,Salary",
-                        "supported_types": ["DEPOSIT", "WITHDRAWAL", "TRANSFER", "PAYMENT"]
-                    }
+                    "warnings": extraction_result.warnings
                 }
             )
+            
+        # Convert to Legacy AlternativeData for Database Storage
+        # TODO: Refactor Database to use new Transaction model natively
+        from models.alternative_data import AlternativeData, MobileMoneyTransaction, UtilityPayment
+        
+        mm_txs = []
+        for t in extraction_result.transactions:
+            # Map standardized Transaction to legacy MobileMoneyTransaction
+            tx_type = "DEPOSIT" if t.direction == "INFLOW" else "WITHDRAWAL"
+            if "SALARY" in t.description.upper(): tx_type = "DEPOSIT" # Enforce logic
+            
+            mm_txs.append(MobileMoneyTransaction(
+                transaction_id=f"TX-{hash(t.description+t.date+str(t.amount)) % 1000000}",
+                amount=t.amount,
+                type=tx_type,
+                timestamp=datetime.strptime(t.date, "%Y-%m-%d"),
+                counterparty=t.description
+            ))
+            
+        alt_data = AlternativeData(
+            borrower_id=borrower_id,
+            mobile_money_history=mm_txs,
+            utility_history=[], # Utilities now inside transactions? or separate? New parser treats them as text.
+            airtime_usage_avg=0.0
+        )
         
         # Save alternative data
         Database.save_alternative_data(alt_data)
         
-        # Run behavioral analysis
+        # Run behavioral analysis (Using NEW Logic via list of transactions)
         from agents.behavioral_agent_v2 import BehavioralAgentV2
-        behavioral_results = BehavioralAgentV2.analyze(alt_data)
+        behavioral_results = BehavioralAgentV2.analyze_transactions(extraction_result.transactions)
         
         # Run full risk assessment
-        risk_results = RiskAgent.evaluate(borrower)
-        decision_results = DecisionAgent.recommend(risk_results, borrower, 30) # Default duration for legacy pilot
+        risk_results = RiskAgent.evaluate(borrower, external_behavioral_results=behavioral_results)
+        decision_results = DecisionAgent.recommend(risk_results, borrower, 30)
         explanation = ExplanationAgent.generate(risk_results, decision_results, borrower)
         
         AuditAgent.log_event("DOCUMENT_UPLOAD", "BORROWER_PORTAL", {
             "borrower_id": borrower_id,
             "filename": file.filename,
-            "transactions_found": len(alt_data.mobile_money_history),
-            "utilities_found": len(alt_data.utility_history)
+            "transactions_found": len(extraction_result.transactions),
+            "doc_type": extraction_result.document_type
         })
         
         return {
             "status": "SUCCESS",
             "message": "Document uploaded and analyzed successfully",
             "data_summary": {
-                "transactions_parsed": len(alt_data.mobile_money_history),
-                "utilities_parsed": len(alt_data.utility_history),
-                "airtime_avg": alt_data.airtime_usage_avg
+                "transactions_parsed": len(extraction_result.transactions),
+                "doc_type": extraction_result.document_type
             },
-            "behavioral_analysis": {
-                "income_consistency": behavioral_results.get("income_consistency_score", 0),
-                "transaction_stability": behavioral_results.get("transaction_stability", 0),
-                "savings_behavior": behavioral_results.get("savings_behavior", 0),
-                "savings_trend": behavioral_results.get("saving_trend", 0),
-                "utility_compliance": behavioral_results.get("utility_compliance", 0),
-                "early_warnings": behavioral_results.get("early_warnings", []),
-                # Extract top 5 transactions from the full list for display
-                "largest_transactions": [
-                    {
-                        "date": t.timestamp.strftime('%Y-%m-%d'),
-                        "type": t.type,
-                        "amount": t.amount,
-                        "desc": t.counterparty
-                    }
-                    for t in sorted(alt_data.mobile_money_history, key=lambda x: x.amount, reverse=True)[:5]
-                ]
-            },
+            "behavioral_analysis": behavioral_results,
             "risk_assessment": {
                 "risk_score": risk_results["risk_score"],
                 "risk_level": risk_results["risk_level"],
@@ -1957,14 +2307,27 @@ async def process_document_upload(borrower_id: str, file: UploadFile):
         # 2. Safe Parsing (Standardized Schema)
         parser = TransactionParser()
         try:
-            transactions = parser.parse(content, file.filename)
+            extraction_result = parser.parse(content, file.filename)
+            transactions = extraction_result.transactions
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
             
         if not transactions:
+             AuditAgent.log_event("EXTRACTION_EMPTY", "SYSTEM", {
+                "borrower_id": borrower_id,
+                "filename": file.filename,
+                "document_type": extraction_result.document_type,
+                "warnings": extraction_result.warnings
+             })
              return JSONResponse(
                 status_code=200,
-                content={"status": "WARNING", "message": "No transactions extracted. Check file format."}
+                content={
+                    "status": "WARNING", 
+                    "message": "No transactions extracted. Check file format.",
+                    "document_type": extraction_result.document_type,
+                    "quality_score": extraction_result.quality_score,
+                    "warnings": extraction_result.warnings
+                }
             )
 
         # 3. Behavioral Analysis (With Confidence Weights)
@@ -1986,6 +2349,8 @@ async def process_document_upload(borrower_id: str, file: UploadFile):
         return {
             "status": "SUCCESS",
             "data_source": "USER_UPLOADED_STATEMENT",
+            "document_type": extraction_result.document_type,
+            "quality_score": extraction_result.quality_score,
             "transaction_count": len(transactions),
             "risk_assessment": {
                 "score": risk_results["risk_score"],
@@ -1993,7 +2358,8 @@ async def process_document_upload(borrower_id: str, file: UploadFile):
                 "decision": decision_results["decision"]
             },
             "behavioral_insights": behavioral_results,
-            "explanation": explanation
+            "explanation": explanation,
+            "warnings": extraction_result.warnings
         }
 
     except HTTPException:

@@ -64,25 +64,30 @@ class BehavioralAgentV2:
         if not transactions:
             return metrics
 
-        # get confidence weight from first tx (all should be same source)
-        confidence = transactions[0].confidence_weight if transactions else 0.6
+        # get confidence from first tx (all should be same source)
+        confidence = transactions[0].confidence if transactions else 0.6
         
         # --- LOGIC HARMONIZATION ---
         # Calculate observation window for confidence tagging
-        timestamps = [t.date for t in transactions if t.date]
+        timestamps = []
+        for t in transactions:
+            try:
+                # Handle YYYY-MM-DD
+                ts = datetime.strptime(t.date, "%Y-%m-%d")
+                timestamps.append(ts)
+            except: pass
+
         window_days = 0
         if timestamps:
             delta = max(timestamps) - min(timestamps)
             window_days = max(delta.days, 1)
         
-        is_thin_history = window_days < 30
+        is_thin_history = window_days < 1 
         metrics["observation_window_days"] = window_days
         metrics["metric_confidence"] = "LOW" if is_thin_history else "NORMAL"
-        metrics["behavioral_status"] = "INSUFFICIENT_DATA" if is_thin_history else "ANALYSIS_COMPLETE"
+        metrics["behavioral_status"] = "ANALYSIS_COMPLETE" if len(transactions) > 0 else "INSUFFICIENT_DATA"
 
-        if is_thin_history:
-            # POLICY: Disable behavioral analysis for insufficient data windows
-            # No points computed, return early with status marker
+        if is_thin_history and len(transactions) == 0:
             metrics["transactions"] = transactions
             return metrics
 
@@ -90,17 +95,31 @@ class BehavioralAgentV2:
         metrics["behavioral_stability"] = min(len(transactions) / 20.0, 1.0) * confidence
 
         # Income Consistency
-        inflows = [t.amount for t in transactions if t.direction == "INFLOW"]
-        if len(inflows) >= 3:
-            mean_in = statistics.mean(inflows)
-            std_in = statistics.stdev(inflows) if len(inflows) > 1 else 0
+        # direction="INFLOW" or fallback credit check
+        inflow_amounts = []
+        outflow_amounts = []
+        
+        for t in transactions:
+            amt = t.amount
+            if getattr(t, 'direction', None) == "INFLOW":
+                inflow_amounts.append(amt)
+            elif getattr(t, 'direction', None) == "OUTFLOW":
+                outflow_amounts.append(amt)
+            else:
+                # Fallback for old models if mixed
+                if getattr(t, 'credit', None): inflow_amounts.append(t.credit)
+                if getattr(t, 'debit', None): outflow_amounts.append(t.debit)
+
+        if len(inflow_amounts) >= 3:
+            mean_in = statistics.mean(inflow_amounts)
+            std_in = statistics.stdev(inflow_amounts) if len(inflow_amounts) > 1 else 0
             cv = std_in / mean_in if mean_in > 0 else 10
             raw_score = max(0, 1 - (cv / 0.5))
             metrics["income_consistency_score"] = raw_score * confidence
 
         # Savings & Spending
-        total_in = sum(inflows)
-        total_out = sum(t.amount for t in transactions if t.direction == "OUTFLOW")
+        total_in = sum(inflow_amounts)
+        total_out = sum(outflow_amounts)
         
         if total_in > 0:
             savings_rate = (total_in - total_out) / total_in
@@ -111,18 +130,17 @@ class BehavioralAgentV2:
                 metrics["early_warnings"].append("SUSPICIOUS_SPENDING_SPIKE (User Upload)")
 
         # Transaction Stability (Volatility)
-        amounts = [t.amount for t in transactions]
-        if len(amounts) >= 5:
-            mean = statistics.mean(amounts)
-            std = statistics.stdev(amounts) if len(amounts) > 1 else 0
+        all_amounts = inflow_amounts + outflow_amounts
+        if len(all_amounts) >= 5:
+            mean = statistics.mean(all_amounts)
+            std = statistics.stdev(all_amounts) if len(all_amounts) > 1 else 0
             cv_all = std / mean if mean > 0 else 10
             metrics["transaction_stability"] = max(0, 1 - (cv_all / 1.0)) * confidence
 
         # Expense Volatility
-        outflows = [t.amount for t in transactions if t.direction == "OUTFLOW"]
-        if len(outflows) >= 3:
-             mean_out = statistics.mean(outflows)
-             std_out = statistics.stdev(outflows) if len(outflows) > 1 else 0
+        if len(outflow_amounts) >= 3:
+             mean_out = statistics.mean(outflow_amounts)
+             std_out = statistics.stdev(outflow_amounts) if len(outflow_amounts) > 1 else 0
              cv_out = std_out / mean_out if mean_out > 0 else 10
              metrics["expense_volatility"] = min(cv_out, 1.0)
 
