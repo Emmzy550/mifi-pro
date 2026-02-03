@@ -30,6 +30,7 @@ server_log_tail_2.txt
 server_log_tail_3.txt
 server_log_422.txt
 server_log_422_v2.txt
+!requirements*.txt
 
 # Exports
 exports/
