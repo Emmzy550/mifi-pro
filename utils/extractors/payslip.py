@@ -9,50 +9,41 @@ class PayslipExtractor(BaseExtractor):
         reasons: List[str] = []
         flags: List[str] = []
         upper_text = text.upper()
+        normalized_text = self._normalize_text(text)
         
         # Basic Regex Extraction (robust for line breaks and currency)
-        # Try GROSS PAY first
-        gross_match = re.search(
-            r'GROSS\s*PAY[^0-9]*([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})',
-            text,
-            re.IGNORECASE
-        )
-        if not gross_match:
-            gross_match = re.search(
-                r'GROSS\s*PAY[\s\S]{0,40}([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})',
-                text,
-                re.IGNORECASE
-            )
-        # Also try GROSS EARNINGS (alternative format)
-        if not gross_match:
-            gross_match = re.search(
-                r'GROSS\s*EARNINGS[^0-9]*([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})',
-                text,
-                re.IGNORECASE
-            )
+        amount_pattern = r'([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]{2})?)'
+        net_labels = [
+            r'NET\s*PAY',
+            r'NET\s*SALARY',
+            r'NET\s*AMOUNT',
+            r'TAKE\s*HOME',
+            r'TAKEHOME',
+            r'NET\s*EARNINGS',
+            r'NET\s*INCOME',
+        ]
+        gross_labels = [
+            r'GROSS\s*PAY',
+            r'GROSS\s*SALARY',
+            r'GROSS\s*AMOUNT',
+            r'GROSS\s*EARNINGS',
+            r'TOTAL\s*EARNINGS',
+            r'TOTAL\s*PAY',
+        ]
 
-        net_match = re.search(
-            r'NET\s*PAY[^0-9]*([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})',
-            text,
-            re.IGNORECASE
-        )
-        if not net_match:
-            net_match = re.search(
-                r'NET\s*PAY[\s\S]{0,40}([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})',
-                text,
-                re.IGNORECASE
-            )
+        net_match = self._search_labeled_amount(net_labels, amount_pattern, text, normalized_text)
+        gross_match = self._search_labeled_amount(gross_labels, amount_pattern, text, normalized_text)
 
         deductions_match = re.search(
-            r'TOTAL\s+DEDUCTIONS?.*?\s+([0-9,]+\.[0-9]{2})',
-            text,
+            r'TOTAL\s+DEDUCTIONS?.*?\s+' + amount_pattern,
+            normalized_text,
             re.IGNORECASE
         )
         # Also try GROSS DEDUCTIONS
         if not deductions_match:
             deductions_match = re.search(
-                r'GROSS\s*DEDUCTIONS?[^0-9]*([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})',
-                text,
+                r'GROSS\s*DEDUCTIONS?[^0-9]*' + amount_pattern,
+                normalized_text,
                 re.IGNORECASE
             )
         
@@ -168,3 +159,30 @@ class PayslipExtractor(BaseExtractor):
             return float(amt_str.replace(',', ''))
         except:
             return None
+
+    def _normalize_text(self, text: str) -> str:
+        return re.sub(r'\s+', ' ', text).strip()
+
+    def _search_labeled_amount(
+        self,
+        labels: List[str],
+        amount_pattern: str,
+        raw_text: str,
+        normalized_text: str
+    ) -> Optional[re.Match]:
+        for label in labels:
+            match = re.search(
+                rf'{label}[^0-9]*{amount_pattern}',
+                raw_text,
+                re.IGNORECASE
+            )
+            if match:
+                return match
+            match = re.search(
+                rf'{label}.{{0,40}}{amount_pattern}',
+                normalized_text,
+                re.IGNORECASE
+            )
+            if match:
+                return match
+        return None
