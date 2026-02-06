@@ -17,12 +17,18 @@ and logged for regulatory audit purposes.
 from models.borrower import Borrower
 from typing import Tuple
 import config
+from utils.policy_context import policy_value
 
-# Import thresholds from central configuration
-# WHY: Centralized config allows easy adjustment without code changes
-MIN_MONTHLY_INCOME = config.MIN_MONTHLY_INCOME
-MAX_DEBT_TO_INCOME_RATIO = config.MAX_DEBT_TO_INCOME_RATIO
-AFFORDABILITY_RATIO_TARGET = config.AFFORDABILITY_RATIO_TARGET
+# Helpers: resolve per-org policy overrides when set
+def _min_monthly_income() -> float:
+    return float(policy_value("min_monthly_income", config.MIN_MONTHLY_INCOME))
+
+def _max_dti() -> float:
+    return float(policy_value("max_debt_to_income_ratio", config.MAX_DEBT_TO_INCOME_RATIO))
+
+def _affordability_target() -> float:
+    return float(policy_value("affordability_ratio_target", config.AFFORDABILITY_RATIO_TARGET))
+
 MIN_BUSINESS_STABILITY_MONTHS = config.MIN_BUSINESS_STABILITY_MONTHS
 
 
@@ -50,7 +56,7 @@ def check_income_stability(borrower: Borrower) -> bool:
         >>> check_income_stability(borrower)
         True  # Meets 100 minimum
     """
-    return borrower.monthly_income >= MIN_MONTHLY_INCOME
+    return borrower.monthly_income >= _min_monthly_income()
 
 
 def check_dti_ratio(borrower: Borrower) -> float:
@@ -154,7 +160,7 @@ def check_affordability(borrower: Borrower, loan_term_months: int = 12) -> Tuple
     affordability_ratio = estimated_monthly_payment / net_income
     
     # Apply threshold
-    passes = affordability_ratio <= AFFORDABILITY_RATIO_TARGET
+    passes = affordability_ratio <= _affordability_target()
     
     return passes, affordability_ratio
 
@@ -194,7 +200,7 @@ def check_critical_flags(borrower: Borrower) -> Tuple[bool, list]:
     
     # Check 2: DTI ratio
     dti = check_dti_ratio(borrower)
-    if dti > MAX_DEBT_TO_INCOME_RATIO:
+    if dti > _max_dti():
         flags.append("CRITICAL: HIGH_DEBT_TO_INCOME")
     
     # Check 3: Affordability

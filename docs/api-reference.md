@@ -182,6 +182,8 @@ Run a complete risk assessment on a borrower.
 }
 ```
 
+**Alternative:** You may send full borrower details directly (same fields as `/intake/start`). The system will create the borrower and run the assessment in one call.
+
 **Response:**
 
 ```json
@@ -189,9 +191,12 @@ Run a complete risk assessment on a borrower.
   "assessment_id": "ASMT-X1Y2Z3A4",
   "borrower_id": "BOR-A1B2C3D4",
   "organization_id": "DEFAULT_ORG",
-  "risk_score": 45,
+  "risk_score": 0.45,
+  "risk_score_percent": 45.0,
+  "risk_score_scale": "0-1",
   "risk_level": "MEDIUM",
-  "decision": "CONDITIONAL_APPROVAL",
+  "decision": "CONDITIONAL",
+  "decision_legacy": "CONDITIONAL_APPROVAL",
   "recommended_amount": 15000,
   "recommended_interest_rate": 20.0,
   "requested_amount": 15000,
@@ -231,15 +236,16 @@ Run a complete risk assessment on a borrower.
 
 **Risk Levels:**
 
-- `LOW` (0-40): Low risk, standard approval
-- `MEDIUM` (41-70): Medium risk, conditional approval with higher rates
-- `HIGH` (71-100): High risk, rejection recommended
+- `LOW` (< 0.3): Low risk, standard approval
+- `MEDIUM` (< 0.7): Medium risk, conditional approval with higher rates
+- `HIGH` (>= 0.7): High risk, rejection recommended
 
 **Decision Types:**
 
-- `APPROVED`: Standard approval at base interest rate
-- `CONDITIONAL_APPROVAL`: Approved with conditions (higher interest rate or reduced amount)
+- `APPROVE`: Standard approval at base interest rate
+- `CONDITIONAL`: Approved with conditions (higher interest rate or reduced amount)
 - `REJECT`: Loan not recommended
+- `REFER`: Manual review required
 
 ---
 
@@ -350,9 +356,12 @@ Date,Type,Amount,Description
     "largest_transactions": [...]
   },
   "risk_assessment": {
-    "risk_score": 38,
+    "risk_score": 0.38,
+    "risk_score_percent": 38.0,
+    "risk_score_scale": "0-1",
     "risk_level": "LOW",
-    "decision": "APPROVED",
+    "decision": "APPROVE",
+    "decision_legacy": "APPROVED",
     "recommended_amount": 15000,
     "recommended_interest_rate": 15.0
   },
@@ -384,9 +393,12 @@ Date,Type,Amount,Description
   "data_source": "USER_UPLOADED_STATEMENT",
   "transaction_count": 45,
   "risk_assessment": {
-    "score": 38,
+    "score": 0.38,
+    "risk_score_percent": 38.0,
+    "risk_score_scale": "0-1",
     "level": "LOW",
-    "decision": "APPROVED"
+    "decision": "APPROVE",
+    "decision_legacy": "APPROVED"
   },
   "behavioral_insights": {...},
   "explanation": {...}
@@ -394,6 +406,38 @@ Date,Type,Amount,Description
 ```
 
 ---
+
+### Upload Transactions (Async)
+
+**Endpoint:** `POST /documents/upload-async`
+
+**Authentication:** API Key Required
+
+**Form Data:**
+
+- `borrower_id` (string, required)
+- `file` (file, required)
+- `Idempotency-Key` header (optional, recommended)
+
+**Response:**
+
+```json
+{
+  "job_id": "JOB-ABC123DEF4",
+  "borrower_id": "BOR-A1B2C3D4",
+  "organization_id": "ORG-12345",
+  "status": "PENDING",
+  "created_at": "2026-02-04T12:00:00Z",
+  "updated_at": "2026-02-04T12:00:00Z",
+  "filename": "statement.pdf"
+}
+```
+
+### Check Upload Status
+
+**Endpoint:** `GET /documents/upload-status/{job_id}`
+
+**Response:** Job status with `assessment_id` once completed.
 
 ## Loan Management
 

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { CreditCard, TrendingUp, Calendar, AlertCircle, Shield, Rocket, X, Globe, Smartphone, Landmark, CheckCircle2 } from 'lucide-react';
+import { CreditCard, TrendingUp, Calendar, AlertCircle, Shield, Rocket, X, Globe, Smartphone, Landmark, CheckCircle2, Download, FileText } from 'lucide-react';
 import { useAuth, api } from '../context/AuthContext';
 import toast from 'react-hot-toast';
 
@@ -151,6 +151,26 @@ export default function UsageBilling() {
         }
     };
 
+    const handleDownloadInvoice = async (paymentId: string) => {
+        try {
+            const response = await api.get(`/billing/invoice/${paymentId}`, {
+                responseType: 'blob'
+            });
+            const blob = new Blob([response.data], { type: 'application/pdf' });
+            const url = window.URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.setAttribute('download', `Invoice-${paymentId}.pdf`);
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            window.URL.revokeObjectURL(url);
+        } catch (err: any) {
+            console.error('Failed to download invoice', err);
+            toast.error('Failed to download invoice. Please verify your session.');
+        }
+    };
+
     if (loading) return <div className="p-8 text-center text-slate-500">Loading billing data...</div>;
     if (error) return <div className="p-8 bg-red-50 text-red-600 rounded-lg">{error}</div>;
     if (!usage) return null;
@@ -247,7 +267,7 @@ export default function UsageBilling() {
                     <div id="plan-starter">
                         <PlanCard
                             name="STARTER"
-                            price="$1"
+                            price="ZMW 28.50"
                             limit="1,000"
                             features={["Production Access", "Email Support"]}
                             currentPlan={usage.current_plan}
@@ -261,7 +281,7 @@ export default function UsageBilling() {
                     <div id="plan-growth">
                         <PlanCard
                             name="GROWTH"
-                            price="$149"
+                            price="ZMW 4,246"
                             limit="5,000"
                             features={["Production Access", "Priority Support", "Behavioral Intel"]}
                             currentPlan={usage.current_plan}
@@ -303,6 +323,7 @@ export default function UsageBilling() {
                                 <th className="px-8 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Amount</th>
                                 <th className="px-8 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Status</th>
                                 <th className="px-8 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Gateway</th>
+                                <th className="px-8 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">Action</th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
@@ -312,7 +333,7 @@ export default function UsageBilling() {
                                         {new Date(p.timestamp).toLocaleDateString()}
                                     </td>
                                     <td className="px-8 py-4 text-sm font-bold text-slate-900">{p.plan}</td>
-                                    <td className="px-8 py-4 text-sm text-slate-900 font-mono">${p.amount}</td>
+                                    <td className="px-8 py-4 text-sm text-slate-900 font-mono">{p.currency || '$'} {p.amount}</td>
                                     <td className="px-8 py-4">
                                         <span className={`px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider 
                                             ${p.status === 'PAID' ? 'bg-green-50 text-green-700' :
@@ -323,6 +344,16 @@ export default function UsageBilling() {
                                         </span>
                                     </td>
                                     <td className="px-8 py-4 text-sm text-slate-500">{p.gateway}</td>
+                                    <td className="px-8 py-4 text-right">
+                                        <button
+                                            onClick={() => handleDownloadInvoice(p.payment_id)}
+                                            className="inline-flex items-center gap-1 text-xs font-bold text-primary hover:text-primary/80 transition-colors"
+                                            title="Download PDF Invoice"
+                                        >
+                                            <Download size={14} />
+                                            PDF
+                                        </button>
+                                    </td>
                                 </tr>
                             )) : (
                                 <tr>
@@ -459,7 +490,7 @@ export default function UsageBilling() {
                                             </div>
                                             <div className="flex justify-between mb-4 border-b border-slate-200 pb-2">
                                                 <span className="text-xs text-slate-500">Amount Due</span>
-                                                <span className="text-xs font-bold text-slate-900">${paymentResult.invoice.amount}</span>
+                                                <span className="text-xs font-bold text-slate-900">{paymentResult.currency || 'USD'} {paymentResult.amount || paymentResult.invoice?.amount}</span>
                                             </div>
                                             <div className="pt-2">
                                                 <p className="text-[10px] font-bold text-slate-400 mb-1 uppercase">Bank Details</p>
@@ -477,15 +508,24 @@ export default function UsageBilling() {
                                         </div>
                                     )}
 
-                                    <button
-                                        onClick={() => {
-                                            setShowPaymentModal(false);
-                                            setPaymentResult(null);
-                                        }}
-                                        className="w-full bg-slate-900 text-white py-3 rounded-xl font-bold hover:bg-slate-800 transition-all"
-                                    >
-                                        Got it, Close
-                                    </button>
+                                    <div className="flex flex-col gap-3">
+                                        <button
+                                            onClick={() => handleDownloadInvoice(paymentResult.payment_id)}
+                                            className="w-full bg-primary/10 text-primary py-3 rounded-xl font-bold hover:bg-primary/20 transition-all flex items-center justify-center gap-2"
+                                        >
+                                            <Download size={18} />
+                                            Download PDF Invoice
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                setShowPaymentModal(false);
+                                                setPaymentResult(null);
+                                            }}
+                                            className="w-full bg-slate-900 text-white py-3 rounded-xl font-bold hover:bg-slate-800 transition-all"
+                                        >
+                                            Got it, Close
+                                        </button>
+                                    </div>
                                 </div>
                             )}
                         </div>

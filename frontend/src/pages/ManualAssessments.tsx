@@ -13,7 +13,8 @@ import {
     ArrowRight,
     Loader2,
     X,
-    FileSpreadsheet
+    FileSpreadsheet,
+    CreditCard
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 
@@ -63,13 +64,17 @@ export default function ManualAssessments() {
 
     useEffect(() => {
         if (!borrowerId || pendingDocs.length === 0 || submitting) return;
-        const required = new Set(pendingDocs);
+
+        const required = new Set(pendingDocs.map(d => d.toUpperCase()));
         const hasPayslip = required.has('PAYSLIP') ? !!files.payslip : true;
         const hasBank = required.has('BANK_STATEMENT') ? !!files.bank_statement : true;
+
+        // Only auto-submit if WE JUST UPLOADED something that was missing
         if (hasPayslip && hasBank) {
+            console.log("Auto-submitting missing documents...");
             handleSubmit(new Event('submit') as unknown as React.FormEvent);
         }
-    }, [borrowerId, pendingDocs, files, formData.national_id, submitting]);
+    }, [borrowerId, pendingDocs, files.payslip, files.bank_statement, submitting]);
 
     const removeFile = (type: 'bank_statement' | 'mobile_money_statement' | 'payslip') => {
         setFiles(prev => ({ ...prev, [type]: null }));
@@ -89,17 +94,21 @@ export default function ManualAssessments() {
         if (files.payslip) payload.append('payslip', files.payslip);
 
         try {
-            const res = await api.post('/assessment/manual', payload, {
-                headers: { 'Content-Type': 'multipart/form-data' }
-            });
-            if (res.data.status === 'INCOMPLETE') {
-                setPendingDocs(res.data.missing_documents || []);
+            const res = await api.post('/assessment/manual', payload);
+            if (res.data.status === 'INCOMPLETE' || res.data.status === 'BLOCKED') {
+                setPendingDocs(res.data.missing_documents || res.data.blocking_reasons || []);
                 setBorrowerId(res.data.borrower_id || null);
-                toast.error(res.data.message || 'Additional documents are required.');
+
+                const reasons = res.data.blocking_reasons || res.data.missing_documents || [];
+                const message = reasons.length > 0
+                    ? `Assessment Blocked: ${reasons.join(". ")}`
+                    : (res.data.message || 'Additional documents are required.');
+
+                toast.error(message, { duration: 5000 });
                 return;
             }
             toast.success('Assessment completed successfully!');
-            navigate(`/decisions?new_id=${res.data.assessment_id}`);
+            navigate(`/decisions?new_id=${res.data.assessment.assessment_id}`);
         } catch (err: any) {
             console.error("Submission failed", err);
             if (err.response) {
@@ -111,8 +120,25 @@ export default function ManualAssessments() {
                     // Optional: Navigate to billing page
                 } else if (status === 402) {
                     toast.error("Payment required. Please check your billing status.");
+                } else if (status === 400) {
+                    const errorDetail = data?.detail;
+                    const message = typeof errorDetail === 'string'
+                        ? errorDetail
+                        : (errorDetail?.message || data?.message || 'Assessment blocked by risk policy');
+
+                    if (Array.isArray(errorDetail?.missing_documents)) {
+                        setPendingDocs(errorDetail.missing_documents);
+                    } else if (Array.isArray(data?.missing_documents)) {
+                        setPendingDocs(data.missing_documents);
+                    }
+
+                    if (errorDetail?.borrower_id) {
+                        setBorrowerId(errorDetail.borrower_id);
+                    }
+
+                    toast.error(message, { duration: 6000 });
                 } else {
-                    toast.error(data?.detail || 'Failed to run credit assessment');
+                    toast.error(data?.detail || data?.message || 'Failed to run credit assessment');
                 }
             } else {
                 toast.error('Network error. Please try again.');
@@ -170,12 +196,18 @@ export default function ManualAssessments() {
 
                         <div className="space-y-1.5">
                             <label className="text-xs font-bold text-slate-500 uppercase">National ID (NRC) / Passport</label>
-                            <input
-                                name="national_id"
-                                value={formData.national_id} onChange={handleInputChange}
-                                placeholder="Optional"
-                                className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none transition-all"
-                            />
+                            <div className="relative">
+                                <CreditCard className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                                <input
+                                    name="national_id"
+                                    value={formData.national_id} onChange={handleInputChange}
+                                    placeholder="Enter NRC or Passport number (if available)"
+                                    className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none transition-all"
+                                />
+                            </div>
+                            <p className="text-[10px] text-slate-500 italic mt-1">
+                                If available, providing an ID helps with borrower identification and may improve approval confidence.
+                            </p>
                         </div>
 
                         <div className="space-y-1.5">
@@ -197,7 +229,7 @@ export default function ManualAssessments() {
 
                         <div className="p-4 bg-primary/5 rounded-xl md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-6 border border-primary/10">
                             <div className="space-y-1.5">
-                                <label className="text-xs font-bold text-primary uppercase">Requested Amount (KMW/USD) *</label>
+                                <label className="text-xs font-bold text-primary uppercase">Requested Amount (ZMW) *</label>
                                 <div className="relative">
                                     <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 text-primary/60" size={16} />
                                     <input

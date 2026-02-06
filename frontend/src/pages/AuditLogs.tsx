@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../context/AuthContext';
-import { FileText, Shield, User, Clock, Activity, X, Eye } from 'lucide-react';
+import { FileText, Shield, User, Clock, Activity, X, Eye, Download } from 'lucide-react';
 
 interface AuditLog {
     event_id: string;
@@ -15,6 +15,7 @@ export default function AuditLogs() {
     const [logs, setLogs] = useState<AuditLog[]>([]);
     const [loading, setLoading] = useState(true);
     const [selectedLog, setSelectedLog] = useState<AuditLog | null>(null);
+    const [exporting, setExporting] = useState(false);
 
     useEffect(() => {
         const fetchLogs = async () => {
@@ -30,6 +31,24 @@ export default function AuditLogs() {
         fetchLogs();
     }, []);
 
+    const handleExport = async () => {
+        setExporting(true);
+        try {
+            const res = await api.get('/org/audit-logs/export', { responseType: 'blob' });
+            const url = window.URL.createObjectURL(new Blob([res.data]));
+            const link = document.createElement('a');
+            link.href = url;
+            link.setAttribute('download', 'audit_logs.csv');
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+        } catch (err) {
+            console.error("Failed to export audit logs", err);
+        } finally {
+            setExporting(false);
+        }
+    };
+
     if (loading) return <div className="p-8">Loading system logs...</div>;
 
     return (
@@ -39,6 +58,14 @@ export default function AuditLogs() {
                     <h1 className="text-2xl font-bold text-slate-900">System Audit Logs</h1>
                     <p className="text-slate-500">Immutable ledger of all actions performed within your organization.</p>
                 </div>
+                <button
+                    onClick={handleExport}
+                    disabled={exporting}
+                    className="export-btn export-btn--csv"
+                >
+                    <Download size={16} />
+                    {exporting ? 'Exporting...' : 'Export CSV'}
+                </button>
             </div>
 
             <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">

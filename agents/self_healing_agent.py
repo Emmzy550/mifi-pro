@@ -4,6 +4,8 @@ from agents.audit_agent import AuditAgent
 from ml_models.training_pipeline import train_bootstrap_model
 import threading
 import datetime
+import logging
+logger = logging.getLogger(__name__)
 
 class SelfHealingAgent:
     """
@@ -29,7 +31,7 @@ class SelfHealingAgent:
         })
         
         if cls._PENDING_CLOSURES >= cls.RETRAIN_THRESHOLD:
-            print(f"SELF-HEALING: Threshold of {cls.RETRAIN_THRESHOLD} reached. Triggering AutoML update.")
+            logger.info(f"SELF-HEALING: Threshold of {cls.RETRAIN_THRESHOLD} reached. Triggering AutoML update.")
             cls.trigger_retrain()
             cls._PENDING_CLOSURES = 0
 
@@ -42,13 +44,13 @@ class SelfHealingAgent:
     @staticmethod
     def _perform_retrain():
         try:
-            print("SELF-HEALING: Background retraining started...")
+            logger.info("SELF-HEALING: Background retraining started...")
             train_bootstrap_model()
             # Clear MLRiskAgent cache
             from agents.ml_risk_agent import MLRiskAgent
             MLRiskAgent._model = None 
             AuditAgent.log_event("SELF_HEALING_COMPLETE", "SYSTEM", {"status": "SUCCESS"})
-            print("SELF-HEALING: AI Engine has successfully learned from recent outcomes.")
+            logger.info("SELF-HEALING: AI Engine has successfully learned from recent outcomes.")
         except Exception as e:
             import traceback
             with open("self_healing_error.log", "a") as f:
@@ -56,4 +58,4 @@ class SelfHealingAgent:
                 f.write(traceback.format_exc())
                 f.write("\n")
             AuditAgent.log_event("SELF_HEALING_FAILED", "SYSTEM", {"error": str(e)})
-            print(f"SELF-HEALING: Error during background training: {e}")
+            logger.error(f"SELF-HEALING: Error during background training: {e}")

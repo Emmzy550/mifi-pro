@@ -1,12 +1,18 @@
 import uuid
-from fastapi import FastAPI, HTTPException, Body, Depends, Security, UploadFile, File, Form, Request, Header
+from fastapi import FastAPI, HTTPException, Body, Depends, Security, UploadFile, File, Form, Request, Header, BackgroundTasks
+from fastapi.responses import FileResponse
 from typing import Dict, List, Optional, Any
 import io
+import json
+import hashlib
+import secrets
 from datetime import datetime, timedelta, timezone
+import logging
+logger = logging.getLogger(__name__)
 
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from starlette.status import HTTP_401_UNAUTHORIZED, HTTP_403_FORBIDDEN
-from models.borrower import Borrower
+from models.borrower import Borrower, IDType, IDReviewStatus
 from models.assessment import Assessment
 from models.loan import Loan, LoanStatus
 from models.alternative_data import AlternativeData
@@ -14,7 +20,7 @@ from models.organization import Organization, BillingPlan, BillingStatus, OrgEnv
 from models.api_key import APIKey, KeyStatus
 from models.decision_export import DecisionExport
 from models.decision_counterfactual import DecisionCounterfactual
-from models.user import User
+from models.user import User, UserRole
 from models.officer_action import OfficerAction, OfficerDecision, CommChannel
 from agents.intake_agent import IntakeAgent
 from agents.risk_agent import RiskAgent
@@ -22,6 +28,7 @@ from agents.decision_agent import DecisionAgent
 from agents.explanation_agent import ExplanationAgent
 from agents.query_agent import QueryAgent
 from agents.auth_agent import AuthAgent, AuthUser, ACCESS_TOKEN_EXPIRE_MINUTES, get_super_admin
+from pricing_config import PLAN_CONFIG
 from agents.audit_agent import AuditAgent
 from agents.decision_export_agent import DecisionExportAgent
 from agents.decision_counterfactual_agent import DecisionCounterfactualAgent
@@ -33,12 +40,17 @@ from utils.profile_builder import ProfileBuilder
 from models.document import DocumentType, Transaction as DocTransaction, SummaryProfile
 from models.unified_profile import UnifiedFinancialProfile, AssessmentReadiness
 from models.sms_log import SMSLog
+from models.follow_up_task import FollowUpTask, FollowUpStatus
 from services.sms_service import SMSService
+from services.email_service import EmailService
+from services.webhook_service import WebhookService
+from utils.validators import normalize_phone, clean_name
 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, PlainTextResponse
 import os
+import logging
 
 # PDF parsing is handled within TransactionParser
 
@@ -135,6 +147,11 @@ Need help? Contact support@your-lender.com or visit our [FAQ](http://localhost:8
     ]
 )
 
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+
 # Enable CORS for local testing
 app.add_middleware(
     CORSMiddleware,
@@ -143,6 +160,49 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.get("/debug/health")
+async def debug_health():
+    return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+@app.get("/debug/db")
+async def debug_db_status():
+    """Diagnostic endpoint to check database connection status."""
+    db = Database.get_db()
+    is_mock = isinstance(db, MockFirestore)
+    service_name = os.getenv("K_SERVICE", "local")
+    project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "mfi--pro")
+    
+    return {
+        "status": "connected",
+        "database_type": "MockFirestore" if is_mock else "Real Firestore",
+        "is_mock": is_mock,
+        "environment": {
+            "service": service_name,
+            "project_id": project_id,
+            "service_account_path_exists": os.path.exists("serviceAccountKey.json")
+        }
+    }
+
+@app.get("/debug/assessments")
+async def debug_all_assessments():
+    """Diagnostic endpoint to list ALL assessments in the database without filtering."""
+    assessments = Database.list_assessments()
+    org_counts = {}
+    for a in assessments:
+        org_counts[a.organization_id] = org_counts.get(a.organization_id, 0) + 1
+    
+    return {
+        "total_count": len(assessments),
+        "organization_counts": org_counts,
+        "recent_assessments": [
+            {
+                "id": a.assessment_id,
+                "org": a.organization_id,
+                "created": a.created_at.isoformat() if hasattr(a.created_at, 'isoformat') else str(a.created_at)
+            } for a in assessments[:20]
+        ]
+    }
 
 @app.middleware("http")
 async def strip_api_prefix(request: Request, call_next):
@@ -162,14 +222,14 @@ frontend_dist = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fronte
 static_path = os.path.dirname(os.path.abspath(__file__))
 
 if os.path.exists(frontend_dist):
-    print(f"STARTUP: FRONTEND: Serving from {frontend_dist}")
+    logger.info(f"STARTUP: FRONTEND: Serving from {frontend_dist}")
     app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="assets")
     
     @app.get("/")
     async def serve_spa_root():
         return FileResponse(os.path.join(frontend_dist, "index.html"))
 else:
-    print(f"WARNING: FRONTEND: {frontend_dist} not found. Using root legacy mode.")
+    logger.warning(f"WARNING: FRONTEND: {frontend_dist} not found. Using root legacy mode.")
     # Fallback for root assets if they exist
     root_assets = os.path.join(static_path, "assets")
     if os.path.exists(root_assets):
@@ -209,7 +269,7 @@ async def get_platform_stats(current_user: User = Depends(get_super_admin)):
     orgs = Database.list_organizations()
     loans = Database.list_loans()
     assessments = Database.list_assessments()
-    print(f"DEBUG: Found {len(orgs)} orgs, {len(loans)} loans, {len(assessments)} assessments")
+    logger.debug(f"DEBUG: Found {len(orgs)} orgs, {len(loans)} loans, {len(assessments)} assessments")
     
     total_mfis = len(orgs)
     total_disbursed_volume = sum(loan.amount for loan in loans)
@@ -301,14 +361,15 @@ def filter_assessment_for_role(assessment: Assessment, role: str) -> Dict[str, A
     public_fields = governance_fields | {
         "assessment_id", "borrower_id", "decision", "recommended_amount", 
         "recommended_interest_rate", "decision_summary", "customer_view", 
-        "customer_message", "created_at"
+        "customer_message", "created_at", "assessment_source"
     }
     
     # 2. OFFICER VIEW
     # Add metrics and professional rationale.
     officer_fields = public_fields | {
         "risk_level", "risk_score", "officer_view", "internal_notes", 
-        "flags", "metrics", "blocking_factors"
+        "flags", "metrics", "blocking_factors",
+        "data_quality_score", "adverse_action"
     }
     
     # 3. AUDIT/ADMIN VIEW (Full Transparency)
@@ -318,7 +379,8 @@ def filter_assessment_for_role(assessment: Assessment, role: str) -> Dict[str, A
         "policy_version", "observed_deposit_volume", "transaction_count",
         "history_days", "policy_cap_amount", "policy_cap_reason",
         "capacity_based_max", "capacity_multiplier_used", "starter_loan_applied",
-        "ml_advisory_only", "ml_attempted_override", "decision_metadata"
+        "ml_advisory_only", "ml_attempted_override", "decision_metadata",
+        "decision_trace", "data_provenance"
     }
     
     target_fields = public_fields
@@ -327,7 +389,212 @@ def filter_assessment_for_role(assessment: Assessment, role: str) -> Dict[str, A
     if role in ["SUPER_ADMIN", "ADMIN", "COMPLIANCE"]:
         target_fields = audit_fields
         
-    return {k: v for k, v in total_data.items() if k in target_fields}
+    payload = {k: v for k, v in total_data.items() if k in target_fields}
+    return augment_assessment_payload(payload)
+
+
+def decision_to_legacy(decision_value: Any) -> str:
+    """
+    Backward-compatible decision mapping for legacy clients.
+    """
+    if decision_value is None:
+        return "UNKNOWN"
+    decision_str = str(decision_value)
+    mapping = {
+        "APPROVE": "APPROVED",
+        "CONDITIONAL": "CONDITIONAL_APPROVAL",
+        "REJECT": "REJECT",
+        "REFER": "REFER",
+        "WAIT": "WAIT",
+    }
+    return mapping.get(decision_str, decision_str)
+
+
+def augment_assessment_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Adds stable, backward-compatible fields without altering core contracts.
+    """
+    if "decision" in payload:
+        payload["decision_legacy"] = decision_to_legacy(payload.get("decision"))
+    if "risk_score" in payload and payload["risk_score"] is not None:
+        try:
+            payload["risk_score_percent"] = round(float(payload["risk_score"]) * 100.0, 1)
+            payload["risk_score_scale"] = "0-1"
+        except Exception:
+            pass
+    return payload
+
+
+def stable_hash(payload: Dict[str, Any]) -> str:
+    """
+    Deterministic hash for audit traceability.
+    """
+    try:
+        raw = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()
+    except Exception:
+        return ""
+
+
+def build_decision_trace(
+    borrower: Borrower,
+    requested_duration_days: int,
+    assessment_source: str,
+    risk_results: Dict[str, Any],
+    decision_results: Dict[str, Any],
+    reason_codes: List[str],
+    data_quality_score: Optional[float]
+) -> Dict[str, Any]:
+    input_snapshot = {
+        "borrower_id": borrower.id,
+        "organization_id": borrower.organization_id,
+        "requested_amount": borrower.loan_amount_requested,
+        "requested_duration_days": requested_duration_days,
+        "monthly_income": borrower.monthly_income,
+        "monthly_expenses": borrower.monthly_expenses,
+        "existing_debt": borrower.existing_debt,
+        "employment_type": borrower.employment_type,
+        "assessment_source": assessment_source
+    }
+    derived_features = risk_results.get("metrics", {})
+    decision_metadata = decision_results.get("decision_metadata", {})
+
+    trace = {
+        "input_snapshot": input_snapshot,
+        "derived_features": derived_features,
+        "risk_score": risk_results.get("risk_score"),
+        "risk_level": risk_results.get("risk_level"),
+        "decision": decision_results.get("decision"),
+        "reason_codes": reason_codes,
+        "policy_version": decision_metadata.get("policy_version", "unknown"),
+        "decision_engine": "rules_engine",
+        "data_quality_score": data_quality_score
+    }
+    trace["input_hash"] = stable_hash(input_snapshot)
+    trace["features_hash"] = stable_hash(derived_features)
+    trace["decision_hash"] = stable_hash({
+        "decision": trace["decision"],
+        "risk_score": trace["risk_score"],
+        "risk_level": trace["risk_level"],
+        "reason_codes": trace["reason_codes"],
+        "policy_version": trace["policy_version"]
+    })
+    return trace
+
+
+def apply_data_quality_policy(decision_results: Dict[str, Any], data_quality_score: Optional[float]) -> Dict[str, Any]:
+    """
+    If data quality is below threshold, force a manual review (REFER) and annotate metadata.
+    """
+    if data_quality_score is None:
+        return decision_results
+
+    import config
+    from utils.policy_context import policy_value
+    threshold = float(policy_value("data_quality_refer_threshold", config.DATA_QUALITY_REFER_THRESHOLD))
+    decision_metadata = decision_results.get("decision_metadata", {})
+    decision_metadata["data_quality_score"] = data_quality_score
+
+    if data_quality_score < threshold:
+        decision_metadata.setdefault("blocking_factors", [])
+        decision_metadata["blocking_factors"].append("DATA_QUALITY_LIMITED")
+        decision_metadata["data_quality_impact"] = (
+            f"Data quality {data_quality_score:.2f} below threshold {threshold:.2f}; manual review required."
+        )
+        return {
+            "decision": "REFER",
+            "recommended_amount": None,
+            "recommended_duration_days": None,
+            "recommended_interest_rate": 0.0,
+            "interest_rate_basis": None,
+            "decision_metadata": decision_metadata
+        }
+
+    decision_metadata["data_quality_impact"] = "Data quality sufficient for automated assessment."
+    decision_results["decision_metadata"] = decision_metadata
+    return decision_results
+
+
+def build_data_provenance(
+    data_used: Dict[str, Any],
+    data_quality_score: Optional[float],
+    consent_event_id: Optional[str],
+    consent_channel: Optional[str],
+    consent_timestamp: Optional[str],
+    document_info: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    provenance = {
+        "data_sources": data_used.get("data_sources", []),
+        "transaction_days": data_used.get("transaction_days"),
+        "transaction_count": data_used.get("transaction_count"),
+        "data_recency_days": data_used.get("data_recency_days"),
+    }
+    if data_quality_score is not None:
+        provenance["data_quality_score"] = data_quality_score
+    if consent_event_id:
+        provenance["consent_event_id"] = consent_event_id
+    if consent_channel:
+        provenance["consent_channel"] = consent_channel
+    if consent_timestamp:
+        provenance["consent_timestamp"] = consent_timestamp
+    if document_info:
+        provenance["document"] = document_info
+    return provenance
+
+
+def transactions_to_history_dicts(transactions: List[Any]) -> List[Dict[str, Any]]:
+    history_dicts = []
+    for tx in transactions or []:
+        t_amount = getattr(tx, "amount", None)
+        t_direction = getattr(tx, "direction", None)
+        t_date = getattr(tx, "date", None)
+        t_id = getattr(tx, "transaction_id", None)
+
+        if isinstance(tx, tuple):
+            t_id = tx[0]
+            t_date = tx[1]
+            t_amount = tx[2]
+            t_direction = tx[4]
+
+        if not t_id:
+            t_id = f"TX-{hash(str(t_date) + str(getattr(tx, 'description', '')) + str(t_amount))}"
+
+        history_dicts.append({
+            "transaction_id": t_id,
+            "amount": t_amount,
+            "type": "OTHER",
+            "timestamp": t_date if isinstance(t_date, str) else t_date.isoformat(),
+            "direction": t_direction,
+            "description": getattr(tx, "description", ""),
+            "confidence_score": getattr(tx, "confidence_score", getattr(tx, "confidence", 0.0)),
+            "flags": getattr(tx, "flags", [])
+        })
+
+    return history_dicts
+
+
+def parse_float_or_none(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        text = str(value).replace(",", "").strip()
+        return float(text)
+    except Exception:
+        return None
+
+
+def sms_next_prompt(step: str) -> str:
+    prompts = {
+        "CONSENT": "Welcome to Loan Officer AI. Reply YES to consent to data processing.",
+        "NAME": "Please reply with your full name.",
+        "INCOME": "Monthly income? (numbers only)",
+        "EXPENSES": "Monthly expenses? (numbers only)",
+        "DEBT": "Existing debt amount? (numbers only, or 0)",
+        "AMOUNT": "Requested loan amount? (numbers only)",
+        "PURPOSE": "Loan purpose? (e.g., inventory, school fees)",
+        "DONE": "Thank you. Processing your assessment now."
+    }
+    return prompts.get(step, "Reply START to begin a loan assessment.")
 
 
 def build_document_summaries(extraction_results: List[Any]) -> List[Dict[str, Any]]:
@@ -343,6 +610,7 @@ def build_document_summaries(extraction_results: List[Any]) -> List[Dict[str, An
                 "account_holder_name": result.bank_statement_summary.account_holder_name,
                 "currency": result.bank_statement_summary.currency,
                 "risk_flags": result.bank_statement_summary.risk_flags,
+                "quality_score": result.quality_score,
                 "raw_text_preview": result.raw_text_preview
             })
         if result.payslip_summary:
@@ -358,6 +626,8 @@ def build_document_summaries(extraction_results: List[Any]) -> List[Dict[str, An
                 "pay_date": result.payslip_summary.pay_date,
                 "pay_frequency": result.payslip_summary.pay_frequency,
                 "currency": result.payslip_summary.currency,
+                "risk_flags": result.payslip_summary.risk_flags,
+                "quality_score": result.quality_score,
                 "raw_text_preview": result.raw_text_preview
             })
         if result.nrc_summary:
@@ -367,6 +637,8 @@ def build_document_summaries(extraction_results: List[Any]) -> List[Dict[str, An
                 "id_number": result.nrc_summary.id_number,
                 "date_of_birth": result.nrc_summary.date_of_birth,
                 "gender": result.nrc_summary.gender,
+                "risk_flags": result.nrc_summary.risk_flags,
+                "quality_score": result.quality_score,
                 "raw_text_preview": result.raw_text_preview
             })
     return summaries
@@ -379,8 +651,12 @@ def enforce_summary_profile_metrics(assessment: Assessment) -> Assessment:
     if assessment.metrics is None:
         assessment.metrics = {}
     if not assessment.metrics.get("summary_profile"):
-        assessment.metrics["summary_profile"] = SummaryProfile.UNKNOWN.value
-    return assessment
+        doc_summaries = assessment.metrics.get("document_summaries") or []
+        if isinstance(doc_summaries, list) and doc_summaries:
+            assessment.metrics["summary_profile"] = doc_summaries[0].get("summary_profile", SummaryProfile.UNKNOWN.value)
+        else:
+            assessment.metrics["summary_profile"] = SummaryProfile.UNKNOWN.value
+    return augment_assessment_payload(assessment.model_dump())
 
 # ============================================================================
 # PARTNER DASHBOARD METRICS (Portfolio Analytics)
@@ -402,7 +678,7 @@ async def get_dashboard_user(
         try:
             user = await AuthAgent.get_current_user(token)
         except Exception as e:
-            print(f"DEBUG: JWT auth failed: {e}")
+            logger.error(f"DEBUG: JWT auth failed: {e}")
             pass
             
     # 2. Try API Key if no user found yet
@@ -420,7 +696,7 @@ async def get_dashboard_user(
                     role="API_USER"
                 )
         except Exception as e:
-            print(f"DEBUG: API Key auth failed: {e}")
+            logger.error(f"DEBUG: API Key auth failed: {e}")
             pass
             
     if not user:
@@ -540,8 +816,11 @@ async def get_org_metrics(
     # --- Loan KPIs ---
     active_count = 0
     default_count = 0
-    total_loans = 0
+    total_loans_in_range = 0
     disbursed_volume = 0.0
+    par_30 = 0
+    par_60 = 0
+    par_90 = 0
     
     for doc in loan_docs:
         try:
@@ -560,7 +839,25 @@ async def get_org_metrics(
                         disbursed_dt = datetime.fromisoformat(disbursed_at_val.replace('Z', '+00:00'))
                     except: pass
             
-            # Time filter check
+            # Exclusion: PENDING_DISBURSEMENT is not considered "disbursed" yet
+            if status == "PENDING_DISBURSEMENT":
+                continue
+
+            # KPI 1: Lifetime Disbursed Volume (Actual Full Amount)
+            # KPI 2: Current Active Snapshot
+            disbursed_volume += float(amount)
+            if status in ["DISBURSED", "ACTIVE"]:
+                active_count += 1
+                if disbursed_dt:
+                    age_days = (datetime.utcnow().date() - disbursed_dt.date()).days
+                    if age_days > 30:
+                        par_30 += 1
+                    if age_days > 60:
+                        par_60 += 1
+                    if age_days > 90:
+                        par_90 += 1
+            
+            # KPI 3: Range-bound metrics (Defaults)
             is_in_range = False
             if disbursed_dt:
                 ref_dt = disbursed_dt.replace(tzinfo=None) if disbursed_dt.tzinfo else disbursed_dt
@@ -568,15 +865,13 @@ async def get_org_metrics(
                     is_in_range = True
             
             if is_in_range:
-                if status not in ["REPAID", "CANCELLED"]:
-                    active_count += 1
                 if status == "DEFAULTED":
                     default_count += 1
-                total_loans += 1
-                disbursed_volume += amount
+                total_loans_in_range += 1
+                
         except: continue
         
-    default_rate = (default_count / total_loans * 100) if total_loans > 0 else 0.0
+    default_rate = (default_count / total_loans_in_range * 100) if total_loans_in_range > 0 else 0.0
     
     # --- Risk Drift Detection ---
     alerts = []
@@ -589,15 +884,99 @@ async def get_org_metrics(
                 "message": f"Negative outcome rate ({negative_rate*100:.1f}%) exceeds safety threshold. Review policy strictness."
             })
     
+    par_base = active_count if active_count > 0 else 1
     return {
         "total_assessments": filtered_asmt_count,
         "active_loans": active_count,
         "disbursed_volume": round(disbursed_volume, 2),
         "default_rate": round(default_rate, 1),
+        "par_snapshot": {
+            "par_30": par_30,
+            "par_60": par_60,
+            "par_90": par_90,
+            "par_30_rate": round((par_30 / par_base) * 100, 1),
+            "par_60_rate": round((par_60 / par_base) * 100, 1),
+            "par_90_rate": round((par_90 / par_base) * 100, 1)
+        },
         "risk_distribution": risk_distribution,
         "decision_trends": decision_trends,
         "alerts": alerts
     }
+
+
+@app.get("/org/watchlist", tags=["Dashboard"])
+async def get_org_watchlist(
+    limit: int = 20,
+    current_user: User = Depends(get_dashboard_user)
+):
+    if current_user.role not in ["OFFICER", "ORG_ADMIN", "AUDITOR", "SUPER_ADMIN", "DEVELOPER"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    org_id = current_user.organization_id if current_user.organization_id != "PLATFORM_OWNER" else None
+    assessments = Database.get_assessments_by_org(org_id, limit=200) if org_id else Database.list_assessments()
+    loans = Database.list_loans(organization_id=org_id) if org_id else Database.list_loans()
+    loan_by_assessment = {l.assessment_id: l for l in loans if getattr(l, "assessment_id", None)}
+
+    import config
+    from utils.policy_config import get_policy_for_org
+    from utils.policy_context import set_policy_context, reset_policy_context, policy_value
+
+    policy_values, _ = get_policy_for_org(current_user.organization_id)
+    token = set_policy_context(policy_values)
+    watchlist = []
+    try:
+        for assessment in assessments:
+            loan = loan_by_assessment.get(assessment.assessment_id)
+
+            def add_alert(alert_type: str, severity: str, message: str):
+                watchlist.append({
+                    "alert_id": f"{assessment.assessment_id}:{alert_type}",
+                    "type": alert_type,
+                    "severity": severity,
+                    "message": message,
+                    "assessment_id": assessment.assessment_id,
+                    "borrower_id": assessment.borrower_id,
+                    "decision": str(assessment.decision),
+                    "risk_score": assessment.risk_score,
+                    "risk_level": assessment.risk_level,
+                    "data_quality_score": assessment.data_quality_score,
+                    "loan_status": getattr(loan, "status", None),
+                    "timestamp": getattr(assessment, "decision_timestamp", None)
+                })
+
+            # High risk or high DTI
+            if assessment.risk_score is not None and assessment.risk_score >= 0.7:
+                add_alert("HIGH_RISK", "HIGH", "Risk score is high; review before disbursement or renewal.")
+            dti_ratio = (assessment.metrics or {}).get("dti_ratio")
+            if dti_ratio is not None and dti_ratio > policy_value("max_debt_to_income_ratio", config.MAX_DEBT_TO_INCOME_RATIO):
+                add_alert("HIGH_DTI", "HIGH", "Debt-to-income ratio exceeds policy threshold.")
+
+            # Low data quality
+            if assessment.data_quality_score is not None and assessment.data_quality_score < policy_value("data_quality_refer_threshold", config.DATA_QUALITY_REFER_THRESHOLD):
+                add_alert("LOW_DATA_QUALITY", "HIGH", "Data quality is below threshold; manual verification recommended.")
+
+            # Missing documents
+            missing_docs = (assessment.metrics or {}).get("missing_documents") or []
+            if missing_docs:
+                add_alert("MISSING_DOCUMENTS", "MEDIUM", f"Missing required documents: {', '.join(missing_docs)}.")
+
+            # Thin file
+            if assessment.blocking_factors and any("INSUFFICIENT_TRANSACTION_HISTORY" in f for f in assessment.blocking_factors):
+                add_alert("THIN_FILE", "MEDIUM", "Insufficient transaction history; monitor before approval.")
+
+            # Loan status flags
+            if loan:
+                status = str(getattr(loan, "status", "")).upper()
+                if "DEFAULT" in status:
+                    add_alert("LOAN_DEFAULTED", "CRITICAL", "Loan marked as defaulted; immediate action required.")
+                elif "ACTIVE" in status and assessment.risk_score is not None and assessment.risk_score >= 0.6:
+                    add_alert("ACTIVE_HIGH_RISK", "MEDIUM", "Active loan with elevated risk score.")
+    finally:
+        reset_policy_context(token)
+
+    severity_rank = {"CRITICAL": 3, "HIGH": 2, "MEDIUM": 1}
+    watchlist.sort(key=lambda item: (severity_rank.get(item["severity"], 0), item.get("risk_score") or 0), reverse=True)
+    return watchlist[:limit]
 
 # Database initialization happens via the Database class
 # No local dictionaries needed for V2
@@ -682,7 +1061,22 @@ async def intake_start(
             org_id = user.organization_id
         
         if not org_id:
-            org_id = "DEFAULT_ORG"
+            # 1. Configured Default
+            env_default = os.getenv("DEFAULT_ORG_ID")
+            if env_default:
+                org_id = env_default
+            else:
+                # 2. Smart Default: If only one org exists, use it.
+                try:
+                    all_orgs = Database.list_organizations()
+                    if len(all_orgs) == 1:
+                        org_id = all_orgs[0].id
+                        logger.info(f"INFO: Auto-resolved organization to {org_id}")
+                    else:
+                        org_id = "DEFAULT_ORG"
+                except Exception as e:
+                    logger.error(f"WARN: Failed to resolve default org: {e}")
+                    org_id = "DEFAULT_ORG"
 
         borrower_profile = IntakeAgent.process(raw_data)
         borrower_profile.id = f"BOR-{uuid.uuid4().hex[:8].upper()}"
@@ -695,7 +1089,7 @@ async def intake_start(
         return {"borrower_id": borrower_profile.id, "status": "INTAKE_COMPLETE", "organization_id": org_id}
     except Exception as e:
         import traceback
-        print(f"ERROR in intake_start: {e}\n{traceback.format_exc()}")
+        logger.error(f"ERROR in intake_start: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post(
@@ -708,8 +1102,8 @@ async def intake_start(
     
     This endpoint:
     - Evaluates the borrower's creditworthiness
-    - Calculates risk score (0-100, lower is better)
-    - Provides AI recommendation (APPROVED/CONDITIONAL_APPROVAL/REJECT)
+    - Calculates risk score (0-1, lower is better)
+    - Provides AI recommendation (APPROVE/CONDITIONAL/REJECT/REFER)
     - Generates detailed explanation of the decision
     
     **Assessment includes:**
@@ -720,8 +1114,8 @@ async def intake_start(
     - ML probability score (if enabled)
     
     **Returns:**
-    - `risk_score`: 0-100 (0-40=LOW, 41-70=MEDIUM, 71-100=HIGH)
-    - `decision`: APPROVED, CONDITIONAL_APPROVAL, or REJECT
+    - `risk_score`: 0-1 (LOW < 0.3, MEDIUM < 0.7, HIGH >= 0.7)
+    - `decision`: APPROVE, CONDITIONAL, REJECT, or REFER
     - `recommended_amount`: Suggested loan amount
     - `recommended_interest_rate`: Suggested interest rate (%)
     - `explanation`: Detailed reasoning for the decision
@@ -732,20 +1126,38 @@ async def intake_start(
     """
 )
 async def assessment_run(
-    borrower_id: str = Body(..., embed=True, example="BOR-A1B2C3D4"),
-    requested_duration_days: int = Body(30, embed=True, example=60),
-    mobile_money_history: Optional[List[Dict[str, Any]]] = Body(None),
-    utility_history: Optional[List[Dict[str, Any]]] = Body(None),
-    airtime_usage_avg: Optional[float] = Body(None),
+    payload: Dict[str, Any] = Body(..., example={"borrower_id": "BOR-A1B2C3D4"}),
+    background_tasks: BackgroundTasks = None,
     user: AuthUser = Depends(AuthAgent.get_api_key)
 ):
     """
     Runs the full analysis pipeline for a borrower with billing metering.
     """
-    # 1. Get borrower and context
-    borrower = Database.get_borrower(borrower_id)
-    if not borrower:
-        raise HTTPException(status_code=404, detail="Borrower not found. Please run /intake/start first.")
+    # 1. Resolve borrower (either by borrower_id or full borrower payload)
+    borrower_id = payload.get("borrower_id")
+    requested_duration_days = payload.get("requested_duration_days", 30)
+    mobile_money_history = payload.get("mobile_money_history")
+    utility_history = payload.get("utility_history")
+    airtime_usage_avg = payload.get("airtime_usage_avg")
+
+    borrower = None
+    if borrower_id:
+        borrower = Database.get_borrower(borrower_id)
+        if not borrower:
+            raise HTTPException(status_code=404, detail="Borrower not found. Please run /intake/start first.")
+    else:
+        # Create borrower directly from payload (API convenience)
+        borrower_fields = set(Borrower.model_fields.keys())
+        borrower_payload = {k: v for k, v in payload.items() if k in borrower_fields}
+        borrower_profile = IntakeAgent.process(borrower_payload)
+        borrower_profile.id = f"BOR-{uuid.uuid4().hex[:8].upper()}"
+        borrower_profile.organization_id = user.organization_id
+        Database.save_borrower(borrower_profile)
+        borrower = borrower_profile
+        AuditAgent.log_event("INTAKE_START", user.role, {
+            "borrower_id": borrower_profile.id,
+            "org": borrower_profile.organization_id
+        })
     
     if borrower.organization_id != user.organization_id:
         raise HTTPException(status_code=404, detail="Borrower not found.")
@@ -771,6 +1183,7 @@ async def assessment_run(
     )
 
     # 4. Save and Meter
+    logger.debug(f"[ASSESSMENT SAVE DEBUG] Saving assessment {assessment.assessment_id} for org: {assessment.organization_id}, borrower: {borrower.id}, borrower_org: {borrower.organization_id}")
     Database.save_assessment(assessment)
     BillingAgent.meter_usage(
         org=org, 
@@ -780,7 +1193,15 @@ async def assessment_run(
         assessment_id=assessment.assessment_id
     )
 
-    return assessment
+    if background_tasks is not None:
+        background_tasks.add_task(
+            WebhookService.send_event,
+            org,
+            "assessment.completed",
+            augment_assessment_payload(assessment.model_dump())
+        )
+
+    return augment_assessment_payload(assessment.model_dump())
 
 async def _run_assessment_core(
     borrower: Borrower,
@@ -790,142 +1211,198 @@ async def _run_assessment_core(
     airtime_usage_avg: Optional[float] = None,
     statement_summary: Optional[Dict[str, Any]] = None,
     assessment_source: str = "API",
-    unified_profile: Optional[UnifiedFinancialProfile] = None  # NEW: Unified profile parameter
+    unified_profile: Optional[UnifiedFinancialProfile] = None,  # NEW: Unified profile parameter
+    external_behavioral_results: Optional[Dict[str, Any]] = None,
+    data_quality_score: Optional[float] = None,
+    data_provenance: Optional[Dict[str, Any]] = None,
+    consent_event_id: Optional[str] = None,
+    consent_channel: Optional[str] = None,
+    consent_timestamp: Optional[str] = None,
+    document_info: Optional[Dict[str, Any]] = None
 ) -> Assessment:
     """
     Internal shared logic for running a credit assessment.
     Ensures identical results across all entry points.
     """
-    # INSTANT DATA preparation
-    external_results = None
-    if mobile_money_history is not None or utility_history is not None:
-        external_results = {
-            "transactions": mobile_money_history or [],
-            "utility_history": utility_history or [],
-            "airtime_usage_avg": airtime_usage_avg or 0.0,
-            "behavioral_stability": 0.7, 
-            "saving_trend": 0.7,
-            "utility_compliance": 0.7,
-            "early_warnings": []
-        }
-        if statement_summary:
+    from utils.policy_config import get_policy_for_org
+    from utils.policy_context import set_policy_context, reset_policy_context
+
+    policy_values, _ = get_policy_for_org(borrower.organization_id)
+    policy_token = set_policy_context(policy_values)
+    try:
+        # INSTANT DATA preparation
+        external_results = external_behavioral_results
+        if external_results is None and (mobile_money_history is not None or utility_history is not None):
+            external_results = {
+                "transactions": mobile_money_history or [],
+                "utility_history": utility_history or [],
+                "airtime_usage_avg": airtime_usage_avg or 0.0,
+                "behavioral_stability": 0.7,
+                "saving_trend": 0.7,
+                "utility_compliance": 0.7,
+                "early_warnings": []
+            }
+        if external_results is not None and statement_summary:
             external_results["statement_summary"] = statement_summary
-    
-    # NEW: Extract verified income from unified_profile (if available)
-    verified_monthly_income = None
-    verified_income_source = None
-    if unified_profile:
-        # Use net_pay from payslip as verified income
-        if unified_profile.income.net_pay is not None:
-            verified_monthly_income = unified_profile.income.net_pay
-            verified_income_source = "PAYSLIP"
-            print(f"INFO: Extracted verified income from payslip: {verified_monthly_income}")
-        
-        # Pass through external_results for RiskAgent
-        if verified_monthly_income:
-            if external_results is None:
-                external_results = {
-                    "transactions": [],
-                    "behavioral_stability": 0.7,
-                    "saving_trend": 0.7,
-                    "utility_compliance": 0.7,
-                    "early_warnings": []
-                }
-            external_results["verified_monthly_income"] = verified_monthly_income
-            external_results["verified_income_source"] = verified_income_source
 
-    # 1. Evaluate Risk
-    risk_results = RiskAgent.evaluate(borrower, external_behavioral_results=external_results)
-    
-    # 2. Recommmend Decision
-    decision_results = DecisionAgent.recommend(risk_results, borrower, requested_duration_days)
-    
-    # 3. Generate Explanation
-    explanation_results = ExplanationAgent.generate(risk_results, decision_results, borrower)
-    
-    # 4. Construct Assessment Object
-    mdata = decision_results.get("decision_metadata", {})
-    decision_timestamp = datetime.utcnow()
-    
-    # Reason Codes Extraction
-    reason_codes = []
-    if decision_results["decision"] == "REJECT":
-        for factor in explanation_results.get("blocking_factors", []):
-            code = factor.upper().replace(" ", "_").replace(".", "").replace(":", "")
-            reason_codes.append(code[:30])
-        for flag in risk_results["flags"]:
-            if "CRITICAL" in flag:
-                 reason_codes.append(flag.split(":")[0].strip().upper().replace(" ", "_"))
-    elif decision_results["decision"] == "APPROVE" and mdata.get("adjustments_applied"):
-         for adj in mdata["adjustments_applied"]:
-             reason_codes.append(f"{adj.get('type', 'ADJUSTMENT')}_{adj.get('reason', 'POLICY').upper().replace(' ', '_')}")
-    reason_codes = list(set(reason_codes))
+        # NEW: Extract verified income from unified_profile (if available)
+        verified_monthly_income = None
+        verified_income_source = None
+        if unified_profile:
+            # Use net_pay from payslip as verified income
+            if unified_profile.income.net_pay is not None:
+                verified_monthly_income = unified_profile.income.net_pay
+                verified_income_source = "PAYSLIP"
+                logger.info(f"INFO: Extracted verified income from payslip: {verified_monthly_income}")
 
-    data_used = {
-        "transaction_days": risk_results["metrics"].get("history_days", 0),
-        "transaction_count": risk_results["metrics"].get("transaction_count", 0),
-        "data_sources": [risk_results.get("data_source", "INTERNAL")],
-        "data_recency_days": 0
-    }
-    if mobile_money_history or utility_history:
-         data_used["data_sources"].append("USER_UPLOADED")
+            # Pass through external_results for RiskAgent
+            if verified_monthly_income:
+                if external_results is None:
+                    external_results = {
+                        "transactions": [],
+                        "behavioral_stability": 0.7,
+                        "saving_trend": 0.7,
+                        "utility_compliance": 0.7,
+                        "early_warnings": []
+                    }
+                external_results["verified_monthly_income"] = verified_monthly_income
+                external_results["verified_income_source"] = verified_income_source
 
-    assessment = Assessment(
-        assessment_id=f"ASMT-{uuid.uuid4().hex[:8].upper()}",
-        borrower_id=borrower.id,
-        organization_id=borrower.organization_id,
-        requested_amount=borrower.loan_amount_requested,
-        requested_duration_days=requested_duration_days,
-        decision_timestamp=decision_timestamp,
-        decision_reason_codes=reason_codes,
-        data_used=data_used,
-        risk_score=risk_results["risk_score"],
-        risk_level=risk_results["risk_level"],
-        decision=decision_results["decision"],
-        assessment_source=assessment_source,
-        recommended_amount=decision_results["recommended_amount"],
-        recommended_duration_days=decision_results.get("recommended_duration_days"),
-        recommended_interest_rate=decision_results["recommended_interest_rate"],
-        interest_rate_basis=decision_results.get("interest_rate_basis"),
-        decision_summary=explanation_results["decision_summary"],
-        customer_view=explanation_results["customer_view"],
-        officer_view=explanation_results["officer_view"],
-        audit_view=explanation_results["audit_view"],
-        blocking_factors=explanation_results["blocking_factors"],
-        customer_message=explanation_results["customer_message"],
-        internal_notes=explanation_results["internal_notes"],
-        explanation=explanation_results["explanation"],
-        explanation_source=explanation_results["explanation_source"],
-        decision_source="rules_engine",
-        policy_version=mdata.get("policy_version", "v1.2.0-human-first"),
-        flags=risk_results["flags"],
-        observed_deposit_volume=risk_results["metrics"]["observed_deposit_volume"], 
-        transaction_count=risk_results["metrics"]["transaction_count"],
-        history_days=risk_results["metrics"]["history_days"],
-        capacity_based_max=mdata.get("capacity_based_max", risk_results["metrics"].get("capacity_based_max", 0.0)),
-        capacity_multiplier_used=risk_results["metrics"].get("capacity_multiplier_used", 0.0),
-        starter_loan_applied=mdata.get("starter_loan_applied", risk_results["metrics"].get("starter_loan_applied", False)),
-        metrics={**risk_results["metrics"]},
-        policy_cap_amount=mdata.get("policy_cap_amount"),
-        policy_cap_reason=mdata.get("policy_cap_reason"),
-        ml_advisory_only=True,
-        ml_attempted_override=any(adj.get("type") == "CAPACITY_CAP" for adj in mdata.get("adjustments_applied", []) if isinstance(adj, dict)),
-        decision_metadata=mdata
-    )
-    
-    # 5. Semantic Validation & Repair
-    from utils.explanation_validator import ExplanationValidator
-    assessment.explanation = ExplanationValidator.auto_repair_explanation(assessment)
-    assessment.flags = ExplanationValidator.deduplicate_flags(assessment.flags)
-    
-    integrity_issues = ExplanationValidator.validate_integrity(assessment)
-    if integrity_issues:
-        for issue in integrity_issues:
-            prefix = "AUDIT_ALERT: " if "ERROR" in issue or "CRITICAL" in issue else "AUDIT_INFO: "
-            assessment.flags.append(f"{prefix}{issue}")
+        # 1. Evaluate Risk
+        risk_results = RiskAgent.evaluate(borrower, external_behavioral_results=external_results)
+
+        # 2. Recommmend Decision
+        decision_results = DecisionAgent.recommend(risk_results, borrower, requested_duration_days)
+        decision_results = apply_data_quality_policy(decision_results, data_quality_score)
+
+        # 3. Generate Explanation
+        explanation_results = ExplanationAgent.generate(risk_results, decision_results, borrower)
+
+        # 4. Construct Assessment Object
+        mdata = decision_results.get("decision_metadata", {})
+        decision_timestamp = datetime.utcnow()
+
+        # Reason Codes Extraction
+        reason_codes = []
+        if decision_results["decision"] == "REJECT":
+            for factor in explanation_results.get("blocking_factors", []):
+                code = factor.upper().replace(" ", "_").replace(".", "").replace(":", "")
+                reason_codes.append(code[:30])
+            for flag in risk_results["flags"]:
+                if "CRITICAL" in flag:
+                    reason_codes.append(flag.split(":")[0].strip().upper().replace(" ", "_"))
+        elif decision_results["decision"] == "APPROVE" and mdata.get("adjustments_applied"):
+            for adj in mdata["adjustments_applied"]:
+                reason_codes.append(f"{adj.get('type', 'ADJUSTMENT')}_{adj.get('reason', 'POLICY').upper().replace(' ', '_')}")
+        reason_codes = list(set(reason_codes))
+
+        data_used = {
+            "transaction_days": risk_results["metrics"].get("history_days", 0),
+            "transaction_count": risk_results["metrics"].get("transaction_count", 0),
+            "data_sources": [risk_results.get("data_source", "INTERNAL")],
+            "data_recency_days": 0
+        }
+        if mobile_money_history or utility_history:
+            data_used["data_sources"].append("USER_UPLOADED")
+
+        doc_info = dict(document_info or {})
+        if statement_summary and isinstance(statement_summary, dict):
+            if "summary_profile" in statement_summary and "summary_profile" not in doc_info:
+                doc_info["summary_profile"] = statement_summary.get("summary_profile")
+        data_prov = build_data_provenance(
+            data_used=data_used,
+            data_quality_score=data_quality_score,
+            consent_event_id=consent_event_id,
+            consent_channel=consent_channel,
+            consent_timestamp=consent_timestamp,
+            document_info=doc_info if doc_info else None
+        )
+        if data_provenance:
+            merged_prov = dict(data_provenance)
+            merged_prov.update(data_prov)
+            data_prov = merged_prov
+
+        decision_trace = build_decision_trace(
+            borrower=borrower,
+            requested_duration_days=requested_duration_days,
+            assessment_source=assessment_source,
+            risk_results=risk_results,
+            decision_results=decision_results,
+            reason_codes=reason_codes,
+            data_quality_score=data_quality_score
+        )
+
+        assessment = Assessment(
+            assessment_id=f"ASMT-{uuid.uuid4().hex[:8].upper()}",
+            borrower_id=borrower.id,
+            organization_id=borrower.organization_id,
+            requested_amount=borrower.loan_amount_requested,
+            requested_duration_days=requested_duration_days,
+            decision_timestamp=decision_timestamp,
+            decision_reason_codes=reason_codes,
+            data_used=data_used,
+            data_quality_score=data_quality_score,
+            data_provenance=data_prov,
+            decision_trace=decision_trace,
+            risk_score=risk_results["risk_score"],
+            risk_level=risk_results["risk_level"],
+            decision=decision_results["decision"],
+            assessment_source=assessment_source,
+            recommended_amount=decision_results["recommended_amount"],
+            recommended_duration_days=decision_results.get("recommended_duration_days"),
+            recommended_interest_rate=decision_results["recommended_interest_rate"],
+            interest_rate_basis=decision_results.get("interest_rate_basis"),
+            decision_summary=explanation_results["decision_summary"],
+            customer_view=explanation_results["customer_view"],
+            officer_view=explanation_results["officer_view"],
+            audit_view=explanation_results["audit_view"],
+            blocking_factors=explanation_results["blocking_factors"],
+            customer_message=explanation_results["customer_message"],
+            internal_notes=explanation_results["internal_notes"],
+            adverse_action=explanation_results.get("adverse_action", {}),
+            explanation=explanation_results["explanation"],
+            explanation_source=explanation_results["explanation_source"],
+            decision_source="rules_engine",
+            policy_version=mdata.get("policy_version", "v1.2.0-human-first"),
+            flags=risk_results["flags"],
+            observed_deposit_volume=risk_results["metrics"]["observed_deposit_volume"],
+            transaction_count=risk_results["metrics"]["transaction_count"],
+            history_days=risk_results["metrics"]["history_days"],
+            capacity_based_max=mdata.get("capacity_based_max", risk_results["metrics"].get("capacity_based_max", 0.0)),
+            capacity_multiplier_used=risk_results["metrics"].get("capacity_multiplier_used", 0.0),
+            starter_loan_applied=mdata.get("starter_loan_applied", risk_results["metrics"].get("starter_loan_applied", False)),
+            metrics={**risk_results["metrics"]},
+            policy_cap_amount=mdata.get("policy_cap_amount"),
+            policy_cap_reason=mdata.get("policy_cap_reason"),
+            ml_advisory_only=True,
+            ml_attempted_override=any(adj.get("type") == "CAPACITY_CAP" for adj in mdata.get("adjustments_applied", []) if isinstance(adj, dict)),
+            decision_metadata=mdata
+        )
+        # Ensure summary_profile is set when a statement summary exists
+        if statement_summary and assessment.metrics is not None and not assessment.metrics.get("summary_profile"):
+            summary_profile_val = None
+            if isinstance(statement_summary, dict):
+                summary_profile_val = statement_summary.get("summary_profile")
+            else:
+                summary_profile_val = getattr(statement_summary, "summary_profile", None)
+            if summary_profile_val:
+                assessment.metrics["summary_profile"] = summary_profile_val
+
+        # 5. Semantic Validation & Repair
+        from utils.explanation_validator import ExplanationValidator
+        assessment.explanation = ExplanationValidator.auto_repair_explanation(assessment)
         assessment.flags = ExplanationValidator.deduplicate_flags(assessment.flags)
-        
-    return assessment
+
+        integrity_issues = ExplanationValidator.validate_integrity(assessment)
+        if integrity_issues:
+            for issue in integrity_issues:
+                prefix = "AUDIT_ALERT: " if "ERROR" in issue or "CRITICAL" in issue else "AUDIT_INFO: "
+                assessment.flags.append(f"{prefix}{issue}")
+            assessment.flags = ExplanationValidator.deduplicate_flags(assessment.flags)
+
+        return assessment
+    finally:
+        reset_policy_context(policy_token)
 
 @app.post("/assessment/query")
 async def assessment_query(assessment: Assessment, question_type: str):
@@ -936,6 +1413,27 @@ async def assessment_query(assessment: Assessment, question_type: str):
     try:
         answer = QueryAgent.answer(assessment, question_type)
         return answer
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/assessment/{assessment_id}/ask")
+async def assessment_ask(
+    assessment_id: str,
+    payload: Dict[str, Any] = Body(...),
+    user: AuthUser = Depends(AuthAgent.get_current_user)
+):
+    """
+    Deterministic decision Q&A. Answers only from the stored decision record.
+    """
+    assessment = Database.get_assessment(assessment_id)
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found.")
+    if assessment.organization_id != user.organization_id and user.role != "SUPER_ADMIN":
+        raise HTTPException(status_code=403, detail="Unauthorized access to this assessment")
+
+    question_type = payload.get("question_type") or payload.get("question") or ""
+    try:
+        return QueryAgent.answer(assessment, question_type)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1001,7 +1499,36 @@ async def assessment_manual(
         borrower = Database.get_borrower(borrower_id)
         if not borrower:
             raise HTTPException(status_code=404, detail="Borrower not found for document continuation")
+        
+        # MULTI-TENANCY FIX: If borrower was created via public portal (DEFAULT_ORG),
+        # migrate them to the current officer's organization.
+        if borrower.organization_id != current_user.organization_id:
+            # Safety Check: Can only take over if borrower is in DEFAULT_ORG or requester is SUPER_ADMIN
+            if borrower.organization_id == "DEFAULT_ORG" or current_user.role == "SUPER_ADMIN":
+                logger.info(f"INFO: Migrating borrower {borrower.id} from {borrower.organization_id} to {current_user.organization_id.upper()}")
+                borrower.organization_id = current_user.organization_id.upper()
+                # Note: We'll save the borrower below in step 2b
+            else:
+                # Prevent hijacking borrowers from other MFIs
+                AuditAgent.log_event("CROSS_ORG_ACCESS_DENIED", current_user.email, {
+                    "borrower_id": borrower.id,
+                    "target_org": borrower.organization_id,
+                    "officer_org": current_user.organization_id
+                })
+                raise HTTPException(status_code=403, detail="Borrower belongs to a different organization")
     else:
+        # 2a. Determine Identification Support (Optional)
+        id_provided = False
+        id_type = IDType.UNKNOWN
+        if national_id:
+            id_provided = True
+            # Simple pattern detection: NRC usually has slashes (e.g. 123456/11/1)
+            if "/" in national_id:
+                id_type = IDType.NRC
+            else:
+                # Alphanumeric often indicates Passport
+                id_type = IDType.PASSPORT
+
         borrower_id = f"BOR-{uuid.uuid4().hex[:8].upper()}"
         borrower = Borrower(
             id=borrower_id,
@@ -1013,13 +1540,27 @@ async def assessment_manual(
             monthly_expenses=monthly_expenses,
             existing_debt=0, # Default for manual UI if not provided
             loan_amount_requested=requested_amount,
-            loan_purpose=loan_purpose or "Not Specified"
+            loan_purpose=loan_purpose or "Not Specified",
+            national_id=national_id,
+            id_provided=id_provided,
+            id_type=id_type,
+            id_review_status=IDReviewStatus.NOT_REVIEWED
         )
-        Database.save_borrower(borrower)
+    
+    # 2b. Persist (New or Migrated)
+    Database.save_borrower(borrower)
 
     # 3. Parse Transactions (Evidence Handling)
     tx_parser = TransactionParser()
     all_parsed_transactions = []
+    
+    logger.debug(
+        f"Manual assessment files present: "
+        f"bank_statement={bool(bank_statement)}, "
+        f"mobile_money_statement={bool(mobile_money_statement)}, "
+        f"payslip={bool(payslip)}, "
+        f"nrc_id={bool(nrc_id)}"
+    )
     
     # Helper to parse upload files
     async def parse_upload(file_obj: UploadFile):
@@ -1049,10 +1590,9 @@ async def assessment_manual(
                     "full_name": result.nrc_summary.full_name,
                     "id_number": result.nrc_summary.id_number
                 }
-            print(
+            logger.info(
                 f"EXTRACTION: {file_obj.filename} doc_type={result.document_type} "
-                f"summary_profile={summary_profile} summary={summary_snapshot} warnings={result.warnings}",
-                flush=True
+                f"summary_profile={summary_profile} summary={summary_snapshot} warnings={result.warnings}"
             )
             is_readable = result.confidence > 0.0 or len(result.transactions) > 0
             if not is_readable or result.warnings:
@@ -1063,7 +1603,7 @@ async def assessment_manual(
                     "org": current_user.organization_id
                 })
             if not is_readable:
-                print(f"WARN: Document {file_obj.filename} is unreadable: {result.warnings}")
+                logger.warning(f"WARN: Document {file_obj.filename} is unreadable: {result.warnings}")
             return result
         except Exception as e:
             AuditAgent.log_event("EXTRACTION_ERROR", current_user.email, {
@@ -1071,7 +1611,7 @@ async def assessment_manual(
                 "error": str(e),
                 "org": current_user.organization_id
             })
-            print(f"WARN: Failed to parse {file_obj.filename}: {e}")
+            logger.error(f"WARN: Failed to parse {file_obj.filename}: {e}")
             return None
 
     # Parse primary statements
@@ -1107,7 +1647,7 @@ async def assessment_manual(
     summary_for_risk = bank_statement_summary or payslip_summary
 
     # 4. Build Unified Financial Profile (NEW PIPELINE)
-    print("DEBUG: Building UnifiedFinancialProfile from extraction results", flush=True)
+    logger.debug("DEBUG: Building UnifiedFinancialProfile from extraction results")
     unified_profile = ProfileBuilder.build(
         extraction_results=extraction_results,
         transactions=all_parsed_transactions
@@ -1117,66 +1657,41 @@ async def assessment_manual(
     document_summaries = build_document_summaries(extraction_results)
     
     # SAFETY CHECK: Log what we're sending to the UI
-    print(f"\nDEBUG [API]: Document summaries for UI ({len(document_summaries)} docs):", flush=True)
+    logger.info(f"\nDEBUG [API]: Document summaries for UI ({len(document_summaries)} docs):")
     for i, summary in enumerate(document_summaries, 1):
-        print(f"  Doc {i}: {summary.get('summary_profile')}", flush=True)
+        logger.info(f"  Doc {i}: {summary.get('summary_profile')}")
         if 'bank_name' in summary:
-            print(f"    - bank_name: '{summary.get('bank_name')}'", flush=True)
-            print(f"    - account_holder_name: '{summary.get('account_holder_name')}'", flush=True)
+            logger.info(f"    - bank_name: '{summary.get('bank_name')}'")
+            logger.info(f"    - account_holder_name: '{summary.get('account_holder_name')}'")
         if 'employer_name' in summary:
-            print(f"    - employer_name: '{summary.get('employer_name')}'", flush=True)
-    print("", flush=True)
+            logger.info(f"    - employer_name: '{summary.get('employer_name')}'")
+    logger.info("")
     
     # 5. Assessment Gating - BLOCK if not ready
-    print(f"DEBUG: Profile assessment readiness: {unified_profile.assessment_readiness}", flush=True)
-    print(f"DEBUG: Blocking reasons: {unified_profile.blocking_reasons}", flush=True)
+    logger.debug(f"DEBUG: Profile assessment readiness: {unified_profile.assessment_readiness}")
+    logger.debug(f"DEBUG: Blocking reasons: {unified_profile.blocking_reasons}")
     
     if unified_profile.assessment_readiness == AssessmentReadiness.BLOCKED:
-        return {
-            "status": "BLOCKED",
-            "assessment_readiness": unified_profile.assessment_readiness.value,
-            "blocking_reasons": unified_profile.blocking_reasons,
-            "missing_documents": unified_profile.document_coverage.missing_required_documents,
-            "incomplete_documents": unified_profile.document_coverage.incomplete_documents,
-            "message": "Assessment cannot proceed. " + "; ".join(unified_profile.blocking_reasons),
-            "borrower_id": borrower_id,
-            "document_summaries": document_summaries,
-            "unified_profile": {
-                "identity": unified_profile.identity.model_dump(),
-                "income": unified_profile.income.model_dump(),
-                "banking_behavior": unified_profile.banking_behavior.model_dump(),
-                "document_coverage": unified_profile.document_coverage.model_dump()
-            },
-            "extraction_details": {
-                "document_confidence": min([r.confidence for r in extraction_results]) if extraction_results else 0.0,
-                "risk_indicators": [w for r in extraction_results for w in r.warnings],
-                "transactions": [t.model_dump() for t in all_parsed_transactions],
-                "documents": [
-                    {
-                        "filename": getattr(r, "filename", None),
-                        "document_type": r.document_type,
-                        "summary_profile": (
-                            r.bank_statement_summary.summary_profile if r.bank_statement_summary
-                            else r.payslip_summary.summary_profile if r.payslip_summary
-                            else r.nrc_summary.summary_profile if r.nrc_summary
-                            else None
-                        ),
-                        "warnings": r.warnings
-                    }
-                    for r in extraction_results
-                ]
-            },
-            "call_to_action": "Please upload the missing documents to proceed with assessment."
-        }
+        error_msg = "Assessment Blocked: " + "; ".join(unified_profile.blocking_reasons)
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": error_msg,
+                "blocking_reasons": unified_profile.blocking_reasons,
+                "missing_documents": unified_profile.document_coverage.missing_required_documents,
+                "incomplete_documents": unified_profile.document_coverage.incomplete_documents,
+                "borrower_id": borrower_id
+            }
+        )
     
     # PARTIAL readiness - proceed with warnings
     if unified_profile.assessment_readiness == AssessmentReadiness.PARTIAL:
-        print(f"WARNING: Proceeding with PARTIAL data. Reasons: {unified_profile.blocking_reasons}", flush=True)
+        logger.warning(f"WARNING: Proceeding with PARTIAL data. Reasons: {unified_profile.blocking_reasons}")
 
     # 6. Run Core Assessment with Unified Profile
     # Convert Transaction objects to Dicts for the core agent
     history_dicts = []
-    print(f"DEBUG: all_parsed_transactions count: {len(all_parsed_transactions)}", flush=True)
+    logger.debug(f"DEBUG: all_parsed_transactions count: {len(all_parsed_transactions)}")
     for tx in all_parsed_transactions:
         # Compatibility with new Bank-Grade Transaction Model
         # New model has: date, description, amount, direction, balance, currency, confidence, flags
@@ -1226,6 +1741,26 @@ async def assessment_manual(
         unified_profile=unified_profile  # NEW: Pass unified profile
     )
 
+    if bank_statement_summary:
+        assessment.metrics = assessment.metrics or {}
+        period = bank_statement_summary.statement_period
+        assessment.metrics.update({
+            "summary_profile": "BANK_STATEMENT_SUMMARY",
+            "statement_account_holder_name": bank_statement_summary.account_holder_name,
+            "statement_bank_name": bank_statement_summary.bank_name,
+            "statement_currency": bank_statement_summary.currency,
+            "statement_period_start": period.start if period else None,
+            "statement_period_end_summary": period.end if period else None,
+            "statement_opening_balance": bank_statement_summary.opening_balance,
+            "statement_closing_balance": bank_statement_summary.closing_balance,
+            "statement_summary_credit_amount": bank_statement_summary.total_money_in or bank_statement_summary.calculated_total_money_in,
+            "statement_summary_debit_amount": bank_statement_summary.total_money_out or bank_statement_summary.calculated_total_money_out,
+            "statement_summary_credit_count": bank_statement_summary.deposit_count,
+            "statement_salary_detected": bank_statement_summary.salary_detected,
+            "statement_salary_frequency": bank_statement_summary.salary_frequency,
+            "statement_risk_flags": bank_statement_summary.risk_flags
+        })
+
     if payslip_summary:
         assessment.metrics = assessment.metrics or {}
         assessment.metrics.update({
@@ -1248,6 +1783,9 @@ async def assessment_manual(
     assessment.metrics["missing_documents"] = []
 
     # 6. Persist and Meter
+    logger.debug(f"[MANUAL ASSESSMENT DEBUG] User: {current_user.email}, User Org: {current_user.organization_id}")
+    logger.debug(f"[MANUAL ASSESSMENT DEBUG] Borrower: {borrower.id}, Borrower Org: {borrower.organization_id}")
+    logger.debug(f"[MANUAL ASSESSMENT DEBUG] Assessment: {assessment.assessment_id}, Assessment Org: {assessment.organization_id}")
     Database.save_assessment(assessment)
     BillingAgent.meter_usage(
         org=org, 
@@ -1256,9 +1794,10 @@ async def assessment_manual(
         endpoint="/assessment/manual",
         assessment_id=assessment.assessment_id
     )
+    WebhookService.send_event(org, "assessment.completed", augment_assessment_payload(assessment.model_dump()))
 
     return {
-        "assessment": assessment,
+        "assessment": augment_assessment_payload(assessment.model_dump()),
         "extraction_details": {
             "document_confidence": min([r.confidence for r in extraction_results]) if extraction_results else 0.0,
             "risk_indicators": [w for r in extraction_results for w in r.warnings],
@@ -1304,8 +1843,33 @@ async def get_org_decisions(
     """
     Returns recent assessments for the authenticated user's organization.
     """
+    # DEBUG: Log organization and assessment count for visibility debugging
+    db_type = "MOCK" if "Mock" in str(type(Database.get_db())) else "REAL"
+    logger.debug(f"[DECISIONS DEBUG] User: {current_user.email}, Org: {current_user.organization_id}, DB: {db_type}")
+    
     # Use the helper we just added to DB
-    assessments = Database.get_assessments_by_org(current_user.organization_id, limit=limit)
+    org_id = current_user.organization_id.upper() if current_user.organization_id else "DEFAULT_ORG"
+    assessments = Database.get_assessments_by_org(org_id, limit=limit)
+    
+    logger.debug(f"[DECISIONS DEBUG] Fetching for Org: {org_id} (Original: {current_user.organization_id})")
+    
+    # CRITICAL Trace for Visibility
+    if not assessments:
+         all_raw = Database.list_assessments()
+         logger.debug(f"[DECISIONS DEBUG] Found 0 results. Total in DB: {len(all_raw)}")
+         if all_raw:
+             # Sample for diagnosis
+             unique_orgs = set(a.organization_id for a in all_raw)
+             logger.debug(f"[DECISIONS DEBUG] Unique Org IDs in DB: {unique_orgs}")
+             logger.debug(f"[DECISIONS DEBUG] Search Target: '{org_id}'")
+             # Check for raw matches ignoring case
+             close_matches = [a.assessment_id for a in all_raw if a.organization_id.upper() == org_id]
+             if close_matches:
+                 logger.debug(f"[DECISIONS DEBUG] Found {len(close_matches)} case-insensitive matches! This indicates a casing issue in the DB.")
+    logger.debug(f"[DECISIONS DEBUG] Final count for frontend: {len(assessments)}")
+    if assessments:
+        logger.debug(f"[DECISIONS DEBUG] Sample Assessment ID for frontend: {assessments[0].assessment_id}")
+        
     return [enforce_summary_profile_metrics(a) for a in assessments]
 
 @app.get("/org/audit-logs", response_model=List[Dict])
@@ -1319,20 +1883,286 @@ async def get_org_audit_logs(
     logs = AuditAgent.list_org_logs(current_user.organization_id, limit=limit)
     return logs
 
-@app.get("/org/settings", response_model=Dict)
-async def get_org_settings(current_user: User = Depends(AuthAgent.get_current_user)):
+
+@app.get("/org/audit-logs/export")
+async def export_org_audit_logs(
+    current_user: User = Depends(AuthAgent.get_current_user)
+):
     """
-    Returns the current configuration for the authenticated organization.
+    Exports organization audit logs as CSV.
+    """
+    logs = AuditAgent.list_org_logs(current_user.organization_id, limit=1000)
+    import csv
+    import io
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["timestamp", "event_type", "actor", "organization_id", "details"])
+    for log in logs:
+        writer.writerow([
+            log.get("timestamp"),
+            log.get("event_type"),
+            log.get("actor"),
+            log.get("organization_id"),
+            json.dumps(log.get("details", {}))
+        ])
+    response = PlainTextResponse(output.getvalue(), media_type="text/csv")
+    response.headers["Content-Disposition"] = "attachment; filename=audit_logs.csv"
+    return response
+
+
+def _resolve_user_limit(org: Organization) -> Optional[int]:
+    if org.user_limit is not None:
+        return org.user_limit
+    plan_name = org.plan.value if hasattr(org.plan, 'value') else str(org.plan)
+    plan_config = PLAN_CONFIG.get(plan_name.upper(), PLAN_CONFIG["SANDBOX"])
+    return plan_config.get("user_limit")
+
+
+def _serialize_user(user: User) -> Dict[str, Any]:
+    data = user.model_dump(mode='json')
+    data.pop("password_hash", None)
+    return data
+
+
+def _build_invite_email(
+    org: Organization,
+    inviter: User,
+    invitee_email: str,
+    temp_password: str
+) -> Dict[str, str]:
+    dashboard_url = os.getenv("DASHBOARD_PUBLIC_URL", "http://localhost:5173/login")
+    inviter_name = inviter.full_name or inviter.email
+    subject = f"You've been invited to {org.name} on Loan Officer AI"
+    body_text = (
+        f"Hello,\n\n"
+        f"{inviter_name} invited you to join {org.name} on Loan Officer AI.\n\n"
+        f"Login: {dashboard_url}\n"
+        f"Email: {invitee_email}\n"
+        f"Temporary password: {temp_password}\n\n"
+        f"For security, please change your password after your first login.\n\n"
+        f"If you did not expect this invitation, you can ignore this email."
+    )
+    body_html = f"""
+    <p>Hello,</p>
+    <p><strong>{inviter_name}</strong> invited you to join <strong>{org.name}</strong> on Loan Officer AI.</p>
+    <p>
+        <strong>Login:</strong> <a href="{dashboard_url}">{dashboard_url}</a><br/>
+        <strong>Email:</strong> {invitee_email}<br/>
+        <strong>Temporary password:</strong> {temp_password}
+    </p>
+    <p>For security, please change your password after your first login.</p>
+    <p>If you did not expect this invitation, you can ignore this email.</p>
+    """
+    return {"subject": subject, "text": body_text, "html": body_html}
+
+
+@app.get("/org/users", response_model=Dict)
+async def list_org_users(
+    current_user: User = Depends(AuthAgent.get_current_user)
+):
+    """
+    Returns users for the authenticated user's organization.
+    """
+    if current_user.role not in ["ORG_ADMIN", "SUPER_ADMIN", "DEVELOPER"]:
+        raise HTTPException(status_code=HTTP_403_FORBIDDEN, detail="Insufficient privileges to view users.")
+
+    org_id = current_user.organization_id
+    org = Database.get_organization(org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    users = Database.list_users_by_org(org_id)
+    seat_limit = _resolve_user_limit(org)
+    seat_used = len(users)
+    can_add_users = True if seat_limit is None else seat_used < seat_limit
+
+    return {
+        "users": [_serialize_user(u) for u in users],
+        "seat_limit": seat_limit,
+        "seat_used": seat_used,
+        "can_add_users": can_add_users,
+        "plan": org.plan.value if hasattr(org.plan, 'value') else str(org.plan)
+    }
+
+
+@app.post("/org/users", response_model=Dict)
+async def create_org_user(
+    user_data: Dict = Body(...),
+    current_user: User = Depends(AuthAgent.get_current_user)
+):
+    """
+    Creates a new dashboard user within the current organization.
+    """
+    if current_user.role not in ["ORG_ADMIN", "SUPER_ADMIN", "DEVELOPER"]:
+        raise HTTPException(status_code=HTTP_403_FORBIDDEN, detail="Insufficient privileges to create users.")
+
+    target_org_id = current_user.organization_id
+    if current_user.role == "SUPER_ADMIN" and user_data.get("organization_id"):
+        target_org_id = user_data.get("organization_id")
+
+    org = Database.get_organization(target_org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    # Enforce seat limits for non-super admins
+    if current_user.role != "SUPER_ADMIN":
+        seat_limit = _resolve_user_limit(org)
+        if seat_limit is not None:
+            seat_used = len(Database.list_users_by_org(target_org_id))
+            if seat_used >= seat_limit:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "USER_LIMIT_REACHED",
+                        "message": "User limit reached for this organization.",
+                        "limit": seat_limit
+                    }
+                )
+
+    email = (user_data.get("email") or "").strip().lower()
+    full_name = (user_data.get("full_name") or "").strip()
+    requested_role = (user_data.get("role") or "OFFICER").strip().upper()
+
+    if not email or not full_name:
+        raise HTTPException(status_code=400, detail="Email and full_name are required.")
+
+    if Database.get_user_by_email(email):
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    allowed_roles = {"OFFICER", "AUDITOR", "VIEWER", "ORG_ADMIN", "DEVELOPER"}
+    if requested_role not in allowed_roles:
+        raise HTTPException(status_code=400, detail="Invalid role.")
+
+    if current_user.role == "ORG_ADMIN" and requested_role not in {"OFFICER", "AUDITOR", "VIEWER"}:
+        raise HTTPException(status_code=HTTP_403_FORBIDDEN, detail="ORG_ADMIN can only create OFFICER, AUDITOR, or VIEWER roles.")
+
+    if current_user.role == "DEVELOPER" and requested_role not in {"OFFICER", "AUDITOR", "VIEWER", "ORG_ADMIN"}:
+        raise HTTPException(status_code=HTTP_403_FORBIDDEN, detail="DEVELOPER role cannot assign that role.")
+
+    generated_password = secrets.token_urlsafe(10)
+    pwd_hash = AuthAgent.get_password_hash(generated_password)
+
+    # Create in Firebase Auth
+    firebase_uid = AuthAgent.create_firebase_user(
+        email=email,
+        password=generated_password,
+        display_name=full_name
+    )
+
+    new_user = User(
+        id=firebase_uid,
+        organization_id=target_org_id,
+        email=email,
+        password_hash=pwd_hash,
+        full_name=full_name,
+        role=UserRole(requested_role)
+    )
+
+    Database.save_user(new_user)
+    AuditAgent.log_event(
+        "USER_CREATED_BY_ORG_ADMIN",
+        current_user.email,
+        {"new_user_id": new_user.id, "org": target_org_id, "role": requested_role}
+    )
+
+    invite_payload = _build_invite_email(org, current_user, email, generated_password)
+    invite_status = EmailService.send_email(
+        to_email=email,
+        subject=invite_payload["subject"],
+        body_text=invite_payload["text"],
+        body_html=invite_payload["html"]
+    )
+    AuditAgent.log_event(
+        "USER_INVITE_SENT",
+        current_user.email,
+        {"email": email, "org": target_org_id, "status": invite_status.get("status"), "environment": invite_status.get("environment")}
+    )
+
+    invite_sent = invite_status.get("status") == "SENT" and invite_status.get("environment") == "production"
+    response = {
+        "user": _serialize_user(new_user),
+        "invite_sent": invite_sent,
+        "invite": invite_status
+    }
+    if not invite_sent:
+        response["initial_credentials"] = {
+            "email": email,
+            "password": generated_password
+        }
+    return response
+
+
+@app.post("/org/users/{user_id}/resend-invite", response_model=Dict)
+async def resend_org_user_invite(
+    user_id: str,
+    current_user: User = Depends(AuthAgent.get_current_user)
+):
+    """
+    Resends an invite by rotating the user's password and emailing a fresh temporary password.
+    """
+    if current_user.role not in ["ORG_ADMIN", "SUPER_ADMIN", "DEVELOPER"]:
+        raise HTTPException(status_code=HTTP_403_FORBIDDEN, detail="Insufficient privileges to resend invites.")
+
+    target_user = Database.get_user_by_id(user_id)
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if current_user.role != "SUPER_ADMIN" and target_user.organization_id != current_user.organization_id:
+        raise HTTPException(status_code=HTTP_403_FORBIDDEN, detail="Cross-organization access denied.")
+
+    org = Database.get_organization(target_user.organization_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    generated_password = secrets.token_urlsafe(10)
+    AuthAgent.update_firebase_user_password(target_user.id, generated_password)
+    target_user.password_hash = AuthAgent.get_password_hash(generated_password)
+    Database.save_user(target_user)
+
+    invite_payload = _build_invite_email(org, current_user, target_user.email, generated_password)
+    invite_status = EmailService.send_email(
+        to_email=target_user.email,
+        subject=invite_payload["subject"],
+        body_text=invite_payload["text"],
+        body_html=invite_payload["html"]
+    )
+    AuditAgent.log_event(
+        "USER_INVITE_RESENT",
+        current_user.email,
+        {"email": target_user.email, "org": target_user.organization_id, "status": invite_status.get("status"), "environment": invite_status.get("environment")}
+    )
+
+    invite_sent = invite_status.get("status") == "SENT" and invite_status.get("environment") == "production"
+    response = {
+        "user": _serialize_user(target_user),
+        "invite_sent": invite_sent,
+        "invite": invite_status
+    }
+    if not invite_sent:
+        response["initial_credentials"] = {
+            "email": target_user.email,
+            "password": generated_password
+        }
+    return response
+
+
+@app.get("/org/settings")
+async def get_org_settings(
+    current_user: User = Depends(AuthAgent.get_current_user)
+):
+    """
+    Returns the organization's settings (webhooks, flags).
     """
     org = Database.get_organization(current_user.organization_id)
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
-        
+
     return {
         "webhook_url": org.webhook_url,
         "webhook_secret": org.webhook_secret,
-        "feature_flags": org.feature_flags
+        "feature_flags": org.feature_flags or {}
     }
+
 
 @app.patch("/org/settings")
 async def update_org_settings(
@@ -1428,7 +2258,7 @@ async def upgrade_billing_plan(
         raise HTTPException(status_code=502, detail=f"Payment Gateway Error: {str(e)}")
     except Exception as e:
         import traceback
-        print(traceback.format_exc())
+        logger.info(traceback.format_exc())
         raise HTTPException(status_code=500, detail="Failed to initiate payment")
 
 @app.post("/billing/webhook/lipila", tags=["Billing"])
@@ -1480,6 +2310,47 @@ async def list_org_payments(current_user: User = Depends(AuthAgent.get_current_u
     payments = Database.list_payments(current_user.organization_id)
     return sorted(payments, key=lambda x: x.timestamp, reverse=True)
 
+@app.get("/billing/invoice/{payment_id}", tags=["Billing"])
+async def download_invoice(
+    payment_id: str,
+    current_user: User = Depends(AuthAgent.get_current_user)
+):
+    """
+    Downloads the PDF invoice for a specific payment.
+    Ensures the user belongs to the payment's organization.
+    """
+    payment = Database.get_payment(payment_id)
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment record not found")
+        
+    if payment.org_id != current_user.organization_id:
+        raise HTTPException(status_code=403, detail="Unauthorized to access this invoice")
+        
+    if not payment.invoice_id:
+        import secrets
+        payment.invoice_id = f"INV-{datetime.now().year}-{secrets.token_hex(3).upper()}"
+        payment.invoice_pdf_path = None # Force regeneration
+        Database.save_payment(payment)
+
+    if not payment.invoice_pdf_path or not os.path.exists(payment.invoice_pdf_path):
+        # Trigger regeneration if missing but record exists
+        from agents.invoice_agent import InvoiceAgent
+        org = Database.get_organization(payment.org_id)
+        if org:
+            try:
+                payment.invoice_pdf_path = InvoiceAgent.generate_invoice_pdf(org, payment)
+                Database.save_payment(payment)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to generate invoice PDF: {str(e)}")
+        else:
+            raise HTTPException(status_code=404, detail="Invoice PDF not found and organization missing")
+
+    return FileResponse(
+        path=payment.invoice_pdf_path,
+        filename=os.path.basename(payment.invoice_pdf_path),
+        media_type='application/pdf'
+    )
+
 # --- API KEY MANAGEMENT ---
 @app.get("/borrowers", response_model=List[Borrower])
 async def list_borrowers(user: AuthUser = Depends(AuthAgent.get_api_key)):
@@ -1526,41 +2397,89 @@ async def assessment_retrain(user: AuthUser = Depends(AuthAgent.get_api_key)):
         raise HTTPException(status_code=500, detail=f"Retraining failed: {str(e)}")
 
 @app.post("/loan/disburse", response_model=Loan)
-async def loan_disburse(assessment_id: str = Body(..., embed=True), user: AuthUser = Depends(AuthAgent.get_api_key)):
-    if user.role != "OFFICER":
-        raise HTTPException(status_code=403, detail="Officer access required")
+async def loan_disburse(assessment_id: str = Body(..., embed=True), user: User = Depends(get_dashboard_user)):
+    if user.role not in ["OFFICER", "ORG_ADMIN"]:
+        raise HTTPException(status_code=403, detail="Officer or Admin access required")
     
     assessment = Database.get_assessment(assessment_id)
     if not assessment:
         raise HTTPException(status_code=404, detail="Assessment not found")
     
-    if assessment.organization_id != user.organization_id:
+    if assessment.organization_id != user.organization_id and user.organization_id != "PLATFORM_OWNER":
         raise HTTPException(status_code=403, detail="Unauthorized access to assessment")
     
+    # Check if a loan already exists for this assessment
+    existing_loans = Database.list_loans(organization_id=assessment.organization_id)
+    for l in existing_loans:
+        if l.assessment_id == assessment_id:
+             return l # Idempotent
+
     loan = Loan(
         loan_id=f"LOAN-{uuid.uuid4().hex[:8].upper()}",
         assessment_id=assessment_id,
         borrower_id=assessment.borrower_id,
-        organization_id=user.organization_id,
+        organization_id=assessment.organization_id,
         amount=assessment.recommended_amount,
         interest_rate=assessment.recommended_interest_rate,
-        status=LoanStatus.ACTIVE
+        status=LoanStatus.PENDING_DISBURSEMENT
     )
     
     Database.save_loan(loan)
-    AuditAgent.log_event("LOAN_DISBURSED", user.role, {"loan_id": loan.loan_id, "amount": loan.amount, "org": user.organization_id})
+    AuditAgent.log_event("LOAN_CREATED_PENDING", user.role, {"loan_id": loan.loan_id, "amount": loan.amount, "org": assessment.organization_id})
     return loan
 
-@app.post("/loan/status")
-async def loan_status_update(loan_id: str = Body(..., embed=True), status: LoanStatus = Body(..., embed=True), user: AuthUser = Depends(AuthAgent.get_api_key)):
-    if user.role != "OFFICER":
-        raise HTTPException(status_code=403, detail="Officer access required")
+@app.post("/loan/confirm-disbursement")
+async def confirm_disbursement(
+    loan_id: str = Body(..., embed=True),
+    amount: float = Body(..., embed=True),
+    method: str = Body(..., embed=True),
+    reference: Optional[str] = Body(None, embed=True),
+    user: User = Depends(get_dashboard_user)
+):
+    if user.role not in ["OFFICER", "ORG_ADMIN"]:
+        raise HTTPException(status_code=403, detail="Officer or Admin access required")
     
     loan = Database.get_loan(loan_id)
     if not loan:
         raise HTTPException(status_code=404, detail="Loan not found")
     
-    if loan.organization_id != user.organization_id:
+    if loan.organization_id != user.organization_id and user.organization_id != "PLATFORM_OWNER":
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    if loan.status != LoanStatus.PENDING_DISBURSEMENT:
+        raise HTTPException(status_code=400, detail=f"Loan is in {loan.status} state, cannot disburse.")
+
+    loan.status = LoanStatus.DISBURSED
+    loan.disbursed_at = datetime.now()
+    loan.amount = amount # Allow slight adjustment if needed at point of sale
+    loan.disbursement_method = method
+    loan.disbursement_reference = reference
+    loan.disbursed_by = user.email
+    
+    Database.save_loan(loan)
+    AuditAgent.log_event("LOAN_DISBURSED_MANUAL", user.role, {
+        "loan_id": loan.loan_id, 
+        "amount": amount, 
+        "method": method,
+        "ref": reference
+    })
+    
+    return {"status": "SUCCESS", "loan_id": loan_id}
+
+@app.post("/loan/status")
+async def update_loan_status(
+    loan_id: str = Body(... , embed=True),
+    status: LoanStatus = Body(..., embed=True),
+    user: User = Depends(get_dashboard_user)
+):
+    if user.role not in ["OFFICER", "ORG_ADMIN"]:
+        raise HTTPException(status_code=403, detail="Officer or Admin access required")
+    
+    loan = Database.get_loan(loan_id)
+    if not loan:
+        raise HTTPException(status_code=404, detail="Loan not found")
+    
+    if loan.organization_id != user.organization_id and user.organization_id != "PLATFORM_OWNER":
         raise HTTPException(status_code=403, detail="Unauthorized access to loan")
     
     loan.status = status
@@ -1574,10 +2493,94 @@ async def loan_status_update(loan_id: str = Body(..., embed=True), status: LoanS
     return {"status": "SUCCESS", "loan_id": loan_id, "new_status": status}
 
 @app.get("/loans", response_model=List[Loan])
-async def list_loans(user: AuthUser = Depends(AuthAgent.get_api_key)):
-    if user.role != "OFFICER":
-        raise HTTPException(status_code=403, detail="Officer access required")
-    return Database.list_loans(organization_id=user.organization_id)
+async def list_loans(user: User = Depends(get_dashboard_user)):
+    if user.role not in ["OFFICER", "ORG_ADMIN", "AUDITOR", "SUPER_ADMIN", "DEVELOPER"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    org_id = user.organization_id if user.organization_id != "PLATFORM_OWNER" else None
+    return Database.list_loans(organization_id=org_id)
+
+@app.get("/loans/assessment/{assessment_id}", response_model=Optional[Loan])
+async def get_loan_by_assessment(assessment_id: str, user: User = Depends(get_dashboard_user)):
+    # Standard security check - platform admins can see everything
+    if user.role not in ["OFFICER", "ORG_ADMIN", "AUDITOR", "SUPER_ADMIN", "DEVELOPER"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    assessment = Database.get_assessment(assessment_id)
+    if not assessment:
+        return None
+        
+    # Security: Ensure user has access to this assessment's org
+    if user.organization_id != "PLATFORM_OWNER" and assessment.organization_id != user.organization_id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    # 1. Look for existing loan - check BOTH the specific org and ALL loans as fallback
+    # (Sometimes org IDs can be inconsistent in legacy data)
+    loans = Database.list_loans(organization_id=assessment.organization_id)
+    for l in loans:
+        if l.assessment_id == assessment_id:
+            return l
+            
+    # Fallback: Search all loans (in case of org mismatch)
+    all_loans = Database.list_loans()
+    for l in all_loans:
+        if l.assessment_id == assessment_id:
+            return l
+            
+    # 2. Self-healing: If assessment is approved but no loan exists, create one
+    is_approved = False
+    
+    # Check assessment decision
+    main_decision = str(assessment.decision).split('.')[-1].upper()
+    if main_decision == "APPROVE":
+        is_approved = True
+        
+    # Check metadata if exists (more authoritative)
+    if assessment.final_decision_metadata:
+        meta = assessment.final_decision_metadata
+        def get_val(obj, key):
+            if isinstance(obj, dict): return obj.get(key)
+            return getattr(obj, key, None)
+            
+        m_decision = get_val(meta, "officer_decision") or get_val(meta, "decision")
+        if m_decision:
+            m_decision_str = str(m_decision).split('.')[-1].upper()
+            is_approved = (m_decision_str == "APPROVE")
+
+    if is_approved:
+        try:
+            from models.loan import Loan, LoanStatus
+            import uuid
+            
+            # Extract values safely
+            meta = assessment.final_decision_metadata or {}
+            def get_val(obj, key):
+                if isinstance(obj, dict): return obj.get(key)
+                return getattr(obj, key, None)
+                
+            amount = get_val(meta, "final_amount") or assessment.recommended_amount
+            rate = get_val(meta, "final_interest_rate") or assessment.recommended_interest_rate
+            
+            new_loan = Loan(
+                loan_id=f"LOAN-{uuid.uuid4().hex[:8].upper()}",
+                assessment_id=assessment_id,
+                borrower_id=assessment.borrower_id,
+                organization_id=assessment.organization_id,
+                amount=float(amount) if amount else 0.0,
+                interest_rate=float(rate) if rate else 0.0,
+                status=LoanStatus.PENDING_DISBURSEMENT
+            )
+            Database.save_loan(new_loan)
+            # Re-read to confirm persistence
+            confirmed = Database.get_loan(new_loan.loan_id)
+            if not confirmed:
+                 logger.error(f"CRITICAL: Database failed to persist new loan {new_loan.loan_id}")
+                 
+            return new_loan
+        except Exception as e:
+            logger.error(f"DEBUG: Self-healing creation failed for {assessment_id}: {e}")
+                
+    return None
 
 @app.get("/platform/admin")
 async def get_platform_admin():
@@ -1649,7 +2652,7 @@ async def start_intake(
     
     # In a real app, save to DB here. For now, we simulate success.
     # We can print to console to show 'persistence'
-    print(f"📝 INTAKE CREATED: {borrower_id} for {intake_data['name']}")
+    logger.info(f"📝 INTAKE CREATED: {borrower_id} for {intake_data['name']}")
 
     return {
         "borrower_id": borrower_id,
@@ -1694,6 +2697,186 @@ async def get_feature_flags():
     import config
     
     return config.get_config_snapshot()
+
+@app.get("/policy/config")
+async def get_policy_config(current_user: User = Depends(AuthAgent.get_current_user)):
+    """
+    Returns policy studio values for the organization.
+    Values are stored per org for auditing. Defaults are provided if none exist.
+    """
+    from utils.policy_config import get_policy_for_org, get_policy_defaults
+
+    values, meta = get_policy_for_org(current_user.organization_id)
+    defaults = get_policy_defaults()
+
+    return {
+        "values": values,
+        "defaults": defaults,
+        "source": meta.get("source"),
+        "updated_at": meta.get("updated_at"),
+        "updated_by": meta.get("updated_by"),
+        "policy_version_id": meta.get("policy_version_id"),
+        "status": meta.get("status")
+    }
+
+@app.get("/policy/versions")
+async def list_policy_versions(
+    current_user: User = Depends(AuthAgent.get_current_user)
+):
+    """
+    Lists policy versions for the organization.
+    """
+    if current_user.role not in ["ORG_ADMIN", "SUPER_ADMIN", "DEVELOPER"]:
+        raise HTTPException(status_code=403, detail="Organization Admin access required.")
+    from utils.policy_config import list_policy_versions
+    return {
+        "versions": list_policy_versions(current_user.organization_id)
+    }
+
+
+@app.post("/policy/versions/draft")
+async def create_policy_draft(
+    payload: Dict[str, Any] = Body(default=None),
+    current_user: User = Depends(AuthAgent.get_current_user)
+):
+    """
+    Creates a draft policy version from the active policy.
+    """
+    if current_user.role not in ["ORG_ADMIN", "SUPER_ADMIN", "DEVELOPER"]:
+        raise HTTPException(status_code=403, detail="Organization Admin access required.")
+
+    from utils.policy_config import create_policy_draft, validate_policy_values
+    values = (payload or {}).get("values") or {}
+    if values:
+        validate_policy_values(values)
+    draft = create_policy_draft(current_user.organization_id, current_user.email, values)
+    AuditAgent.log_event("POLICY_DRAFT_CREATED", current_user.email, {
+        "org": current_user.organization_id,
+        "policy_version_id": draft.get("id")
+    })
+    return {"version": draft}
+
+
+@app.patch("/policy/versions/{version_id}")
+async def update_policy_draft(
+    version_id: str,
+    payload: Dict[str, Any] = Body(...),
+    current_user: User = Depends(AuthAgent.get_current_user)
+):
+    """
+    Updates a draft policy version.
+    """
+    if current_user.role not in ["ORG_ADMIN", "SUPER_ADMIN", "DEVELOPER"]:
+        raise HTTPException(status_code=403, detail="Organization Admin access required.")
+
+    from utils.policy_config import update_policy_draft, validate_policy_values
+    values = payload.get("values") or {}
+    if values:
+        validate_policy_values(values)
+    version = update_policy_draft(version_id, current_user.organization_id, current_user.email, values)
+    AuditAgent.log_event("POLICY_DRAFT_UPDATED", current_user.email, {
+        "org": current_user.organization_id,
+        "policy_version_id": version_id,
+        "updated_keys": list(values.keys())
+    })
+    return {"version": version}
+
+
+@app.post("/policy/versions/{version_id}/submit")
+async def submit_policy_version(
+    version_id: str,
+    current_user: User = Depends(AuthAgent.get_current_user)
+):
+    """
+    Submits a policy version for approval.
+    """
+    if current_user.role not in ["ORG_ADMIN", "SUPER_ADMIN", "DEVELOPER"]:
+        raise HTTPException(status_code=403, detail="Organization Admin access required.")
+    from utils.policy_config import set_policy_status
+    version = set_policy_status(version_id, current_user.organization_id, "SUBMITTED", current_user.email)
+    AuditAgent.log_event("POLICY_VERSION_SUBMITTED", current_user.email, {
+        "org": current_user.organization_id,
+        "policy_version_id": version_id
+    })
+    return {"version": version}
+
+
+@app.post("/policy/versions/{version_id}/approve")
+async def approve_policy_version(
+    version_id: str,
+    current_user: User = Depends(AuthAgent.get_current_user)
+):
+    """
+    Approves a submitted policy version.
+    """
+    if current_user.role not in ["ORG_ADMIN", "SUPER_ADMIN", "DEVELOPER"]:
+        raise HTTPException(status_code=403, detail="Organization Admin access required.")
+    from utils.policy_config import set_policy_status
+    version = set_policy_status(version_id, current_user.organization_id, "APPROVED", current_user.email)
+    AuditAgent.log_event("POLICY_VERSION_APPROVED", current_user.email, {
+        "org": current_user.organization_id,
+        "policy_version_id": version_id
+    })
+    return {"version": version}
+
+
+@app.post("/policy/versions/{version_id}/activate")
+async def activate_policy_version(
+    version_id: str,
+    current_user: User = Depends(AuthAgent.get_current_user)
+):
+    """
+    Activates an approved policy version.
+    """
+    if current_user.role not in ["ORG_ADMIN", "SUPER_ADMIN", "DEVELOPER"]:
+        raise HTTPException(status_code=403, detail="Organization Admin access required.")
+    from utils.policy_config import activate_policy_version
+    version = activate_policy_version(version_id, current_user.organization_id, current_user.email)
+    AuditAgent.log_event("POLICY_VERSION_ACTIVATED", current_user.email, {
+        "org": current_user.organization_id,
+        "policy_version_id": version_id
+    })
+    return {"version": version}
+
+@app.post("/policy/config/update")
+async def update_policy_config(
+    payload: Dict[str, Any] = Body(...),
+    current_user: User = Depends(AuthAgent.get_current_user)
+):
+    """
+    Updates runtime policy configuration (ORG_ADMIN or SUPER_ADMIN).
+    Changes are applied in-memory and recorded for audit.
+    """
+    if current_user.role not in ["ORG_ADMIN", "SUPER_ADMIN", "DEVELOPER"]:
+        raise HTTPException(status_code=403, detail="Organization Admin access required.")
+
+    from utils.policy_config import get_policy_defaults, validate_policy_values, create_policy_draft, activate_policy_version
+
+    defaults = get_policy_defaults()
+    values = payload.get("values") or {}
+    merged = {**defaults, **values}
+    try:
+        validate_policy_values(merged)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    draft = create_policy_draft(current_user.organization_id, current_user.email, merged)
+    version = activate_policy_version(draft.get("id"), current_user.organization_id, current_user.email)
+
+    AuditAgent.log_event("POLICY_CONFIG_UPDATED", current_user.email, {
+        "org": current_user.organization_id,
+        "updated_keys": list(values.keys()),
+        "policy_version_id": version.get("id")
+    })
+
+    return {
+        "values": version.get("values"),
+        "source": "versioned",
+        "updated_at": version.get("updated_at"),
+        "updated_by": version.get("updated_by"),
+        "policy_version_id": version.get("id"),
+        "status": version.get("status")
+    }
 
 @app.post("/config/flags/update")
 async def update_feature_flags(
@@ -1772,6 +2955,11 @@ async def record_officer_action(
         abs((final_amount or 0) - (assessment.recommended_amount or 0)) > 0.01 or
         final_duration != assessment.recommended_duration_days
     )
+    if is_override:
+        if not action_data.get("officer_notes") or not str(action_data.get("officer_notes")).strip():
+            raise HTTPException(status_code=400, detail="Override requires officer_notes for audit compliance.")
+        if not action_data.get("override_reason_code") or not str(action_data.get("override_reason_code")).strip():
+            raise HTTPException(status_code=400, detail="Override requires override_reason_code for audit compliance.")
 
     # 4. Create Action Metadata
     try:
@@ -1785,6 +2973,7 @@ async def record_officer_action(
             "final_duration_days": final_duration,
             "final_interest_rate": final_rate,
             "officer_notes": action_data.get("officer_notes"),
+            "override_reason_code": action_data.get("override_reason_code"),
             "borrower_message": action_data.get("borrower_message"),
             "communication_channel": action_data.get("communication_channel", CommChannel.NONE),
             "created_at": current_time,
@@ -1810,12 +2999,29 @@ async def record_officer_action(
     assessment.final_decision_metadata = action
     Database.save_assessment(assessment)
 
+    # 6.5 Create Loan Record if Approved (Pending Disbursement)
+    if officer_decision == "APPROVE":
+        try:
+            loan = Loan(
+                loan_id=f"LOAN-{uuid.uuid4().hex[:8].upper()}",
+                assessment_id=assessment_id,
+                borrower_id=assessment.borrower_id,
+                organization_id=user.organization_id,
+                amount=final_amount,
+                interest_rate=final_rate,
+                status=LoanStatus.PENDING_DISBURSEMENT
+            )
+            Database.save_loan(loan)
+        except Exception as loan_err:
+             logger.error(f"WARNING: Failed to auto-create loan record: {loan_err}")
+
     # 7. Audit
     client_ip = request.client.host if request and request.client else "unknown"
     AuditAgent.log_event("FINAL_HUMAN_DECISION_SEALED", user.email, {
         "assessment_id": assessment_id,
         "decision": officer_decision,
         "is_override": is_override,
+        "override_reason_code": action_data.get("override_reason_code"),
         "ip": client_ip,
         "org": user.organization_id
     })
@@ -2016,7 +3222,14 @@ async def list_decision_counterfactuals(
     if not borrower:
         raise HTTPException(status_code=404, detail="Borrower not found")
 
-    counterfactuals = DecisionCounterfactualAgent.get_or_compute(assessment, borrower, force=False)
+    from utils.policy_config import get_policy_for_org
+    from utils.policy_context import set_policy_context, reset_policy_context
+    policy_values, _ = get_policy_for_org(assessment.organization_id)
+    token = set_policy_context(policy_values)
+    try:
+        counterfactuals = DecisionCounterfactualAgent.get_or_compute(assessment, borrower, force=False)
+    finally:
+        reset_policy_context(token)
     AuditAgent.log_event("DECISION_COUNTERFACTUALS_VIEWED", user.email, {
         "decision_id": decision_id,
         "org": user.organization_id
@@ -2044,7 +3257,14 @@ async def recompute_decision_counterfactuals(
     if not borrower:
         raise HTTPException(status_code=404, detail="Borrower not found")
 
-    counterfactuals = DecisionCounterfactualAgent.get_or_compute(assessment, borrower, force=True)
+    from utils.policy_config import get_policy_for_org
+    from utils.policy_context import set_policy_context, reset_policy_context
+    policy_values, _ = get_policy_for_org(assessment.organization_id)
+    token = set_policy_context(policy_values)
+    try:
+        counterfactuals = DecisionCounterfactualAgent.get_or_compute(assessment, borrower, force=True)
+    finally:
+        reset_policy_context(token)
     AuditAgent.log_event("DECISION_COUNTERFACTUALS_RECOMPUTED", user.email, {
         "decision_id": decision_id,
         "org": user.organization_id
@@ -2065,6 +3285,59 @@ async def get_assessment_sms_logs(
         raise HTTPException(status_code=403, detail="Unauthorized")
         
     return Database.list_sms_logs(assessment_id)
+
+
+@app.get("/assessment/{assessment_id}/follow-ups", response_model=List[FollowUpTask])
+async def list_follow_up_tasks(
+    assessment_id: str,
+    user: User = Depends(get_dashboard_user)
+):
+    assessment = Database.get_assessment(assessment_id)
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    if user.organization_id != "PLATFORM_OWNER" and assessment.organization_id != user.organization_id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    return Database.list_follow_up_tasks(
+        organization_id=assessment.organization_id,
+        assessment_id=assessment_id
+    )
+
+
+@app.post("/assessment/{assessment_id}/follow-ups", response_model=FollowUpTask)
+async def create_follow_up_task(
+    assessment_id: str,
+    payload: Dict[str, Any] = Body(...),
+    user: User = Depends(get_dashboard_user)
+):
+    assessment = Database.get_assessment(assessment_id)
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    if user.organization_id != "PLATFORM_OWNER" and assessment.organization_id != user.organization_id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    note = (payload.get("note") or "").strip()
+    if not note:
+        raise HTTPException(status_code=400, detail="Follow-up note is required")
+    due_date = payload.get("due_date")
+
+    task = FollowUpTask(
+        task_id=f"FUP-{uuid.uuid4().hex[:10].upper()}",
+        assessment_id=assessment_id,
+        borrower_id=assessment.borrower_id,
+        organization_id=assessment.organization_id,
+        note=note,
+        due_date=due_date,
+        status=FollowUpStatus.OPEN,
+        created_by=user.email or user.id
+    )
+    Database.save_follow_up_task(task)
+    AuditAgent.log_event("FOLLOW_UP_TASK_CREATED", user.email, {
+        "assessment_id": assessment_id,
+        "task_id": task.task_id,
+        "org": assessment.organization_id
+    })
+    return task
 
 # ============================================================================
 # DOCUMENT UPLOAD ENDPOINT (For Testing Behavioral Intelligence)
@@ -2100,11 +3373,17 @@ async def upload_transaction_document(
     - Risk assessment with behavioral intelligence
     """
     import io
+    policy_token = None
     try:
         # Verify borrower exists
         borrower = Database.get_borrower(borrower_id)
         if not borrower:
             raise HTTPException(status_code=404, detail="Borrower not found")
+
+        from utils.policy_config import get_policy_for_org
+        from utils.policy_context import set_policy_context
+        policy_values, _ = get_policy_for_org(borrower.organization_id)
+        policy_token = set_policy_context(policy_values)
         
         # Read file content
         content = await file.read()
@@ -2247,13 +3526,13 @@ async def upload_transaction_document(
                 "doc_type": extraction_result.document_type
             },
             "behavioral_analysis": behavioral_results,
-            "risk_assessment": {
+            "risk_assessment": augment_assessment_payload({
                 "risk_score": risk_results["risk_score"],
                 "risk_level": risk_results["risk_level"],
                 "decision": decision_results["decision"],
                 "recommended_amount": decision_results["recommended_amount"],
                 "recommended_interest_rate": decision_results["recommended_interest_rate"]
-            },
+            }),
             "explanation": explanation
         }
         
@@ -2261,6 +3540,10 @@ async def upload_transaction_document(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+    finally:
+        if policy_token is not None:
+            from utils.policy_context import reset_policy_context
+            reset_policy_context(policy_token)
 
 # ============================================================================
 # SAFE ALTERNATIVE DATA PIPELINE (Pilot Interface)
@@ -2296,11 +3579,17 @@ async def process_document_upload(borrower_id: str, file: UploadFile):
     
     Supported: PDF (Zanaco), CSV
     """
+    policy_token = None
     try:
         # 1. Validation
         borrower = Database.get_borrower(borrower_id)
         if not borrower:
             raise HTTPException(status_code=404, detail="Borrower not found")
+
+        from utils.policy_config import get_policy_for_org
+        from utils.policy_context import set_policy_context, reset_policy_context
+        policy_values, _ = get_policy_for_org(borrower.organization_id)
+        policy_token = set_policy_context(policy_values)
             
         content = await file.read()
         
@@ -2325,7 +3614,7 @@ async def process_document_upload(borrower_id: str, file: UploadFile):
                     "status": "WARNING", 
                     "message": "No transactions extracted. Check file format.",
                     "document_type": extraction_result.document_type,
-                    "quality_score": extraction_result.quality_score,
+                    "quality_score": getattr(extraction_result, "quality_score", None),
                     "warnings": extraction_result.warnings
                 }
             )
@@ -2350,12 +3639,15 @@ async def process_document_upload(borrower_id: str, file: UploadFile):
             "status": "SUCCESS",
             "data_source": "USER_UPLOADED_STATEMENT",
             "document_type": extraction_result.document_type,
-            "quality_score": extraction_result.quality_score,
+            "quality_score": getattr(extraction_result, "quality_score", None),
             "transaction_count": len(transactions),
             "risk_assessment": {
                 "score": risk_results["risk_score"],
                 "level": risk_results["risk_level"],
-                "decision": decision_results["decision"]
+                "decision": decision_results["decision"],
+                "decision_legacy": decision_to_legacy(decision_results["decision"]),
+                "risk_score_percent": round(risk_results["risk_score"] * 100.0, 1),
+                "risk_score_scale": "0-1"
             },
             "behavioral_insights": behavioral_results,
             "explanation": explanation,
@@ -2368,6 +3660,458 @@ async def process_document_upload(borrower_id: str, file: UploadFile):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Pipeline Error: {str(e)}")
+    finally:
+        if policy_token is not None:
+            from utils.policy_context import reset_policy_context
+            reset_policy_context(policy_token)
+
+# ============================================================================
+# SMS / USSD Borrower Journeys (Small MFI Onboarding)
+# ============================================================================
+
+@app.post("/channels/sms/inbound")
+async def sms_inbound(payload: Dict[str, Any] = Body(...), user: AuthUser = Depends(AuthAgent.get_api_key)):
+    """
+    Inbound SMS webhook for borrower journeys.
+    Expected payload fields: phone, text (provider-agnostic).
+    """
+    raw_phone = payload.get("phone") or payload.get("from") or payload.get("msisdn")
+    text = (payload.get("text") or payload.get("message") or "").strip()
+    if not raw_phone:
+        raise HTTPException(status_code=400, detail="Missing phone number")
+
+    phone = normalize_phone(raw_phone)
+    session_id = f"SMS:{user.organization_id}:{phone}"
+    session = Database.get_channel_session(session_id) or {
+        "session_id": session_id,
+        "channel": "SMS",
+        "organization_id": user.organization_id,
+        "phone": phone,
+        "step": "CONSENT",
+        "data": {},
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+
+    step = session.get("step", "CONSENT")
+    data = session.get("data", {})
+    lower = text.lower()
+
+    if lower in ["start", "loan", "hi", "hello"]:
+        step = "CONSENT"
+
+    if step == "CONSENT":
+        if lower not in ["yes", "y", "agree"]:
+            reply = sms_next_prompt("CONSENT")
+            SMSService.send_sms(phone, reply)
+            session.update({"step": "CONSENT", "updated_at": datetime.now(timezone.utc).isoformat()})
+            Database.save_channel_session(session_id, session)
+            return {"status": "OK", "message": "Consent requested"}
+        if not session.get("consent_event_id"):
+            consent_event_id = f"CNS-{uuid.uuid4().hex[:10].upper()}"
+            consent_time = datetime.now(timezone.utc).isoformat()
+            Database.save_consent_event(consent_event_id, {
+                "consent_event_id": consent_event_id,
+                "organization_id": user.organization_id,
+                "channel": "SMS",
+                "phone": phone,
+                "session_id": session_id,
+                "consent_text": text,
+                "consent_timestamp": consent_time
+            })
+            session.update({
+                "consent_event_id": consent_event_id,
+                "consent_timestamp": consent_time,
+                "consent_channel": "SMS"
+            })
+        step = "NAME"
+        reply = sms_next_prompt(step)
+    elif step == "NAME":
+        data["name"] = clean_name(text)
+        step = "INCOME"
+        reply = sms_next_prompt(step)
+    elif step == "INCOME":
+        val = parse_float_or_none(text)
+        if val is None:
+            reply = "Invalid income. Please enter a number."
+        else:
+            data["monthly_income"] = val
+            step = "EXPENSES"
+            reply = sms_next_prompt(step)
+    elif step == "EXPENSES":
+        val = parse_float_or_none(text)
+        if val is None:
+            reply = "Invalid expenses. Please enter a number."
+        else:
+            data["monthly_expenses"] = val
+            step = "DEBT"
+            reply = sms_next_prompt(step)
+    elif step == "DEBT":
+        val = parse_float_or_none(text)
+        if val is None:
+            reply = "Invalid debt amount. Please enter a number."
+        else:
+            data["existing_debt"] = val
+            step = "AMOUNT"
+            reply = sms_next_prompt(step)
+    elif step == "AMOUNT":
+        val = parse_float_or_none(text)
+        if val is None:
+            reply = "Invalid amount. Please enter a number."
+        else:
+            data["loan_amount_requested"] = val
+            step = "PURPOSE"
+            reply = sms_next_prompt(step)
+    elif step == "PURPOSE":
+        data["loan_purpose"] = text or "Not specified"
+        step = "DONE"
+        reply = sms_next_prompt(step)
+    else:
+        reply = "Reply START to begin a new assessment."
+
+    # Persist session
+    session.update({"step": step, "data": data, "updated_at": datetime.now(timezone.utc).isoformat()})
+    Database.save_channel_session(session_id, session)
+
+    if step == "DONE":
+        # Create borrower and run assessment
+        borrower_id = f"BOR-{uuid.uuid4().hex[:8].upper()}"
+        borrower = Borrower(
+            id=borrower_id,
+            organization_id=user.organization_id,
+            name=data.get("name", "Borrower"),
+            phone=phone,
+            employment_type="trader",
+            monthly_income=data.get("monthly_income", 0.0),
+            monthly_expenses=data.get("monthly_expenses", 0.0),
+            existing_debt=data.get("existing_debt", 0.0),
+            loan_amount_requested=data.get("loan_amount_requested", 0.0),
+            loan_purpose=data.get("loan_purpose", "Not specified")
+        )
+        Database.save_borrower(borrower)
+        assessment = await _run_assessment_core(
+            borrower=borrower,
+            requested_duration_days=30,
+            assessment_source="SMS",
+            consent_event_id=session.get("consent_event_id"),
+            consent_channel=session.get("consent_channel"),
+            consent_timestamp=session.get("consent_timestamp")
+        )
+        Database.save_assessment(assessment)
+
+        decision = str(assessment.decision)
+        upload_link = "https://yourdomain.com/borrower/u"
+        if decision in ["APPROVE", "CONDITIONAL"]:
+            out = (
+                f"{decision}: Approved for {borrower.loan_amount_requested:.0f}. "
+                f"Recommended {assessment.recommended_amount:.0f} at {assessment.recommended_interest_rate}% for "
+                f"{assessment.recommended_duration_days or 30} days. "
+                f"To strengthen your profile, upload documents: {upload_link}"
+            )
+        elif decision == "REFER":
+            out = f"We need more information. Upload documents here: {upload_link}"
+        else:
+            out = f"Not approved at this time. You may reapply after 30 days. Upload documents to improve eligibility: {upload_link}"
+
+        SMSService.send_sms(phone, out)
+        session.update({"assessment_id": assessment.assessment_id})
+        Database.save_channel_session(session_id, session)
+        return {"status": "OK", "message": "Assessment completed", "assessment_id": assessment.assessment_id}
+
+    # Send next prompt
+    SMSService.send_sms(phone, reply)
+    return {"status": "OK", "message": "Step updated", "next": step}
+
+
+@app.post("/channels/ussd")
+async def ussd_inbound(payload: Dict[str, Any] = Body(...), user: AuthUser = Depends(AuthAgent.get_api_key)):
+    """
+    Inbound USSD webhook (provider-agnostic).
+    Expects: sessionId, phoneNumber, text (USSD input chain).
+    """
+    session_id_raw = payload.get("sessionId") or payload.get("session_id") or payload.get("session")
+    raw_phone = payload.get("phoneNumber") or payload.get("phone") or payload.get("msisdn")
+    full_text = (payload.get("text") or "").strip()
+    if not session_id_raw or not raw_phone:
+        raise HTTPException(status_code=400, detail="Missing sessionId or phoneNumber")
+
+    phone = normalize_phone(raw_phone)
+    session_id = f"USSD:{user.organization_id}:{session_id_raw}"
+    session = Database.get_channel_session(session_id) or {
+        "session_id": session_id,
+        "channel": "USSD",
+        "organization_id": user.organization_id,
+        "phone": phone,
+        "step": "CONSENT",
+        "data": {},
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+
+    last_input = full_text.split("*")[-1] if full_text else ""
+    step = session.get("step", "CONSENT")
+    data = session.get("data", {})
+
+    if step == "CONSENT":
+        if not last_input:
+            msg = "CON Welcome to Loan Officer AI\n1. Agree & Continue\n2. Exit"
+            Database.save_channel_session(session_id, session)
+            return PlainTextResponse(msg)
+        if last_input not in ["1", "yes", "YES", "Y"]:
+            msg = "END Thank you."
+            Database.save_channel_session(session_id, session)
+            return PlainTextResponse(msg)
+        if not session.get("consent_event_id"):
+            consent_event_id = f"CNS-{uuid.uuid4().hex[:10].upper()}"
+            consent_time = datetime.now(timezone.utc).isoformat()
+            Database.save_consent_event(consent_event_id, {
+                "consent_event_id": consent_event_id,
+                "organization_id": user.organization_id,
+                "channel": "USSD",
+                "phone": phone,
+                "session_id": session_id,
+                "consent_text": last_input,
+                "consent_timestamp": consent_time
+            })
+            session.update({
+                "consent_event_id": consent_event_id,
+                "consent_timestamp": consent_time,
+                "consent_channel": "USSD"
+            })
+        step = "NAME"
+        msg = "CON Enter full name:"
+    elif step == "NAME":
+        data["name"] = clean_name(last_input)
+        step = "INCOME"
+        msg = "CON Monthly income (numbers only):"
+    elif step == "INCOME":
+        val = parse_float_or_none(last_input)
+        if val is None:
+            msg = "CON Invalid income. Enter monthly income:"
+        else:
+            data["monthly_income"] = val
+            step = "EXPENSES"
+            msg = "CON Monthly expenses (numbers only):"
+    elif step == "EXPENSES":
+        val = parse_float_or_none(last_input)
+        if val is None:
+            msg = "CON Invalid expenses. Enter monthly expenses:"
+        else:
+            data["monthly_expenses"] = val
+            step = "DEBT"
+            msg = "CON Existing debt (numbers only, 0 if none):"
+    elif step == "DEBT":
+        val = parse_float_or_none(last_input)
+        if val is None:
+            msg = "CON Invalid debt. Enter existing debt:"
+        else:
+            data["existing_debt"] = val
+            step = "AMOUNT"
+            msg = "CON Requested loan amount:"
+    elif step == "AMOUNT":
+        val = parse_float_or_none(last_input)
+        if val is None:
+            msg = "CON Invalid amount. Enter loan amount:"
+        else:
+            data["loan_amount_requested"] = val
+            step = "PURPOSE"
+            msg = "CON Loan purpose:"
+    elif step == "PURPOSE":
+        data["loan_purpose"] = last_input or "Not specified"
+        step = "DONE"
+        msg = "END Thank you. Processing your assessment."
+    else:
+        msg = "END Session ended."
+
+    session.update({"step": step, "data": data, "updated_at": datetime.now(timezone.utc).isoformat()})
+    Database.save_channel_session(session_id, session)
+
+    if step == "DONE":
+        borrower_id = f"BOR-{uuid.uuid4().hex[:8].upper()}"
+        borrower = Borrower(
+            id=borrower_id,
+            organization_id=user.organization_id,
+            name=data.get("name", "Borrower"),
+            phone=phone,
+            employment_type="trader",
+            monthly_income=data.get("monthly_income", 0.0),
+            monthly_expenses=data.get("monthly_expenses", 0.0),
+            existing_debt=data.get("existing_debt", 0.0),
+            loan_amount_requested=data.get("loan_amount_requested", 0.0),
+            loan_purpose=data.get("loan_purpose", "Not specified")
+        )
+        Database.save_borrower(borrower)
+        assessment = await _run_assessment_core(
+            borrower=borrower,
+            requested_duration_days=30,
+            assessment_source="USSD",
+            consent_event_id=session.get("consent_event_id"),
+            consent_channel=session.get("consent_channel"),
+            consent_timestamp=session.get("consent_timestamp")
+        )
+        Database.save_assessment(assessment)
+        session.update({"assessment_id": assessment.assessment_id})
+        Database.save_channel_session(session_id, session)
+
+    return PlainTextResponse(msg)
+# ============================================================================
+# ASYNC DOCUMENT INGESTION (Robust, Idempotent, Webhook-Ready)
+# ============================================================================
+
+async def _run_document_ingestion_job(
+    job_id: str,
+    borrower_id: str,
+    org_id: str,
+    filename: str,
+    content: bytes
+):
+    job = Database.get_ingestion_job(job_id) or {}
+    job.update({
+        "status": "PROCESSING",
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    })
+    Database.save_ingestion_job(job_id, job)
+
+    try:
+        borrower = Database.get_borrower(borrower_id)
+        if not borrower:
+            raise ValueError("Borrower not found for ingestion job.")
+
+        parser = TransactionParser()
+        extraction_result = parser.parse(content, filename)
+        transactions = extraction_result.transactions
+
+        if not transactions:
+            job.update({
+                "status": "FAILED",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "error": "No transactions extracted.",
+                "warnings": extraction_result.warnings,
+                "document_type": str(extraction_result.document_type),
+                "quality_score": extraction_result.quality_score
+            })
+            Database.save_ingestion_job(job_id, job)
+            org = Database.get_organization(org_id)
+            WebhookService.send_event(org, "document.ingestion.failed", job)
+            return
+
+        # Behavioral analysis + full assessment
+        from agents.behavioral_agent_v2 import BehavioralAgentV2
+        behavioral_results = BehavioralAgentV2.analyze_transactions(transactions)
+
+        doc_info = {
+            "document_type": str(extraction_result.document_type),
+            "quality_score": extraction_result.quality_score,
+            "warnings": extraction_result.warnings,
+            "source": "USER_UPLOADED_STATEMENT",
+            "ingestion_job_id": job_id
+        }
+        assessment = await _run_assessment_core(
+            borrower=borrower,
+            requested_duration_days=30,
+            external_behavioral_results=behavioral_results,
+            statement_summary=(
+                extraction_result.bank_statement_summary
+                or extraction_result.payslip_summary
+                or extraction_result.nrc_summary
+            ),
+            assessment_source="ASYNC_INGEST",
+            data_quality_score=extraction_result.quality_score,
+            document_info=doc_info
+        )
+
+        assessment.metrics = assessment.metrics or {}
+        assessment.metrics["document_summaries"] = build_document_summaries([extraction_result])
+        if extraction_result.bank_statement_summary:
+            assessment.metrics["summary_profile"] = extraction_result.bank_statement_summary.summary_profile
+        elif extraction_result.payslip_summary:
+            assessment.metrics["summary_profile"] = extraction_result.payslip_summary.summary_profile
+        elif extraction_result.nrc_summary:
+            assessment.metrics["summary_profile"] = extraction_result.nrc_summary.summary_profile
+
+        Database.save_assessment(assessment)
+
+        job.update({
+            "status": "COMPLETED",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "document_type": str(extraction_result.document_type),
+            "quality_score": extraction_result.quality_score,
+            "transaction_count": len(transactions),
+            "assessment_id": assessment.assessment_id,
+            "decision": str(assessment.decision),
+            "risk_score": assessment.risk_score
+        })
+        Database.save_ingestion_job(job_id, job)
+
+        org = Database.get_organization(org_id)
+        WebhookService.send_event(org, "document.ingestion.completed", job)
+        WebhookService.send_event(org, "assessment.completed", augment_assessment_payload(assessment.model_dump()))
+    except Exception as e:
+        job.update({
+            "status": "FAILED",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "error": str(e)
+        })
+        Database.save_ingestion_job(job_id, job)
+        org = Database.get_organization(org_id)
+        WebhookService.send_event(org, "document.ingestion.failed", job)
+
+
+@app.post("/documents/upload-async", tags=["Alternative Data"])
+async def documents_upload_async(
+    borrower_id: str = Form(...),
+    file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = None,
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+    user: AuthUser = Depends(AuthAgent.get_api_key)
+):
+    """
+    Async document ingestion. Returns a job_id immediately and processes in background.
+    """
+    borrower = Database.get_borrower(borrower_id)
+    if not borrower or borrower.organization_id != user.organization_id:
+        raise HTTPException(status_code=404, detail="Borrower not found.")
+
+    if idempotency_key:
+        existing = Database.get_ingestion_job_by_idempotency_key(user.organization_id, idempotency_key)
+        if existing:
+            return existing
+
+    job_id = f"JOB-{uuid.uuid4().hex[:10].upper()}"
+    content = await file.read()
+
+    job = {
+        "job_id": job_id,
+        "borrower_id": borrower_id,
+        "organization_id": user.organization_id,
+        "status": "PENDING",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "filename": file.filename,
+        "idempotency_key": idempotency_key
+    }
+    Database.save_ingestion_job(job_id, job)
+
+    if background_tasks is not None:
+        background_tasks.add_task(
+            _run_document_ingestion_job,
+            job_id,
+            borrower_id,
+            user.organization_id,
+            file.filename,
+            content
+        )
+
+    return job
+
+
+@app.get("/documents/upload-status/{job_id}", tags=["Alternative Data"])
+async def documents_upload_status(
+    job_id: str,
+    user: AuthUser = Depends(AuthAgent.get_api_key)
+):
+    job = Database.get_ingestion_job(job_id)
+    if not job or job.get("organization_id") != user.organization_id:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return job
 
 # ============================================================================
 # B2B DASHBOARD ENDPOINTS (PARTNER CONSOLE)
@@ -2378,21 +4122,21 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     """
     Login endpoint for Dashboard Users (JWT).
     """
-    print(f"[LOGIN] ATTEMPT: {form_data.username}")
+    logger.info(f"[LOGIN] ATTEMPT: {form_data.username}")
     user = await AuthAgent.authenticate_user(form_data.username, form_data.password)
     if not user:
-        print(f"[LOGIN] FAILED: auth_agent returned None for {form_data.username}")
+        logger.error(f"[LOGIN] FAILED: auth_agent returned None for {form_data.username}")
         raise HTTPException(
             status_code=HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    print(f"✅ LOGIN SUCCESS: {user.email} ({user.role})")
+    logger.info(f"✅ LOGIN SUCCESS: {user.email} ({user.role})")
     
     # 3. Create JWT
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     token_data = {"sub": user.email, "role": str(user.role.value if hasattr(user.role, 'value') else user.role), "org": str(user.organization_id)}
-    print(f"[LOGIN] Creating token for: {token_data}")
+    logger.info(f"[LOGIN] Creating token for: {token_data}")
     access_token = AuthAgent.create_access_token(
         data=token_data,
         expires_delta=access_token_expires
@@ -2429,7 +4173,7 @@ async def read_users_me(request: Request):
     except Exception as e:
         import traceback
         error_detail = f"Auth processing failed: {str(e)}"
-        print(f"[AUTH/ME ERROR] {error_detail}")
+        logger.error(f"[AUTH/ME ERROR] {error_detail}")
         traceback.print_exc()
         raise HTTPException(
             status_code=500,
@@ -2839,4 +4583,5 @@ if __name__ == "__main__":
     port = 8000
     if len(sys.argv) > 2 and sys.argv[1] == "--port":
         port = int(sys.argv[2])
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # Use 'api:app' string for reload support
+    uvicorn.run("api:app", host="0.0.0.0", port=port, reload=True)

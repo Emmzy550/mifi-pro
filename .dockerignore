@@ -13,9 +13,17 @@ ENV/
 env/
 
 # Exclude frontend build artifacts
-frontend/
-assets/
-static/
+frontend/node_modules/
+frontend/src/
+frontend/public/
+frontend/.gitignore
+frontend/index.html
+frontend/postcss.config.js
+frontend/tailwind.config.js
+frontend/tsconfig.json
+frontend/tsconfig.node.json
+frontend/vite.config.ts
+frontend/README.md
 
 # Exclude test files
 tests/
@@ -43,11 +51,14 @@ docs/
 *.md
 README.md
 
-# Exclude HTML/CSS/JS files (not needed for backend)
+# Exclude HTML/CSS/JS files (not needed for backend, EXCEPT in dist)
 *.html
 *.css
 *.js
 *.json
+!frontend/dist/**/*.html
+!frontend/dist/**/*.css
+!frontend/dist/**/*.js
 !ml_models/*.json
 
 # Exclude logs and temp files
@@ -59,9 +70,9 @@ usage_*.json
 test_output.json
 synthetic_transactions.json
 
-# Exclude secrets
-serviceAccountKey.json
-.env
+# Exclude secrets (but keep serviceAccountKey.json for Firebase Admin SDK)
+# serviceAccountKey.json  # REQUIRED for Firebase - included in image
+.env  # Environment variables set via Cloud Run
 .firebaserc
 firebase.json
 

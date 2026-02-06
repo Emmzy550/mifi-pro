@@ -1,3 +1,5 @@
+import logging
+logger = logging.getLogger(__name__)
 
 import uuid
 import secrets
@@ -10,6 +12,7 @@ from models.payment import Payment, PaymentGateway, PaymentStatus as AppPaymentS
 from utils.db import Database
 from pricing_config import PLAN_CONFIG
 from agents.audit_agent import AuditAgent
+from agents.invoice_agent import InvoiceAgent
 
 class GatewayError(Exception):
     """Custom exception for external payment gateway failures."""
@@ -52,7 +55,7 @@ class PaymentAgent:
         phone = data.get("phone_number")
         if not phone:
             raise ValueError("Phone number required for Mobile Money")
-        print(f"DEBUG: RAW PHONE INPUT: {phone}")
+        logger.debug(f"DEBUG: RAW PHONE INPUT: {phone}")
 
         from config import LIPILA_SECRET_KEY, LIPILA_BASE_URL, USD_TO_ZMW_RATE
         if not LIPILA_SECRET_KEY:
@@ -89,15 +92,15 @@ class PaymentAgent:
         }
 
         try:
-            print(f"DEBUG: LIPILA PAYLOAD: {payload}")
+            logger.debug(f"DEBUG: LIPILA PAYLOAD: {payload}")
             response = requests.post(
                 f"{LIPILA_BASE_URL}/collections/mobile-money",
                 json=payload,
                 headers=headers,
                 timeout=30
             )
-            print(f"DEBUG: LIPILA RESPONSE STATUS: {response.status_code}")
-            print(f"DEBUG: LIPILA RESPONSE BODY: {response.text}")
+            logger.debug(f"DEBUG: LIPILA RESPONSE STATUS: {response.status_code}")
+            logger.debug(f"DEBUG: LIPILA RESPONSE BODY: {response.text}")
             response.raise_for_status()
             resp_data = response.json()
             
@@ -105,22 +108,26 @@ class PaymentAgent:
             tx_id = resp_data.get("externalId") or resp_data.get("referenceId") or f"LPL-{secrets.token_hex(6).upper()}"
             
         except Exception as e:
-            print(f"LIPILA ERROR: {str(e)}")
+            logger.error(f"LIPILA ERROR: {str(e)}")
             if 'response' in locals():
-                print(f"LIPILA ERROR BODY: {response.text}")
+                logger.error(f"LIPILA ERROR BODY: {response.text}")
             AuditAgent.log_event("PAYMENT_GATEWAY_ERROR", org.id, {"gateway": "LIPILA", "error": str(e)})
             raise GatewayError(f"Failed to connect to Lipila: {str(e)}")
+
+        # Generate invoice_id
+        invoice_id = f"INV-{datetime.now().year}-{secrets.token_hex(3).upper()}"
 
         payment = Payment(
             payment_id=payment_id,
             org_id=org.id,
             plan=plan,
-            amount=amount,
+            amount=amount_zmw,
             currency="ZMW",
             gateway=PaymentGateway.LIPILA,
             status=AppPaymentStatus.PENDING,
             phone_number=phone,
-            transaction_id=tx_id
+            transaction_id=tx_id,
+            invoice_id=invoice_id
         )
         
         Database.save_payment(payment)
@@ -137,6 +144,13 @@ class PaymentAgent:
             "payment_id": payment_id,
             "lipila_tx_id": tx_id
         })
+
+        # Generate Initial Invoice
+        try:
+            payment.invoice_pdf_path = InvoiceAgent.generate_invoice_pdf(org, payment)
+            Database.save_payment(payment)
+        except Exception as inv_err:
+            logger.error(f"WARNING: Initial invoice generation failed: {inv_err}")
 
         return {
             "status": "PENDING",
@@ -177,6 +191,13 @@ class PaymentAgent:
             "ref_code": ref_code,
             "amount": amount
         })
+
+        # Generate PDF Invoice
+        try:
+            payment.invoice_pdf_path = InvoiceAgent.generate_invoice_pdf(org, payment)
+            Database.save_payment(payment)
+        except Exception as inv_err:
+            logger.error(f"ERROR: PDF Invoice generation failed: {inv_err}")
 
         return {
             "status": "PENDING",
@@ -266,30 +287,36 @@ class PaymentAgent:
         except requests.exceptions.HTTPError as e:
             # Capture the actual validation error from Lipila
             error_body = e.response.text
-            print(f"LIPILA CARD API ERROR BODY: {error_body}")
+            logger.error(f"LIPILA CARD API ERROR BODY: {error_body}")
             AuditAgent.log_event("PAYMENT_GATEWAY_ERROR", org.id, {"gateway": "LIPILA_CARD", "error": str(e), "body": error_body})
             raise GatewayError(f"Lipila Card Error: {error_body}")
             
-        except Exception as e:
-            print(f"LIPILA CARD ERROR: {str(e)}")
-            AuditAgent.log_event("PAYMENT_GATEWAY_ERROR", org.id, {"gateway": "LIPILA_CARD", "error": str(e)})
-            raise GatewayError(f"Failed to initiate Lipila Card payment: {str(e)}")
+        # Generate invoice_id
+        invoice_id = f"INV-{datetime.now().year}-{secrets.token_hex(3).upper()}"
 
         # Create Pending Payment Record
         payment = Payment(
             payment_id=payment_id,
             org_id=org.id,
             plan=plan,
-            amount=amount,
+            amount=amount_zmw,
             currency="ZMW",
-            gateway=PaymentGateway.LIPILA, # It's Lipila now
+            gateway=PaymentGateway.LIPILA,
             status=AppPaymentStatus.PENDING,
-            transaction_id=f"ext_{uuid.uuid4().hex[:8]}" 
+            transaction_id=data.get("externalId") or data.get("referenceId"),
+            invoice_id=invoice_id
         )
         Database.save_payment(payment)
         
         org.payment_status = PaymentStatus.PENDING
         Database.save_organization(org)
+
+        # Generate Initial Invoice
+        try:
+            payment.invoice_pdf_path = InvoiceAgent.generate_invoice_pdf(org, payment)
+            Database.save_payment(payment)
+        except Exception as inv_err:
+            logger.error(f"WARNING: Initial invoice generation failed: {inv_err}")
 
         return {
             "status": "PENDING",
@@ -303,7 +330,7 @@ class PaymentAgent:
         """
         Processes async notifications from payment providers.
         """
-        print(f"WEBHOOK RECEIVED ({gateway}): {payload}") # DEBUG LOG
+        logger.info(f"WEBHOOK RECEIVED ({gateway}): {payload}") # DEBUG LOG
 
         # 1. Identify Payment
         # Lipila uses 'referenceId' for our pay-xxxx ID, 'externalId' for their tx ID
@@ -311,7 +338,7 @@ class PaymentAgent:
         ref_id = payload.get("referenceId")
         tx_id = payload.get("externalId") or payload.get("identifier")
         
-        print(f"DEBUG: WEBHOOK LOOKUP - ref_id: {ref_id}, tx_id: {tx_id}")
+        logger.debug(f"DEBUG: WEBHOOK LOOKUP - ref_id: {ref_id}, tx_id: {tx_id}")
         
         payment = None
         if ref_id:
@@ -321,7 +348,7 @@ class PaymentAgent:
             payment = Database.get_payment_by_transaction_id(tx_id)
             
         if not payment:
-            print(f"ERROR: Received webhook for unknown transaction. ref_id: {ref_id}, tx_id: {tx_id}")
+            logger.error(f"ERROR: Received webhook for unknown transaction. ref_id: {ref_id}, tx_id: {tx_id}")
             return False
 
         # Update external transaction ID if available
@@ -331,7 +358,7 @@ class PaymentAgent:
 
         # Idempotency Check: Don't process if already PAID
         if payment.status == AppPaymentStatus.PAID:
-            print(f"INFO: Payment {payment.payment_id} already processed successfully. Skipping.")
+            logger.info(f"INFO: Payment {payment.payment_id} already processed successfully. Skipping.")
             return True
 
         # 2. Update Status
@@ -348,6 +375,16 @@ class PaymentAgent:
             PaymentAgent._handle_failure(payment)
 
         Database.save_payment(payment)
+
+        # REGENERATE INVOICE WITH 'PAID' STATUS
+        try:
+            org = Database.get_organization(payment.org_id)
+            if org:
+                payment.invoice_pdf_path = InvoiceAgent.generate_invoice_pdf(org, payment)
+                Database.save_payment(payment)
+        except Exception as inv_err:
+            logger.error(f"WARNING: Paid invoice regeneration failed: {inv_err}")
+
         return True
 
     @staticmethod

@@ -1,6 +1,8 @@
 from datetime import datetime
 from utils.db import Database
 from typing import Dict, Any
+import logging
+logger = logging.getLogger(__name__)
 
 class AuditAgent:
     """
@@ -29,7 +31,7 @@ class AuditAgent:
         }
         
         db.collection("audit_logs").document(event_id).set(log_entry)
-        print(f"AUDIT LOG: {event_type} by {actor} (Org: {org_id})")
+        logger.info(f"AUDIT LOG: {event_type} by {actor} (Org: {org_id})")
 
     @classmethod
     def list_org_logs(cls, organization_id: str, limit: int = 50) -> list:
@@ -48,7 +50,7 @@ class AuditAgent:
             results.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
             return results[:limit]
         except Exception as e:
-            print(f"Error fetching audit logs: {e}")
+            logger.error(f"Error fetching audit logs: {e}")
             return []
 
     @classmethod

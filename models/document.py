@@ -147,3 +147,4 @@ class ExtractionResult(BaseModel):
     # Metadata
     warnings: List[str] = []
     raw_text_preview: Optional[str] = None
+    quality_score: Optional[float] = None

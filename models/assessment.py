@@ -70,6 +70,24 @@ class Assessment(BaseModel):
         default_factory=dict, 
         description="Summary of data used for this decision (No raw PII). Keys: transaction_days, transaction_count, data_sources, data_recency_days."
     )
+    data_quality_score: Optional[float] = Field(
+        None,
+        description="Overall data quality score (0-1) influencing decision confidence",
+        ge=0,
+        le=1
+    )
+    data_provenance: Optional[Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Provenance ledger for data sources, consent, and document lineage (no raw PII)."
+    )
+    decision_trace: Optional[Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Full decision trace: input snapshot, derived features, hashes, and policy lineage."
+    )
+    adverse_action: Optional[Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Structured adverse action payload with policy and data-quality constraints."
+    )
     
     # Capacity Metrics
     observed_deposit_volume: Optional[float] = Field(0.0, description="Total verified deposit transaction volume")

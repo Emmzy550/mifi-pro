@@ -5,6 +5,8 @@ import numpy as np
 from typing import Dict, Any, List
 from models.borrower import Borrower
 from models.alternative_data import AlternativeData
+import logging
+logger = logging.getLogger(__name__)
 
 class MLRiskAgent:
     """
@@ -25,9 +27,9 @@ class MLRiskAgent:
                 
                 with open(feature_path, "r") as f:
                     cls._features = f.read().split(",")
-                print(f"DEBUG: ML Risk Model loaded from {model_path}")
+                logger.debug(f"DEBUG: ML Risk Model loaded from {model_path}")
             else:
-                print("WARNING: ML Risk Model not found. inference will be disabled.")
+                logger.warning("WARNING: ML Risk Model not found. inference will be disabled.")
         return cls._model
 
     @classmethod

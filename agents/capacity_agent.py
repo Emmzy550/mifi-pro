@@ -1,3 +1,5 @@
+import logging
+logger = logging.getLogger(__name__)
 """
 Capacity Agent - Demonstrated Financial Capacity Calculator
 ============================================================
@@ -13,6 +15,15 @@ from models.alternative_data import AlternativeData, MobileMoneyTransaction
 import lending_config.capacity_config as cap_config
 import lending_config.pilot_config as pilot_config  # NEW: Pilot mode configuration
 import statistics
+from utils.policy_context import policy_value
+
+
+def _policy_int(key: str, default: int) -> int:
+    return int(policy_value(key, default))
+
+
+def _policy_float(key: str, default: float) -> float:
+    return float(policy_value(key, default))
 
 
 class CapacityAgent:
@@ -107,13 +118,13 @@ class CapacityAgent:
                  validation_result["is_valid"] = True # TEMP Bypassed
                  win_days = result['observation_window_days']
                  win_str = "1 day" if win_days == 1 else f"{win_days} days"
-                 print(f"INFO: Observation bypass applied for {borrower_id} ({win_str})")
+                 logger.info(f"INFO: Observation bypass applied for {borrower_id} ({win_str})")
 
         # MICRO-STARTER EXCEPTION LAYER (NEW)
         micro_starter_eligible = False
         if not validation_result["is_valid"]:
             # Check if we can apply the micro-starter exception BEFORE rejecting
-            if result["transaction_count"] < cap_config.MIN_HISTORY_FOR_NORMAL or result["history_days"] < cap_config.MIN_HISTORY_DAYS:
+            if result["transaction_count"] < cap_config.MIN_HISTORY_FOR_NORMAL or result["history_days"] < _policy_int("min_history_days", cap_config.MIN_HISTORY_DAYS):
                 
                 meets_micro_volume = result["observed_deposit_volume"] >= cap_config.MIN_DEPOSIT_VOLUME_FOR_MICRO
                 within_micro_cap = requested_amount <= cap_config.MICRO_LOAN_CAP
@@ -126,7 +137,7 @@ class CapacityAgent:
                     result["capacity_based_max"] = requested_amount
                     result["capacity_multiplier_used"] = cap_config.MICRO_MULTIPLIER
                     # Legacy anchor fields removed
-                    print(f"INFO: Micro-starter exception applied for borrower {borrower_id}")
+                    logger.error(f"INFO: Micro-starter exception applied for borrower {borrower_id}")
                 else:
                     result["rejection_reason"] = "INSUFFICIENT_OBSERVATION_WINDOW" if result["insufficient_observation"] else validation_result["reason"]
                     return result
@@ -145,14 +156,14 @@ class CapacityAgent:
             verified_monthly_income is not None and
             verified_monthly_income >= pilot_config.MIN_VERIFIED_INCOME):
             
-            print(f"INFO: Verified income detected: {verified_monthly_income} from {verified_income_source or 'PAYSLIP'}")
+            logger.info(f"INFO: Verified income detected: {verified_monthly_income} from {verified_income_source or 'PAYSLIP'}")
             
             # Count behavioral transactions to validate spending patterns
             behavioral_result = CapacityAgent._count_behavioral_transactions(transactions)
             result["behavioral_transaction_count"] = behavioral_result["behavioral_transaction_count"]
             result["audit_trail"]["behavioral_analysis"] = behavioral_result
             
-            print(f"INFO: Behavioral transactions: {behavioral_result['behavioral_transaction_count']} of {behavioral_result['raw_transaction_count']}")
+            logger.info(f"INFO: Behavioral transactions: {behavioral_result['behavioral_transaction_count']} of {behavioral_result['raw_transaction_count']}")
             
             # Check if we have sufficient behavioral data
             if behavioral_result["behavioral_transaction_count"] < pilot_config.MIN_BEHAVIORAL_TRANSACTIONS:
@@ -166,7 +177,7 @@ class CapacityAgent:
                         pilot_config.RejectionReason.INSUFFICIENT_BEHAVIORAL_DATA
                     )
                 }
-                print(f"REJECTION: {result['rejection_details']['message']}")
+                logger.info(f"REJECTION: {result['rejection_details']['message']}")
                 return result
             
             # Use verified income as capacity base
@@ -184,8 +195,10 @@ class CapacityAgent:
             result["capacity_based_max"] = round(capacity_based_max, 2)
             result["is_valid"] = True
             
-            print(f"✓ CAPACITY APPROVED via VERIFIED_INCOME: {capacity_based_max:.2f} "
-                  f"({verified_monthly_income} * {capacity_multiplier})")
+            logger.info(
+                f"CAPACITY APPROVED via VERIFIED_INCOME: {capacity_based_max:.2f} "
+                f"({verified_monthly_income} * {capacity_multiplier})"
+            )
             
             return result
         
@@ -196,16 +209,16 @@ class CapacityAgent:
         # Check minimum deposit volume threshold for NORMAL loans
         # Use pilot threshold if in pilot mode, otherwise production threshold
         min_threshold = (
-            pilot_config.MIN_CAPACITY_THRESHOLD_PILOT 
-            if pilot_config.PILOT_MODE_ENABLED 
-            else cap_config.MIN_CAPACITY_THRESHOLD
+            pilot_config.MIN_CAPACITY_THRESHOLD_PILOT
+            if pilot_config.PILOT_MODE_ENABLED
+            else _policy_float("min_capacity_threshold", cap_config.MIN_CAPACITY_THRESHOLD)
         )
         
         if not micro_starter_eligible and result["observed_deposit_volume"] < min_threshold:
             # If we bypassed validation for time, we still check volume
             result["rejection_reason"] = (
                 f"Observed deposit volume ({result['observed_deposit_volume']:.2f}) "
-                f"below minimum threshold ({cap_config.MIN_CAPACITY_THRESHOLD})"
+                f"below minimum threshold ({min_threshold})"
             )
             return result
         
@@ -228,8 +241,9 @@ class CapacityAgent:
             
             result["starter_loan_applied"] = starter_loan_eligible
             if starter_loan_eligible:
-                if capacity_based_max > cap_config.STARTER_LOAN_CAP:
-                    capacity_based_max = cap_config.STARTER_LOAN_CAP
+                starter_cap = _policy_float("starter_loan_cap", cap_config.STARTER_LOAN_CAP)
+                if capacity_based_max > starter_cap:
+                    capacity_based_max = starter_cap
 
             
             result["capacity_based_max"] = round(capacity_based_max, 2)
@@ -241,15 +255,43 @@ class CapacityAgent:
     
     @staticmethod
     def _get_tx_val(tx: Any, field_names: List[str], default: Any = None) -> Any:
+        """
+        Extracts a value from a transaction object (dict or Pydantic).
+        """
         for field in field_names:
+            # Try dict access
             if isinstance(tx, dict):
-                if field in tx:
-                    val = tx[field]
-                    if val is not None: return val
-            else:
-                val = getattr(tx, field, None)
+                val = tx.get(field)
                 if val is not None: return val
+            # Try attribute access (Pydantic or other objects)
+            val = getattr(tx, field, None)
+            if val is not None: return val
+            # Try model_dump() if it's a Pydantic model
+            if hasattr(tx, "model_dump"):
+                try:
+                    val = tx.model_dump().get(field)
+                    if val is not None: return val
+                except: pass
         return default
+
+    @staticmethod
+    def _parse_tx_date(ts: Any) -> Optional[datetime]:
+        if not ts: return None
+        if isinstance(ts, datetime):
+            if ts.tzinfo is None: ts = ts.replace(tzinfo=timezone.utc)
+            return ts
+        if isinstance(ts, str):
+            try:
+                # Remove common noise
+                clean_ts = ts.replace("Z", "+00:00").split(".")[0]
+                if " " in clean_ts and "T" not in clean_ts:
+                    clean_ts = clean_ts.replace(" ", "T")
+                ts_obj = datetime.fromisoformat(clean_ts)
+                if ts_obj.tzinfo is None: ts_obj = ts_obj.replace(tzinfo=timezone.utc)
+                return ts_obj
+            except:
+                pass
+        return None
 
     @staticmethod
     def _tx_is_credible(tx: Any, min_confidence: float = 0.7) -> bool:
@@ -336,9 +378,9 @@ class CapacityAgent:
                 behavioral_count += 1
                 matched_reasons.append(f"INFLOW: {desc[:30]}")
         
-        print(f"DEBUG: Behavioral analysis - {behavioral_count} of {raw_count} matched")
+        logger.debug(f"DEBUG: Behavioral analysis - {behavioral_count} of {raw_count} matched")
         if matched_reasons:
-            print(f"DEBUG: Matched reasons (first 5): {matched_reasons[:5]}")
+            logger.debug(f"DEBUG: Matched reasons (first 5): {matched_reasons[:5]}")
         
         return {
             "behavioral_transaction_count": behavioral_count,
@@ -356,13 +398,8 @@ class CapacityAgent:
         transaction_count = len(credible_transactions)
         timestamps = []
         for tx in credible_transactions:
-            ts = CapacityAgent._get_tx_val(tx, ["timestamp", "date"])
-            if isinstance(ts, str):
-                try: ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                except: continue
-            if ts and isinstance(ts, datetime):
-                if ts.tzinfo is None: ts = ts.replace(tzinfo=timezone.utc)
-                timestamps.append(ts)
+            ts = CapacityAgent._parse_tx_date(CapacityAgent._get_tx_val(tx, ["timestamp", "date"]))
+            if ts: timestamps.append(ts)
         
         if not timestamps:
             return {"is_valid": False, "reason": "No valid timestamps", "history_days": 0, "transaction_count": transaction_count}
@@ -374,12 +411,14 @@ class CapacityAgent:
         if transaction_count > 0 and observation_window_days == 0:
              if oldest.date() == newest.date(): observation_window_days = 1
 
-        is_window_sufficient = observation_window_days >= cap_config.MIN_HISTORY_DAYS
+        min_history_days = _policy_int("min_history_days", cap_config.MIN_HISTORY_DAYS)
+        min_transaction_count = _policy_int("min_transaction_count", cap_config.MIN_TRANSACTION_COUNT)
+        is_window_sufficient = observation_window_days >= min_history_days
         
-        if transaction_count < cap_config.MIN_TRANSACTION_COUNT:
+        if transaction_count < min_transaction_count:
             return {
                 "is_valid": False,
-                "reason": f"Insufficient transactions: {transaction_count} (min {cap_config.MIN_TRANSACTION_COUNT})",
+                "reason": f"Insufficient transactions: {transaction_count} (min {min_transaction_count})",
                 "observation_window_days": observation_window_days,
                 "history_days": observation_window_days,
                 "transaction_count": transaction_count,
@@ -390,7 +429,7 @@ class CapacityAgent:
             win_str = "1 day" if observation_window_days == 1 else f"{observation_window_days} days"
             return {
                 "is_valid": False,
-                "reason": f"INSUFFICIENT OBSERVATION WINDOW: {win_str} (min {cap_config.MIN_HISTORY_DAYS} days)",
+                "reason": f"INSUFFICIENT OBSERVATION WINDOW: {win_str} (min {min_history_days} days)",
                 "observation_window_days": observation_window_days,
                 "history_days": observation_window_days,
                 "transaction_count": transaction_count,
@@ -408,50 +447,51 @@ class CapacityAgent:
     
     @staticmethod
     def _calculate_observed_deposit_volume(transactions: List, window_days: int = 30) -> Dict[str, Any]:
+        # Pilot override for observation window
+        if pilot_config.PILOT_MODE_ENABLED:
+            window_days = pilot_config.PILOT_OBSERVATION_WINDOW_DAYS
+            
+        logger.info(f"[DIAGNOSTIC] Processing {len(transactions)} transactions for capacity window: {window_days} days")
         if not transactions:
             return {"observed_deposit_volume": 0.0, "period_days": window_days, "total_deposit_volume": 0.0, "deposit_count": 0}
-        
+
         timestamps = []
         for tx in transactions:
-            if not CapacityAgent._tx_is_credible(tx):
-                continue
-            ts = CapacityAgent._get_tx_val(tx, ["timestamp", "date"])
-            if isinstance(ts, str):
-                try:
-                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                except:
-                    ts = None
-            if ts and isinstance(ts, datetime):
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
+            # Look for 'date' (Pydantic model) or 'timestamp' (legacy api.py mapping)
+            raw_date = CapacityAgent._get_tx_val(tx, ["date", "timestamp"])
+            ts = CapacityAgent._parse_tx_date(raw_date)
+            if ts: 
                 timestamps.append(ts)
-
-        reference_now = max(timestamps) if timestamps else datetime.now(timezone.utc)
-        if reference_now.tzinfo is None:
-            reference_now = reference_now.replace(tzinfo=timezone.utc)
-
-        start_date = reference_now - timedelta(days=window_days)
-        valid_deposits = []
-        
-        for tx in transactions:
-            if not CapacityAgent._tx_is_credible(tx):
-                continue
-            amount = CapacityAgent._get_tx_val(tx, ["amount"], 0.0)
-            ts = CapacityAgent._get_tx_val(tx, ["timestamp", "date"])
-            tx_type = str(CapacityAgent._get_tx_val(tx, ["type"], "")).upper()
-            direction = str(CapacityAgent._get_tx_val(tx, ["direction"], "")).upper()
-
-            if isinstance(ts, str):
-                try:
-                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                except:
-                    ts = None
+            else:
+                if raw_date: logger.error(f"DEBUG: Failed to parse date string: '{raw_date}' from tx: {type(tx)}")
             
+        reference_now = max(timestamps) if timestamps else datetime.now(timezone.utc)
+        if reference_now.tzinfo is None: reference_now = reference_now.replace(tzinfo=timezone.utc)
+        
+        start_date = reference_now - timedelta(days=window_days)
+        logger.info(f"[DIAGNOSTIC] Reference Date: {reference_now.isoformat()}, Window Start: {start_date.isoformat()}")
+
+        valid_deposits = []
+        for idx, tx in enumerate(transactions):
+            desc = CapacityAgent._get_tx_val(tx, ["description"], "N/A")
+            amount = CapacityAgent._get_tx_val(tx, ["amount"], 0.0)
+            direction = CapacityAgent._get_tx_val(tx, ["direction"], "UNKNOWN")
+            tx_type = CapacityAgent._get_tx_val(tx, ["type"], "UNKNOWN")
+            raw_date = CapacityAgent._get_tx_val(tx, ["date", "timestamp"])
+            ts = CapacityAgent._parse_tx_date(raw_date)
+            
+            is_credible = CapacityAgent._tx_is_credible(tx)
             is_deposit = tx_type in {"DEPOSIT", "SALARY", "CREDIT"} or direction == "INFLOW"
-            if is_deposit and amount > 0:
-                if ts:
-                    if ts.tzinfo is None: ts = ts.replace(tzinfo=timezone.utc)
-                    if ts >= start_date: valid_deposits.append(amount)
+            
+            in_window = False
+            if ts:
+                if ts.tzinfo is None: ts = ts.replace(tzinfo=timezone.utc)
+                if ts >= start_date: in_window = True
+                
+            logger.info(f"  [TX {idx}] {ts.date() if ts else 'N/A'}: {desc[:20]} | Amt: {amount} | Dir: {direction} | Credible: {is_credible} | Deposit: {is_deposit} | InWindow: {in_window}")
+
+            if is_credible and is_deposit and in_window and amount > 0:
+                valid_deposits.append(amount)
         
         total_volume = sum(valid_deposits)
         return {
@@ -484,15 +524,8 @@ class CapacityAgent:
             tx_type = str(CapacityAgent._get_tx_val(tx, ["type"], "")).upper()
             direction = str(CapacityAgent._get_tx_val(tx, ["direction"], "")).upper()
 
-            if isinstance(ts, str):
-                try:
-                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                except:
-                    ts = None
-            if ts and isinstance(ts, datetime):
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-                timestamps.append(ts)
+            ts = CapacityAgent._parse_tx_date(CapacityAgent._get_tx_val(tx, ["timestamp", "date"]))
+            if ts: timestamps.append(ts)
 
             is_deposit = tx_type in {"DEPOSIT", "SALARY", "CREDIT"} or direction == "INFLOW"
             if is_deposit and amount > 0:
@@ -516,6 +549,8 @@ class CapacityAgent:
     
     @staticmethod
     def _check_starter_loan_eligibility(history_days: int, observed_deposit_volume: float) -> bool:
-        if history_days < cap_config.STARTER_HISTORY_THRESHOLD_DAYS: return True
-        if observed_deposit_volume < cap_config.STARTER_DEPOSIT_THRESHOLD: return True
+        if history_days < _policy_int("starter_history_threshold_days", cap_config.STARTER_HISTORY_THRESHOLD_DAYS):
+            return True
+        if observed_deposit_volume < _policy_float("starter_deposit_threshold", cap_config.STARTER_DEPOSIT_THRESHOLD):
+            return True
         return False

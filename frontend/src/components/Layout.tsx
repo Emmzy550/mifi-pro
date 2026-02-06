@@ -1,6 +1,6 @@
 import React from 'react';
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Key, Shield, Settings, LogOut, FileText, BookOpen, CreditCard, Lock, ClipboardList } from 'lucide-react';
+import { LayoutDashboard, Key, Shield, Settings, LogOut, FileText, BookOpen, CreditCard, Lock, ClipboardList, SlidersHorizontal, Users } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
 const SidebarItem = ({ icon: Icon, label, path }: { icon: any, label: string, path: string }) => {
@@ -10,9 +10,9 @@ const SidebarItem = ({ icon: Icon, label, path }: { icon: any, label: string, pa
     return (
         <Link
             to={path}
-            className={`flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${isActive
-                ? 'bg-primary/10 text-primary font-medium'
-                : 'text-slate-600 hover:bg-slate-50'
+            className={`flex items-center gap-3 px-4 py-3 rounded-lg transition-colors sidebar-item ${isActive
+                ? 'sidebar-item-active'
+                : ''
                 }`}
         >
             <Icon size={20} />
@@ -31,9 +31,9 @@ export default function Layout() {
     };
 
     return (
-        <div className="flex h-screen bg-slate-50">
+        <div className="flex min-h-screen app-shell">
             {/* Sidebar */}
-            <aside className="w-64 bg-white border-r border-slate-200 flex flex-col">
+            <aside className="w-64 sidebar-shell flex flex-col">
                 <div className="p-6 border-b border-slate-100">
                     <div className="flex items-center gap-3 text-primary font-bold text-xl">
                         <img src="/logo.png" alt="Mifi Pro" className="h-12 w-auto object-contain" />
@@ -46,6 +46,10 @@ export default function Layout() {
                     <SidebarItem icon={Key} label="API Keys" path="/keys" />
                     <SidebarItem icon={ClipboardList} label="Manual Assessments" path="/manual-assessments" />
                     <SidebarItem path="/decisions" icon={FileText} label="Decisions" />
+                    <SidebarItem path="/policy-studio" icon={SlidersHorizontal} label="Policy Studio" />
+                    {['ORG_ADMIN', 'SUPER_ADMIN', 'DEVELOPER'].includes((user?.role || '').toUpperCase()) && (
+                        <SidebarItem path="/team" icon={Users} label="Team" />
+                    )}
                     <SidebarItem path="/audit-logs" icon={Shield} label="Audit Logs" />
                     <SidebarItem path="/documentation" icon={BookOpen} label="Documentation" />
                     <SidebarItem path="/usage-billing" icon={CreditCard} label="Usage & Billing" />
@@ -76,8 +80,8 @@ export default function Layout() {
             </aside>
 
             {/* Main Content */}
-            <main className="flex-1 overflow-auto">
-                <div className="max-w-7xl mx-auto p-8">
+            <main className="flex-1">
+                <div className="page-shell">
                     <Outlet />
                 </div>
             </main>

@@ -1,6 +1,7 @@
 import re
-from datetime import datetime
-from typing import List, Optional, Dict, Tuple
+import logging
+from datetime import datetime, timedelta
+from typing import List, Optional, Dict, Tuple, Any
 from models.document import (
     ExtractionResult,
     DocumentType,
@@ -10,11 +11,14 @@ from models.document import (
     NumericToken,
     StatementPeriod,
 )
+
+logger = logging.getLogger(__name__)
 from utils.extractors.base import BaseExtractor
 
 class BankStatementExtractor(BaseExtractor):
     def __init__(self):
         self.statement_year = datetime.now().year
+        self.statement_month = datetime.now().month
         self.currency = "UNKNOWN"
         
         # Patterns
@@ -24,10 +28,10 @@ class BankStatementExtractor(BaseExtractor):
                           "July":7,"August":8,"September":9,"October":10,"November":11,"December":12}
         
         # Bi-directional word dates: '1 Feb' or 'Feb 1'
-        self.date_word_ptrn = re.compile(r'\b(?:(\d{1,2})\s+([A-Za-z]{3,})|([A-Za-z]{3,})\s+(\d{1,2}))(?:,?\s+(\d{4}))?\b', re.IGNORECASE)
-        self.date_num_ptrn = re.compile(r'\b(\d{1,2})[-/](\d{1,2})(?:[-/](\d{2,4}))?\b')
-        self.date_iso_ptrn = re.compile(r'\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b')
-        self.amount_token_ptrn = re.compile(r'(?<!\w)(?:[£$€]|ZMW|GBP|USD|EUR)?\s*[-+]?\d[\d,\.]*\d\b|\b\d\b')
+        self.date_word_ptrn = re.compile(r'(?:(\d{1,2})\s*([A-Za-z]{3,})|([A-Za-z]{3,})\s*(\d{1,2}))(?:,?\s*(\d{4}))?', re.IGNORECASE)
+        self.date_num_ptrn = re.compile(r'(\d{1,2})[-/](\d{1,2})(?:[-/](\d{2,4}))?')
+        self.date_iso_ptrn = re.compile(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})')
+        self.amount_token_ptrn = re.compile(r'(?<!\w)(?:[£$€]|ZMW|GBP|USD|EUR|[DC])?\s*[-+]?(?:\d[\d,\.]*\d|\d|\.\d{1,2})\b')
         self.time_ptrn = re.compile(r'\b\d{1,2}:\d{2}\b')
         
         self.keywords_in = ["DEPOSIT", "CREDIT", "SALARY", "RCV", "EARNINGS", "CREDITED", "DIRECT DEPOSIT", "INCOMING FUNDS TRANSFER"]
@@ -51,6 +55,14 @@ class BankStatementExtractor(BaseExtractor):
             "CURRENT BOOK BALANCE",
             "BOOK BALANCE",
             "CURRENT AVAILABLE BALANCE",
+            "ENDING BALANCE",
+            "FINAL BALANCE",
+            "BALANCE AS AT",
+            "TOTAL BALANCE",
+            "ACCOUNT BALANCE",
+            "AVAILABLE BALANCE",
+            "LEDGER BALANCE",
+            "OUTSTANDING BALANCE",
         ]
         self.non_financial_keywords = [
             "ACCOUNT NUMBER",
@@ -59,10 +71,20 @@ class BankStatementExtractor(BaseExtractor):
             "PAGE",
             "STATEMENT",
             "CUSTOMER",
-            "DATE LAST DEBIT",
-            "DATE LAST CREDIT",
             "BRANCH CODE",
             "BRANCH NAME",
+            "ACCOUNT CLASS",
+            "CLASS DESCRIPTION",
+            "HOME BRANCH",
+            "CURRENT BOOK BALANCE",
+            "UNCLEARED BALANCE",
+            "ACCRUED DEBIT INTEREST",
+            "ACCRUED CREDIT INTEREST",
+            "DATE LAST DEBIT",
+            "DATE LAST CREDIT",
+            "BLOCKED AMOUNT",
+            "MIN REQUIRED BALANCE",
+            "TRANSACTION DETAILS",
         ]
         self.time_keywords = ["TIMED", "POSTED", "AT", "TIME"]
 
@@ -73,11 +95,16 @@ class BankStatementExtractor(BaseExtractor):
         self.statement_year = self._infer_statement_year(text)
         self.currency, currency_warnings = self._infer_currency(text)
         statement_period = self._extract_statement_period(text)
+        if statement_period and statement_period.end:
+            try:
+                self.statement_month = int(statement_period.end.split("-")[1])
+                self.statement_year = int(statement_period.end.split("-")[0])
+            except: pass
         column_order = self._detect_column_headers(lines)
         
         
         # Extract identity fields with validation
-        print(f"\n{'='*80}\nDEBUG: OCR TEXT PREVIEW (first 1500 chars):\n{'-'*80}\n{text[:1500]}\n{'='*80}\n", flush=True)
+        logger.info(f"\n{'='*80}\nDEBUG: OCR TEXT PREVIEW (first 1500 chars):\n{'-'*80}\n{text[:1500]}\n{'='*80}\n")
         account_holder_name = self._extract_account_holder_name(text)
         bank_name = self._extract_bank_name(lines)
         
@@ -108,6 +135,14 @@ class BankStatementExtractor(BaseExtractor):
             statement_period = self._infer_period_from_transactions(txs)
 
         # 3. Summarize
+        if statement_period:
+            try:
+                # Use end date to anchor the year rollover logic
+                end_dt = datetime.strptime(statement_period.end, "%Y-%m-%d")
+                self.statement_year = end_dt.year
+                self.statement_month = end_dt.month
+            except: pass
+
         summary = self._generate_summary(
             txs,
             summary_fields,
@@ -118,11 +153,11 @@ class BankStatementExtractor(BaseExtractor):
         
         # SAFETY CHECK: Verify identity fields were preserved in summary
         if account_holder_name is not None and summary.account_holder_name is None:
-            print(f"⚠️  CRITICAL: account_holder_name was '{account_holder_name}' but became None in summary!", flush=True)
+            logger.error(f"⚠️  CRITICAL: account_holder_name was '{account_holder_name}' but became None in summary!")
         if bank_name is not None and summary.bank_name is None:
-            print(f"⚠️  CRITICAL: bank_name was '{bank_name}' but became None in summary!", flush=True)
+            logger.error(f"⚠️  CRITICAL: bank_name was '{bank_name}' but became None in summary!")
         
-        print(f"✓ SUMMARY CREATED: account_holder='{summary.account_holder_name}', bank='{summary.bank_name}'", flush=True)
+        logger.info(f"✓ SUMMARY CREATED: account_holder='{summary.account_holder_name}', bank='{summary.bank_name}'")
         return ExtractionResult(
             document_type=DocumentType.BANK_STATEMENT,
             confidence=0.9 if txs else 0.1,
@@ -134,11 +169,29 @@ class BankStatementExtractor(BaseExtractor):
         )
 
     def _normalize_ocr(self, text: str) -> str:
-        return re.sub(r'([A-Z])\s+([a-z]{2,})', r'\1\2', text)
+        # 1. Merge split words like 'Ba nk'
+        text = re.sub(r'([A-Z])\s+([a-z]{2,})', r'\1\2', text)
+        # 2. Separate stuck numbers and months like '040Nov'
+        text = re.sub(r'(\d)([A-Z][a-z]{2,})', r'\1 \2', text)
+        # 3. Separate stuck years and months like '2025Nov'
+        text = re.sub(r'(\d{4})([A-Z][a-z]{2,})', r'\1 \2', text)
+        # 4. Separate stuck D/C from amounts like 'D300.00'
+        text = re.sub(r'\b([DC])(\d)', r'\1 \2', text)
+        return text
 
     def _infer_statement_year(self, text: str) -> int:
-        match = re.search(r'Statement Date:.*?(\d{4})', text, re.IGNORECASE)
-        if match: return int(match.group(1))
+        # Priority 1: Statement Date: YYYY
+        m = re.search(r'Statement Date:.*?(\d{4})', text, re.IGNORECASE)
+        if m: return int(m.group(1))
+        
+        # Priority 2: Book Balance As At: Month DD, YYYY
+        m = re.search(r'Balance As At:\s*[A-Za-z]{3,}\s+\d{1,2},?\s+(\d{4})', text, re.IGNORECASE)
+        if m: return int(m.group(1))
+        
+        # Priority 3: Any date line at the end of the header
+        m = re.search(r'To:\s*[A-Za-z]{3,}\s+\d{1,2},?\s+(\d{4})', text, re.IGNORECASE)
+        if m: return int(m.group(1))
+
         return datetime.now().year
 
     def _infer_currency(self, text: str) -> Tuple[str, List[str]]:
@@ -156,6 +209,28 @@ class BankStatementExtractor(BaseExtractor):
         return detected[0], warnings
 
     def _extract_statement_period(self, text: str) -> Optional[StatementPeriod]:
+        # 0. "Statement Period" label with value on next line (common in column layouts)
+        lines = [l.strip() for l in text.splitlines()]
+        for idx, line in enumerate(lines[:-1]):
+            if re.fullmatch(r'STATEMENT\s+PERIOD', line, re.IGNORECASE):
+                next_line = lines[idx + 1].strip()
+                if next_line:
+                    period_ptrn = re.compile(
+                        r'(\d{1,2}\s+[A-Za-z]{3,}\s*,?\s*\d{4}|\d{1,2}\s+[A-Za-z]{3,})\s*(?:to|\-|–|â€“)\s*(\d{1,2}\s+[A-Za-z]{3,}\s*,?\s*\d{4}|\d{1,2}\s+[A-Za-z]{3,})',
+                        re.IGNORECASE
+                    )
+                    m_label = period_ptrn.search(next_line)
+                    if m_label:
+                        start_raw, end_raw = m_label.groups()
+                        end_dt = self._parse_date(end_raw)
+                        start_dt = self._parse_date(start_raw)
+                        if end_dt and start_dt:
+                            start_year_match = re.search(r'\b(\d{4})\b', start_raw)
+                            if not start_year_match:
+                                start_dt = start_dt.replace(year=end_dt.year)
+                            return StatementPeriod(start=start_dt.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"))
+
+        # 1. Standard From: ... To: ...
         from_to_ptrn = re.compile(
             r'FROM:\s*([A-Za-z]{3,}\s+\d{1,2},?\s+\d{4})\s+TO:\s*([A-Za-z]{3,}\s+\d{1,2},?\s+\d{4})',
             re.IGNORECASE
@@ -166,11 +241,18 @@ class BankStatementExtractor(BaseExtractor):
             start_dt = self._parse_date(start_raw)
             end_dt = self._parse_date(end_raw)
             if start_dt and end_dt:
-                return StatementPeriod(
-                    start=start_dt.strftime("%Y-%m-%d"),
-                    end=end_dt.strftime("%Y-%m-%d")
-                )
+                return StatementPeriod(start=start_dt.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"))
 
+        # 2. Separate lines (Zanaco style)
+        from_match = re.search(r'^From:\s*([A-Za-z]{3,}\s+\d{1,2},?\s+\d{4})', text, re.IGNORECASE | re.MULTILINE)
+        to_match = re.search(r'To:\s*([A-Za-z]{3,}\s+\d{1,2},?\s+\d{4})', text, re.IGNORECASE)
+        if from_match and to_match:
+            start_dt = self._parse_date(from_match.group(1))
+            end_dt = self._parse_date(to_match.group(1))
+            if start_dt and end_dt:
+                return StatementPeriod(start=start_dt.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"))
+
+        # 3. Flexible "to/ -" patterns
         period_ptrn = re.compile(
             r'(\d{1,2}\s+[A-Za-z]{3,}\s*,?\s*\d{4}|\d{1,2}\s+[A-Za-z]{3,})\s*(?:to|\-)\s*(\d{1,2}\s+[A-Za-z]{3,}\s*,?\s*\d{4}|\d{1,2}\s+[A-Za-z]{3,})',
             re.IGNORECASE
@@ -182,21 +264,18 @@ class BankStatementExtractor(BaseExtractor):
                 re.IGNORECASE
             )
             m = numeric_ptrn.search(text)
-            if not m:
-                return None
-        start_raw, end_raw = m.groups()
-        end_dt = self._parse_date(end_raw)
-        start_dt = self._parse_date(start_raw)
-        if end_dt and start_dt:
-            start_year_match = re.search(r'\b(\d{4})\b', start_raw)
-            if not start_year_match:
-                start_dt = start_dt.replace(year=end_dt.year)
-        if not start_dt or not end_dt:
-            return None
-        return StatementPeriod(
-            start=start_dt.strftime("%Y-%m-%d"),
-            end=end_dt.strftime("%Y-%m-%d")
-        )
+            
+        if m:
+            start_raw, end_raw = m.groups()
+            end_dt = self._parse_date(end_raw)
+            start_dt = self._parse_date(start_raw)
+            if end_dt and start_dt:
+                start_year_match = re.search(r'\b(\d{4})\b', start_raw)
+                if not start_year_match:
+                    start_dt = start_dt.replace(year=end_dt.year)
+                return StatementPeriod(start=start_dt.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"))
+
+        return None
 
     def _infer_period_from_transactions(self, txs: List[Transaction]) -> Optional[StatementPeriod]:
         dates = []
@@ -269,24 +348,24 @@ class BankStatementExtractor(BaseExtractor):
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         
         # PRIORITY 1: Check for "Account Name:" patterns (both multiline and inline)
-        print("DEBUG: Checking for 'Account Name:' pattern...", flush=True)
+        logger.debug("DEBUG: Checking for 'Account Name:' pattern...")
         
         # Check multiline format first - handle columnar layouts
         for idx, line in enumerate(lines[:-1]):
-            # Check if line contains "Account Name:"
-            if re.search(r'Account\s+Name\s*:', line, re.IGNORECASE):
+            # Check if line contains "Account Name:" or is a standalone label
+            if re.search(r'Account\s+Name\s*:', line, re.IGNORECASE) or re.fullmatch(r'Account\s+Name', line, re.IGNORECASE):
                 # First, check if the value is on the SAME line (columnar format)
                 # Pattern: "Account Name:     EMMANUEL BWANGA" or "Account Name: EMMANUEL BWANGA"
                 same_line_match = re.search(r'Account\s+Name\s*:\s+([A-Za-z][A-Za-z \t\'\-\.]{4,})$', line, re.IGNORECASE)
                 if same_line_match:
                     candidate = same_line_match.group(1).strip()
                     is_valid, reason = is_valid_name_candidate(candidate)
-                    print(f"DEBUG: Found 'Account Name:' (same line) -> '{candidate}' | Valid: {is_valid} | Reason: {reason}", flush=True)
+                    logger.debug(f"DEBUG: Found 'Account Name:' (same line) -> '{candidate}' | Valid: {is_valid} | Reason: {reason}")
                     if is_valid:
                         candidates.append(('PRIORITY_1_ACCOUNT_NAME', candidate, 1))
                         break
                     else:
-                        print(f"WARNING: Account Name on same line but candidate '{candidate}' was rejected: {reason}", flush=True)
+                        logger.warning(f"WARNING: Account Name on same line but candidate '{candidate}' was rejected: {reason}")
                 
                 # If not on same line, scan ahead for the actual name (skip labels and numbers)
                 # The OCR might have: Account Name: \n Home Branch: \n 7480701200229 \n EMMANUEL BWANGA
@@ -297,27 +376,27 @@ class BankStatementExtractor(BaseExtractor):
                         
                         # Skip lines that are just labels (end with colon)
                         if re.match(r'^[A-Za-z\s]+:\s*$', next_line):
-                            print(f"DEBUG: Skipping label line at offset {offset}: '{next_line}'", flush=True)
+                            logger.debug(f"DEBUG: Skipping label line at offset {offset}: '{next_line}'")
                             continue
                         
                         # Skip numeric-only lines (account numbers, branch codes)
                         if re.match(r'^\d+$', next_line):
-                            print(f"DEBUG: Skipping numeric line at offset {offset}: '{next_line}'", flush=True)
+                            logger.debug(f"DEBUG: Skipping numeric line at offset {offset}: '{next_line}'")
                             continue
                         
                         # Skip very short lines (less than 5 chars)
                         if len(next_line) < 5:
-                            print(f"DEBUG: Skipping short line at offset {offset}: '{next_line}'", flush=True)
+                            logger.debug(f"DEBUG: Skipping short line at offset {offset}: '{next_line}'")
                             continue
                         
                         # Check if this looks like a person name
                         is_valid, reason = is_valid_name_candidate(next_line)
-                        print(f"DEBUG: Found 'Account Name:' (offset {offset}) -> '{next_line}' | Valid: {is_valid} | Reason: {reason}", flush=True)
+                        logger.debug(f"DEBUG: Found 'Account Name:' (offset {offset}) -> '{next_line}' | Valid: {is_valid} | Reason: {reason}")
                         if is_valid:
                             candidates.append(('PRIORITY_1_ACCOUNT_NAME', next_line, 1))
                             break
                         else:
-                            print(f"DEBUG: Candidate '{next_line}' rejected: {reason}", flush=True)
+                            logger.debug(f"DEBUG: Candidate '{next_line}' rejected: {reason}")
                     
                     # If we found a candidate, break out of the main loop
                     if candidates:
@@ -336,14 +415,14 @@ class BankStatementExtractor(BaseExtractor):
                     candidate = match.group(1).strip()
                     candidate = re.sub(r'[0-9]+$', '', candidate).strip()  # Remove trailing numbers
                     is_valid, reason = is_valid_name_candidate(candidate)
-                    print(f"DEBUG: Found 'Account Name' (inline) -> '{candidate}' | Valid: {is_valid} | Reason: {reason}", flush=True)
+                    logger.debug(f"DEBUG: Found 'Account Name' (inline) -> '{candidate}' | Valid: {is_valid} | Reason: {reason}")
                     if is_valid:
                         candidates.append(('PRIORITY_1_ACCOUNT_NAME', candidate, 1))
                         break
         
         # PRIORITY 2: Check for \"Account Holder:\" patterns
         if not candidates:
-            print("DEBUG: Checking for 'Account Holder' patterns...", flush=True)
+            logger.debug("DEBUG: Checking for 'Account Holder' patterns...")
             holder_patterns = [
                 r'ACCOUNT\s+HOLDER\s*:\s*([A-Za-z][A-Za-z \t\'\-\.]{4,})',
                 r'ACCOUNT\s+HOLDER\s+NAME\s*:\s*([A-Za-z][A-Za-z \t\'\-\.]{4,})',
@@ -353,14 +432,14 @@ class BankStatementExtractor(BaseExtractor):
                 if match:
                     candidate = match.group(1).strip()
                     is_valid, reason = is_valid_name_candidate(candidate)
-                    print(f"DEBUG: Found 'Account Holder' -> '{candidate}' | Valid: {is_valid} | Reason: {reason}", flush=True)
+                    logger.debug(f"DEBUG: Found 'Account Holder' -> '{candidate}' | Valid: {is_valid} | Reason: {reason}")
                     if is_valid:
                         candidates.append(('PRIORITY_2_ACCOUNT_HOLDER', candidate, 2))
                         break
         
         # PRIORITY 3: Check for "Customer Name:" patterns
         if not candidates:
-            print("DEBUG: Checking for 'Customer Name' patterns...", flush=True)
+            logger.debug("DEBUG: Checking for 'Customer Name' patterns...")
             customer_patterns = [
                 r'CUSTOMER\s+NAME\s*:\s*([A-Za-z][A-Za-z \t\'\-\.]{4,})',
                 r'CLIENT\s+NAME\s*:\s*([A-Za-z][A-Za-z \t\'\-\.]{4,})',
@@ -370,7 +449,7 @@ class BankStatementExtractor(BaseExtractor):
                 if match:
                     candidate = match.group(1).strip()
                     is_valid, reason = is_valid_name_candidate(candidate)
-                    print(f"DEBUG: Found 'Customer Name' -> '{candidate}' | Valid: {is_valid} | Reason: {reason}", flush=True)
+                    logger.debug(f"DEBUG: Found 'Customer Name' -> '{candidate}' | Valid: {is_valid} | Reason: {reason}")
                     if is_valid:
                         candidates.append(('PRIORITY_3_CUSTOMER_NAME', candidate, 3))
                         break
@@ -379,11 +458,11 @@ class BankStatementExtractor(BaseExtractor):
         if candidates:
             candidates.sort(key=lambda x: x[2])  # Sort by priority
             selected_source, selected_name, priority = candidates[0]
-            print(f"✅ DEBUG: Account holder SELECTED: '{selected_name}' via {selected_source}", flush=True)
+            logger.debug(f"✅ DEBUG: Account holder SELECTED: '{selected_name}' via {selected_source}")
             return selected_name.title().strip()
         
         # No valid candidate found
-        print("❌ DEBUG: Account holder NAME extraction FAILED - no valid candidates found", flush=True)
+        logger.error("❌ DEBUG: Account holder NAME extraction FAILED - no valid candidates found")
         return None
 
     def _extract_bank_name(self, lines: List[str]) -> Optional[str]:
@@ -393,39 +472,47 @@ class BankStatementExtractor(BaseExtractor):
         
         # Pattern-based extraction
         for idx, line in enumerate(header_lines):
+            # Label-only line "Bank" followed by bank name on next line
+            if re.fullmatch(r'BANK', line, re.IGNORECASE) and idx + 1 < len(header_lines):
+                next_line = header_lines[idx + 1].strip()
+                if next_line and len(next_line.split()) <= 8:
+                    name = re.sub(r'\s+\(.*?\)\s*$', '', next_line).strip()
+                    logger.debug(f"DEBUG: Bank name extracted: '{name}' via BANK label line")
+                    return name.title()
+
             # Pattern: "XYZ STATEMENT OF ACCOUNT"
             match = re.search(r'^\s*([A-Za-z0-9 &]+)\s+STATEMENT\s+OF\s+ACCOUNT', line, re.IGNORECASE)
             if match:
                 name = match.group(1).strip().title()
-                print(f"DEBUG: Bank name extracted: '{name}' via 'STATEMENT OF ACCOUNT' pattern")
+                logger.debug(f"DEBUG: Bank name extracted: '{name}' via 'STATEMENT OF ACCOUNT' pattern")
                 return name
             
             # Pattern: "XYZ BANK" or "XYZ BANK PLC/LTD"
             match = re.search(r'^\s*([A-Za-z0-9 &]+)\s+BANK(?:\s+(?:PLC|LTD|LIMITED))?\b', line, re.IGNORECASE)
             if match:
                 name = match.group(1).strip().title() + " Bank"
-                print(f"DEBUG: Bank name extracted: '{name}' via 'BANK' pattern")
+                logger.debug(f"DEBUG: Bank name extracted: '{name}' via 'BANK' pattern")
                 return name
             
             # Pattern: "BANK NAME: XYZ" or "BANK: XYZ"
             match = re.search(r'BANK\s*(?:NAME)?\s*[:\-]\s*([A-Za-z0-9 &]+)', line, re.IGNORECASE)
             if match:
                 name = match.group(1).strip().title()
-                print(f"DEBUG: Bank name extracted: '{name}' via 'BANK NAME:' pattern")
+                logger.debug(f"DEBUG: Bank name extracted: '{name}' via 'BANK NAME:' pattern")
                 return name
             
             # Multiline: "BANK STATEMENT" with bank name on previous line
             if re.search(r'BANK\s+STATEMENT', line, re.IGNORECASE) and idx > 0:
                 prev_line = header_lines[idx - 1].strip()
                 if prev_line and len(prev_line.split()) <= 5 and not re.search(r'\d{4}', prev_line):
-                    print(f"DEBUG: Bank name extracted: '{prev_line}' via multiline BANK STATEMENT")
+                    logger.debug(f"DEBUG: Bank name extracted: '{prev_line}' via multiline BANK STATEMENT")
                     return prev_line.title()
             
             # Multiline: "Statement of Account" with bank name on previous line
             if re.search(r'STATEMENT\s+OF\s+ACCOUNT', line, re.IGNORECASE) and idx > 0:
                 prev_line = header_lines[idx - 1].strip()
                 if prev_line and len(prev_line.split()) <= 5:
-                    print(f"DEBUG: Bank name extracted: '{prev_line}' via multiline STATEMENT OF ACCOUNT")
+                    logger.debug(f"DEBUG: Bank name extracted: '{prev_line}' via multiline STATEMENT OF ACCOUNT")
                     return prev_line.title()
         
         # Comprehensive known banks fallback - check full header text
@@ -450,10 +537,10 @@ class BankStatementExtractor(BaseExtractor):
         ]
         for bank in known_banks:
             if bank in header_text:
-                print(f"DEBUG: Bank name extracted: '{bank}' via known banks list")
+                logger.debug(f"DEBUG: Bank name extracted: '{bank}' via known banks list")
                 return bank.title()
         
-        print("DEBUG: Bank NAME extraction FAILED - no patterns or known banks matched")
+        logger.error("DEBUG: Bank NAME extraction FAILED - no patterns or known banks matched")
         return None
 
     def _detect_column_headers(self, lines: List[str]) -> Optional[List[str]]:
@@ -488,7 +575,7 @@ class BankStatementExtractor(BaseExtractor):
                 cleaned = cleaned.replace(token, " ")
             return re.sub(r"\s+", " ", cleaned).strip()
 
-        for line in lines:
+        for idx, line in enumerate(lines):
             line = line.strip()
             if not line:
                 continue
@@ -496,6 +583,26 @@ class BankStatementExtractor(BaseExtractor):
             is_summary_line = self._is_summary_line(line)
             if is_summary_line:
                 amount_tokens = self._extract_amount_tokens(line)
+                
+                # Check if tokens on current line are just dates/noise
+                is_just_dates = amount_tokens and all(self._looks_like_date_number(t) for t in amount_tokens)
+                
+                # Look-ahead logic if no tokens OR only date-like tokens on current line
+                if (not amount_tokens or is_just_dates) and idx + 1 < len(lines):
+                    # Try the next 3 lines
+                    for offset in range(1, 4):
+                        next_line = lines[idx + offset].strip()
+                        if not next_line: continue
+                        # If we find another summary line label, stop look-ahead
+                        if self._is_summary_line(next_line): break
+                        
+                        next_tokens = self._extract_amount_tokens(next_line)
+                        # Filter out dates from next tokens too - we want real amounts
+                        if next_tokens and not all(self._looks_like_date_number(t) for t in next_tokens):
+                            logger.debug(f"DEBUG: Found summary value(s) '{next_tokens}' for label '{line}' on line +{offset}")
+                            amount_tokens = next_tokens
+                            break
+
                 if amount_tokens:
                     roles = self._classify_amounts_in_line(
                         line=line,
@@ -512,12 +619,15 @@ class BankStatementExtractor(BaseExtractor):
             if self._is_non_financial_line(line) or is_header_line(line):
                 continue
 
-            date_in_line = self._parse_date(line)
+            date_in_line = self._parse_date(line, reference_date=current_date_obj)
             if date_in_line:
                 if pending_tx and pending_tx.get("balance") is not None and (
                     pending_tx.get("credit") is not None or pending_tx.get("debit") is not None
                 ):
-                    txs.append(self._finalize_transaction(pending_tx, tx_conf_threshold))
+                    finalize = self._finalize_transaction(pending_tx, tx_conf_threshold)
+                    if finalize:
+                        logger.debug(f"DEBUG: Finalizing TX: {finalize.date} | {finalize.description[:30]} | CR: {finalize.credit} | DR: {finalize.debit}")
+                        txs.append(finalize)
                 current_date_obj = date_in_line
                 pending_tx = {
                     "date": current_date_obj.strftime("%Y-%m-%d"),
@@ -552,7 +662,18 @@ class BankStatementExtractor(BaseExtractor):
                 numeric_tokens.append(token_info)
 
             if not current_date_obj:
-                continue
+                # Fallback: If no date found yet, use statement start or 
+                # a placeholder so we don't lose the transaction
+                fallback_date = None
+                if statement_period:
+                    try:
+                        fallback_date = datetime.strptime(statement_period.start, "%Y-%m-%d")
+                    except: pass
+                
+                current_date_obj = fallback_date or datetime.now()
+                # Don't update current_date_obj permanently if it was a lucky guess
+                # wait, let's just use it as start and we'll update it when we find a real date
+                logger.debug(f"DEBUG: Using fallback date {current_date_obj.date()} for early transaction")
 
             if not pending_tx:
                 pending_tx = {
@@ -651,47 +772,83 @@ class BankStatementExtractor(BaseExtractor):
         if pending_tx and pending_tx.get("balance") is not None and (
             pending_tx.get("credit") is not None or pending_tx.get("debit") is not None
         ):
-            txs.append(self._finalize_transaction(pending_tx, tx_conf_threshold))
+            finalize = self._finalize_transaction(pending_tx, tx_conf_threshold)
+            if finalize: txs.append(finalize)
 
         return txs
 
-    def _parse_date(self, line: str) -> Optional[datetime]:
+    def _parse_date(self, line: str, reference_date: Optional[datetime] = None) -> Optional[datetime]:
+        """
+        Parses a date from a line. 
+        If year is missing, it intelligently uses reference_date or self.statement_year.
+        Corrects for year-rollover (e.g. Nov 2025 on a Jan 2026 statement).
+        """
+        parsed_dt = None
+        
+        # 1. ISO format (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)
         m = self.date_iso_ptrn.search(line)
         if m:
             y, mo, d = m.groups()
             try:
-                return datetime(int(y), int(mo), int(d))
+                parsed_dt = datetime(int(y), int(mo), int(d))
             except ValueError:
-                return None
+                pass
 
-        m = self.date_word_ptrn.search(line)
-        if m:
-            d1, m1, m2, d2, y = m.groups()
-            m_name = m1 or m2
-            d_val = d1 or d2
-            month = self.month_map.get(m_name.title(), self.month_map.get(m_name.title()[:3], 1))
-            year = int(y) if y else self.statement_year
-            try:
-                return datetime(year, month, int(d_val))
-            except ValueError:
-                return None
-            
-        m = self.date_num_ptrn.search(line)
-        if m:
-            v1, v2, y = m.groups()
-            year = int(y) + (2000 if y and int(y) < 100 else 0) if y else self.statement_year
-            if year < 1990 or year > 2100: year = self.statement_year
-            
-            v1_i, v2_i = int(v1), int(v2)
-            if v1_i > 12: month, day = v2_i, v1_i
-            else: month, day = v1_i, v2_i
-            
-            if 1 <= month <= 12 and 1 <= day <= 31:
+        # 2. Word format: 'Nov 04', 'Nov 04, 2025'
+        if not parsed_dt:
+            m = self.date_word_ptrn.search(line)
+            if m:
+                d1, m1, m2, d2, y = m.groups()
+                m_name = m1 or m2
+                d_val = d1 or d2
+                month = self.month_map.get(m_name.title(), self.month_map.get(m_name.title()[:3], 1))
+                year = int(y) if y else (reference_date.year if reference_date else self.statement_year)
                 try:
-                    return datetime(year, month, day)
+                    parsed_dt = datetime(year, month, int(d_val))
                 except ValueError:
-                    return None
-        return None
+                    pass
+        
+        # 3. Numeric format: '04/11/2025'
+        if not parsed_dt:
+            m = self.date_num_ptrn.search(line)
+            if m:
+                v1, v2, y = m.groups()
+                year = int(y) + (2000 if y and int(y) < 100 else 0) if y else (reference_date.year if reference_date else self.statement_year)
+                if year < 1990 or year > 2100: year = self.statement_year
+                
+                v1_i, v2_i = int(v1), int(v2)
+                if v1_i > 12: month, day = v2_i, v1_i
+                else: month, day = v1_i, v2_i
+                
+                if 1 <= month <= 12 and 1 <= day <= 31:
+                    try:
+                        parsed_dt = datetime(year, month, day)
+                    except ValueError:
+                        pass
+        
+        if not parsed_dt: return None
+        
+        # YEAR ROLLOVER LOGIC:
+        # Instead of subtracting relative to the previous line (which causes drift),
+        # we anchor it to the statement's own end date (self.statement_year/month).
+        # We only subtract 1 year if the parsed month is high (Nov/Dec) 
+        # but the statement end is low (Jan/Feb).
+        if not y: # Only auto-adjust if year was missing in text
+            stmt_end_month = self.statement_month or 1
+            # If the date found in the text has a month LATER than the statement's own end month
+            # (e.g. statement ends Jan 04, but we found a Nov 04 transaction),
+            # then that transaction must belong to the PREVIOUS year.
+            if parsed_dt.month > stmt_end_month:
+                try:
+                    parsed_dt = parsed_dt.replace(year=self.statement_year - 1)
+                except: pass
+            else:
+                # Default to statement year
+                try:
+                    parsed_dt = parsed_dt.replace(year=self.statement_year)
+                except: pass
+        
+        return parsed_dt
 
     def _extract_time_tokens(self, line: str) -> List[NumericToken]:
         tokens = []
@@ -744,8 +901,11 @@ class BankStatementExtractor(BaseExtractor):
                     summary_fields["total_money_out"] = normalized
                 elif role == NumericRole.OPENING_BALANCE and summary_fields.get("opening_balance") is None:
                     summary_fields["opening_balance"] = normalized
-                elif role == NumericRole.CLOSING_BALANCE and summary_fields.get("closing_balance") is None:
-                    summary_fields["closing_balance"] = normalized
+                elif role == NumericRole.CLOSING_BALANCE:
+                    # Overwrite if current is None or if current is a suspect year value
+                    current = summary_fields.get("closing_balance")
+                    if current is None or (current in [2024.0, 2025.0, 2026.0] and normalized not in [2024.0, 2025.0, 2026.0]):
+                        summary_fields["closing_balance"] = normalized
             return tokens
 
         if self._is_non_financial_line(line):
@@ -856,20 +1016,34 @@ class BankStatementExtractor(BaseExtractor):
             return NumericRole.SUMMARY_TOTAL_IN
         if "TOTAL DEBIT ENTRIES" in upper_line:
             return NumericRole.SUMMARY_TOTAL_OUT
-        if "BALANCE BROUGHT FORWARD" in upper_line or "OPENING BALANCE" in upper_line:
+        if any(k in upper_line for k in ["BALANCE BROUGHT FORWARD", "OPENING BALANCE", "BEGINNING BALANCE", "START BALANCE"]):
             return NumericRole.OPENING_BALANCE
-        if "BALANCE CARRIED FORWARD" in upper_line or "CLOSING BALANCE" in upper_line:
+        if any(k in upper_line for k in ["BALANCE CARRIED FORWARD", "CLOSING BALANCE", "ENDING BALANCE", "FINAL BALANCE", "TOTAL BALANCE", "ACCOUNT BALANCE", "AVAILABLE BALANCE", "LEDGER BALANCE", "OUTSTANDING BALANCE"]):
             return NumericRole.CLOSING_BALANCE
-        if "BOOK BALANCE" in upper_line or "CURRENT AVAILABLE BALANCE" in upper_line:
+        
+        # New: "CURRENT AVAILABLE BALANCE" or "CURRENT BOOK BALANCE" is definitely closing
+        if "CURRENT AVAILABLE BALANCE" in upper_line or "CURRENT BOOK BALANCE" in upper_line:
+            return NumericRole.CLOSING_BALANCE
+
+        if "BOOK BALANCE" in upper_line:
             date_in_line = self._parse_date(line)
-            if statement_period and date_in_line and self._matches_statement_date(statement_period.end, date_in_line):
-                return NumericRole.CLOSING_BALANCE
+            if date_in_line:
+                if statement_period and self._matches_statement_date(statement_period.end, date_in_line):
+                    return NumericRole.CLOSING_BALANCE
+                # If no period yet, but it's a balance as at some date, it's likely closing
+                if "AS AT" in upper_line:
+                    return NumericRole.CLOSING_BALANCE
+                    
         if "BALANCE AT" in upper_line:
             date_in_line = self._parse_date(line)
-            if statement_period and date_in_line:
-                if self._matches_statement_date(statement_period.start, date_in_line):
-                    return NumericRole.OPENING_BALANCE
-                if self._matches_statement_date(statement_period.end, date_in_line):
+            if date_in_line:
+                if statement_period:
+                    if self._matches_statement_date(statement_period.start, date_in_line):
+                        return NumericRole.OPENING_BALANCE
+                    if self._matches_statement_date(statement_period.end, date_in_line):
+                        return NumericRole.CLOSING_BALANCE
+                else: 
+                    # Without period, we can't be sure, but "Balance At" usually closing if it's the only one
                     return NumericRole.CLOSING_BALANCE
             return None
         return None
@@ -877,12 +1051,44 @@ class BankStatementExtractor(BaseExtractor):
     def _select_summary_amount_index(self, amount_tokens: List[str]) -> Optional[int]:
         if not amount_tokens:
             return None
+        
+        # Priority 1: Tokens with currency markers
         for idx, raw in enumerate(amount_tokens):
             if self._extract_currency_from_token(raw):
                 return idx
-        candidates = [idx for idx, raw in enumerate(amount_tokens) if not self._looks_like_date_number(raw)]
+        
+        # Priority 2: Candidates that look like amounts (have decimals)
+        # and are NOT suspect years (2024, 2025...)
+        decimal_candidates = []
+        for idx, raw in enumerate(amount_tokens):
+            if '.' in raw or ',' in raw:
+                val = self._normalize_amount(raw)
+                if val not in [2024.0, 2025.0, 2026.0, 2027.0]:
+                    decimal_candidates.append(idx)
+        
+        if decimal_candidates:
+            return decimal_candidates[-1]
+
+        # Priority 3: Large integers that aren't dates
+        # Many Zanaco statements show balance as an integer if no cents
+        candidates = []
+        for idx, raw in enumerate(amount_tokens):
+            if self._looks_like_date_number(raw):
+                continue
+            candidates.append(idx)
+            
         if candidates:
-            return candidates[-1]
+             # Exclude suspect years if other candidates exist
+             non_year_candidates = [idx for idx in candidates if re.sub(r'\D', '', amount_tokens[idx]) not in ["2024", "2025", "2026", "2027"]]
+             if non_year_candidates: return non_year_candidates[-1]
+             return candidates[-1]
+        
+        # Absolute fallback: avoid picking a 4-digit number (year) if there are others
+        if len(amount_tokens) > 1:
+             for idx, raw in enumerate(amount_tokens):
+                  clean = re.sub(r'\D', '', raw)
+                  if len(clean) != 4: return idx
+
         return len(amount_tokens) - 1
 
     def _matches_statement_date(self, statement_date: Optional[str], candidate: datetime) -> bool:
@@ -921,7 +1127,7 @@ class BankStatementExtractor(BaseExtractor):
     def _is_amount_like(self, raw: str) -> bool:
         if self._extract_currency_from_token(raw):
             return True
-        if re.search(r"\d+[.,]\d{2}\b", raw):
+        if re.search(r"(?:\d+|[.,])\d{2}\b", raw):
             return True
         return False
 
@@ -941,12 +1147,30 @@ class BankStatementExtractor(BaseExtractor):
         return bool(self.date_word_ptrn.search(line) or self.date_num_ptrn.search(line))
 
     def _looks_like_date_number(self, raw: str) -> bool:
+        """
+        Check if a string looks like a day (1-31) or a year (2024-2027).
+        Used to filter out noise from summary lines.
+        """
+        if "." in raw or "," in raw: return False
         clean = re.sub(r'[^\d]', '', raw)
         if not clean:
             return False
+        
+        # Strict: 4 digit numbers that look like years
         if len(clean) == 4:
-            return True
-        return int(clean) <= 31
+            return 2020 <= int(clean) <= 2030
+            
+        # Strict: 1-2 digit numbers that look like days
+        # If the number is small (e.g. 4), and we are in a summary context,
+        # it's almost certainly part of a date like "Jan 04"
+        if len(clean) <= 2:
+            try:
+                val = int(clean)
+                return 1 <= val <= 31
+            except:
+                return False
+                
+        return False
 
     def _is_summary_line(self, line: str) -> bool:
         upper_line = line.upper()
@@ -971,7 +1195,7 @@ class BankStatementExtractor(BaseExtractor):
             score += 0.1
         return min(score, 1.0)
 
-    def _finalize_transaction(self, tx_data: Dict[str, Optional[float]], threshold: float) -> Transaction:
+    def _finalize_transaction(self, tx_data: Dict[str, Any], threshold: float) -> Optional[Transaction]:
         credit = tx_data.get("credit")
         debit = tx_data.get("debit")
         direction = "INFLOW" if credit is not None else "OUTFLOW"
@@ -979,11 +1203,32 @@ class BankStatementExtractor(BaseExtractor):
         reasons = tx_data.get("reasons", [])
         confidence_score = tx_data.get("confidence", 0.0)
         flags = []
+        
+        description = tx_data.get("description") or "Transaction"
+        
+        # JUNK FILTER: Ignore transactions that are likely OCR noise
+        # 1. Amounts too small (e.g. picking up page numbers or dates as amounts)
+        if amount is not None and amount < 1.0: return None
+        
+        # 2. Reject amounts that match potential years (junk artifact from headers)
+        if amount in [2024.0, 2025.0, 2026.0]:
+            return None
+
+        # 3. Description is just a keyword or fragment typically found in headers
+        desc_upper = description.upper()
+        if any(desc_upper == k for k in ["ACCOUNT NAME", "HOME BRANCH", "ZANACO", "STATEMENT OF ACCOUNT", "BRANCH NAME", "VALUE DATE", "POST DATE", "TRANSACTION DETAILS"]):
+            return None
+            
+        # 4. Description is just a date fragment (e.g. "NOV 04", "20 04,")
+        if re.match(r'^[A-Z]{3,}\s+\d{1,2}$', desc_upper): return None
+        if re.match(r'^\d{2}\s+\d{2},?$', desc_upper): return None # Filter "20 04,"
+
         if confidence_score < threshold:
             flags.append("LOW_CONFIDENCE_REVIEW")
-        description = tx_data.get("description") or "Transaction"
-        if tx_data.get("salary_detected") or any(keyword in description.upper() for keyword in ["SALARY", "PAYROLL"]):
+            
+        if tx_data.get("salary_detected") or any(keyword in desc_upper for keyword in ["SALARY", "PAYROLL"]):
             flags.append("SALARY")
+            
         return Transaction(
             date=tx_data.get("date"),
             description=description,
@@ -1114,4 +1359,4 @@ class BankStatementExtractor(BaseExtractor):
             return "Monthly (high confidence)"
         if len(monthly_like) >= max(1, len(deltas) // 2):
             return "Likely monthly"
-        return "Not confidently determined"
+        return "Irregular"

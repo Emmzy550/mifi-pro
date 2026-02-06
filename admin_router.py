@@ -8,6 +8,7 @@ from models.user import User, UserRole
 from models.organization import Organization, OrgStatus, BillingPlan
 from models.api_key import APIKey, KeyStatus
 from agents.auth_agent import AuthAgent, get_super_admin
+from services.email_service import EmailService
 from utils.db import Database
 from agents.audit_agent import AuditAgent
 import config
@@ -85,10 +86,42 @@ async def create_organization(
         AuditAgent.log_event("USER_CREATED_BY_SYSTEM", current_user.email, {"new_user_id": new_user.id, "org": org_id})
         
         response["user_created"] = True
-        response["initial_credentials"] = {
-            "email": admin_email,
-            "password": generated_password
-        }
+        dashboard_url = os.getenv("DASHBOARD_PUBLIC_URL", "http://localhost:5173/login")
+        inviter_name = getattr(current_user, "full_name", None) or current_user.email
+        invite_subject = f"You've been invited to {new_org.name} on Loan Officer AI"
+        invite_text = (
+            f"Hello,\n\n"
+            f"{inviter_name} invited you to join {new_org.name} on Loan Officer AI.\n\n"
+            f"Login: {dashboard_url}\n"
+            f"Email: {admin_email}\n"
+            f"Temporary password: {generated_password}\n\n"
+            f"For security, please change your password after your first login."
+        )
+        invite_html = f"""
+        <p>Hello,</p>
+        <p><strong>{inviter_name}</strong> invited you to join <strong>{new_org.name}</strong> on Loan Officer AI.</p>
+        <p>
+            <strong>Login:</strong> <a href="{dashboard_url}">{dashboard_url}</a><br/>
+            <strong>Email:</strong> {admin_email}<br/>
+            <strong>Temporary password:</strong> {generated_password}
+        </p>
+        <p>For security, please change your password after your first login.</p>
+        """
+        invite_status = EmailService.send_email(
+            to_email=admin_email,
+            subject=invite_subject,
+            body_text=invite_text,
+            body_html=invite_html
+        )
+        invite_sent = invite_status.get("status") == "SENT" and invite_status.get("environment") == "production"
+        response["invite_sent"] = invite_sent
+        response["invite"] = invite_status
+
+        if not invite_sent:
+            response["initial_credentials"] = {
+                "email": admin_email,
+                "password": generated_password
+            }
     else:
         response["user_created"] = False
 
@@ -112,6 +145,9 @@ async def update_organization(
         
     if "monthly_limit" in update_data:
         org.monthly_limit = update_data["monthly_limit"]
+
+    if "user_limit" in update_data:
+        org.user_limit = update_data["user_limit"]
         
     if "plan" in update_data:
         org.plan = update_data["plan"]

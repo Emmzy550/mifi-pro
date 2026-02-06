@@ -29,6 +29,7 @@ class Payment(BaseModel):
     phone_number: Optional[str] = Field(None, description="Phone number for MoMo")
     reference_code: Optional[str] = Field(None, description="Unique reference code for Bank Transfer/Invoice")
     invoice_id: Optional[str] = Field(None, description="Invoice ID for accounting")
+    invoice_pdf_path: Optional[str] = Field(None, description="Local path to generated PDF invoice")
     
     # Metadata
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

@@ -2,14 +2,89 @@
 @tailwind components;
 @tailwind utilities;
 
+@import url('https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,600;6..72,700&family=Sora:wght@400;500;600;700&display=swap');
+
+:root {
+    --ui-bg: #f6f4f0;
+    --ui-surface: #ffffff;
+    --ui-ink: #0f172a;
+    --ui-muted: #6b7280;
+    --ui-accent: #0f766e;
+    --ui-accent-2: #f59e0b;
+    --ui-border: #e5e7eb;
+    --ui-shadow: 0 18px 45px rgba(15, 23, 42, 0.08);
+}
+
 @layer base {
     body {
-        @apply bg-slate-50 text-slate-900;
+        font-family: "Sora", system-ui, sans-serif;
+        background: var(--ui-bg);
+        color: var(--ui-ink);
+    }
+    h1, h2, h3 {
+        font-family: "Newsreader", "Times New Roman", serif;
+        letter-spacing: -0.02em;
     }
 }
 
 .card {
     @apply bg-white p-6 rounded-xl shadow-sm border border-slate-100;
+}
+
+.decision-review {
+    background: radial-gradient(1200px circle at 12% 0%, rgba(15, 118, 110, 0.10), transparent 60%),
+        radial-gradient(900px circle at 90% 10%, rgba(245, 158, 11, 0.12), transparent 55%),
+        var(--ui-bg);
+    border-radius: 28px;
+    padding: 28px;
+}
+
+.decision-card {
+    background: var(--ui-surface);
+    border: 1px solid var(--ui-border);
+    box-shadow: var(--ui-shadow);
+    border-radius: 28px;
+}
+
+.decision-headline {
+    font-family: "Newsreader", "Times New Roman", serif;
+    letter-spacing: -0.02em;
+}
+
+.decision-accent {
+    color: var(--ui-accent);
+}
+
+.app-shell {
+    background: radial-gradient(900px circle at 10% -10%, rgba(15, 118, 110, 0.08), transparent 60%),
+        radial-gradient(900px circle at 90% -10%, rgba(245, 158, 11, 0.10), transparent 55%),
+        var(--ui-bg);
+}
+
+.sidebar-shell {
+    background: #ffffff;
+    border-right: 1px solid var(--ui-border);
+    min-height: 100vh;
+}
+
+.sidebar-item {
+    color: #64748b;
+}
+
+.sidebar-item:hover {
+    background: #f1f5f9;
+}
+
+.sidebar-item-active {
+    background: rgba(15, 118, 110, 0.12);
+    color: var(--ui-accent);
+    font-weight: 600;
+}
+
+.page-shell {
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: 28px;
 }
 
 /* HIGH VISIBILITY FLUID ANIMATION LAYER */
@@ -48,4 +123,53 @@
 .glass-glow {
     box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.3),
         inset 0 -1px 1px rgba(0, 0, 0, 0.1);
+}
+
+/* Export action buttons */
+.export-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 8px 14px;
+    border-radius: 14px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    color: #0f172a;
+    background: linear-gradient(135deg, #ffffff, #f8fafc);
+    box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
+    transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease, background 160ms ease;
+}
+
+.export-btn:hover {
+    transform: translateY(-1px);
+    border-color: rgba(15, 23, 42, 0.2);
+    box-shadow: 0 12px 24px rgba(15, 23, 42, 0.12);
+}
+
+.export-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
+.export-btn--pdf {
+    color: #0f172a;
+    background: linear-gradient(135deg, #e0f2fe, #f8fafc);
+    border-color: rgba(14, 116, 144, 0.25);
+}
+
+.export-btn--xlsx {
+    color: #052e16;
+    background: linear-gradient(135deg, #dcfce7, #f8fafc);
+    border-color: rgba(34, 197, 94, 0.3);
+}
+
+.export-btn--csv {
+    color: #1e293b;
+    background: linear-gradient(135deg, #fef3c7, #f8fafc);
+    border-color: rgba(245, 158, 11, 0.3);
 }

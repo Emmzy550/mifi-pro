@@ -1,3 +1,5 @@
+import logging
+logger = logging.getLogger(__name__)
 """
 ProfileBuilder: Service to build UnifiedFinancialProfile from document extractions.
 
@@ -126,13 +128,13 @@ class ProfileBuilder:
         if bank_summary:
             identity.bank_name = bank_summary.bank_name
             identity.account_holder_name = bank_summary.account_holder_name
-            print(f"DEBUG [ProfileBuilder]: Copying from bank_summary -> identity.bank_name='{identity.bank_name}', identity.account_holder_name='{identity.account_holder_name}'", flush=True)
+            logger.debug(f"DEBUG [ProfileBuilder]: Copying from bank_summary -> identity.bank_name='{identity.bank_name}', identity.account_holder_name='{identity.account_holder_name}'")
             
             # SAFETY CHECK: Verify we're not losing data
             if bank_summary.account_holder_name is not None and identity.account_holder_name is None:
-                print(f"⚠️  CRITICAL: bank_summary.account_holder_name was '{bank_summary.account_holder_name}' but identity.account_holder_name is None!", flush=True)
+                logger.error(f"⚠️  CRITICAL: bank_summary.account_holder_name was '{bank_summary.account_holder_name}' but identity.account_holder_name is None!")
         else:
-            print(f"DEBUG [ProfileBuilder]: No bank_summary available for identity fields", flush=True)
+            logger.debug(f"DEBUG [ProfileBuilder]: No bank_summary available for identity fields")
         
         # Determine verification status
         has_name = identity.full_name is not None
@@ -348,16 +350,16 @@ class ProfileBuilder:
         CRITICAL: This is the gating logic that prevents partial assessments.
         Required documents: PAYSLIP + BANK_STATEMENT (both must be PRESENT_COMPLETE)
         """
-        print(f"\n{'='*80}", flush=True)
-        print(f"DEBUG [ProfileBuilder]: Evaluating assessment readiness", flush=True)
-        print(f"  - Payslip status: {profile.document_coverage.payslip}", flush=True)
-        print(f"  - Bank statement status: {profile.document_coverage.bank_statement}", flush=True)
-        print(f"  - Identity full_name: '{profile.identity.full_name}'", flush=True)
-        print(f"  - Identity account_holder_name: '{profile.identity.account_holder_name}'", flush=True)
-        print(f"  - Identity bank_name: '{profile.identity.bank_name}'", flush=True)
-        print(f"  - Income net_pay: {profile.income.net_pay}", flush=True)
-        print(f"  - Banking transaction_count: {profile.banking_behavior.transaction_count}", flush=True)
-        print(f"{'='*80}\n", flush=True)
+        logger.info(f"\n{'='*80}")
+        logger.debug(f"DEBUG [ProfileBuilder]: Evaluating assessment readiness")
+        logger.info(f"  - Payslip status: {profile.document_coverage.payslip}")
+        logger.info(f"  - Bank statement status: {profile.document_coverage.bank_statement}")
+        logger.info(f"  - Identity full_name: '{profile.identity.full_name}'")
+        logger.info(f"  - Identity account_holder_name: '{profile.identity.account_holder_name}'")
+        logger.info(f"  - Identity bank_name: '{profile.identity.bank_name}'")
+        logger.info(f"  - Income net_pay: {profile.income.net_pay}")
+        logger.info(f"  - Banking transaction_count: {profile.banking_behavior.transaction_count}")
+        logger.info(f"{'='*80}\n")
         
         blocking_reasons = []
         
@@ -392,8 +394,8 @@ class ProfileBuilder:
         # STRICT GATING: If ANY blocking reason exists, return BLOCKED
         # No PARTIAL assessments - this enforces data integrity
         if blocking_reasons:
-            print(f"DEBUG [ProfileBuilder]: Assessment BLOCKED. Reasons: {blocking_reasons}", flush=True)
+            logger.debug(f"DEBUG [ProfileBuilder]: Assessment BLOCKED. Reasons: {blocking_reasons}")
             return AssessmentReadiness.BLOCKED, blocking_reasons
         
-        print(f"DEBUG [ProfileBuilder]: Assessment READY ✓", flush=True)
+        logger.debug(f"DEBUG [ProfileBuilder]: Assessment READY ✓")
         return AssessmentReadiness.READY, []

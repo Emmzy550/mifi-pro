@@ -25,6 +25,17 @@ class ExplanationAgent:
         decision_metadata = decision_results.get("decision_metadata", {})
         blocking_factors = decision_metadata.get("blocking_factors", [])
         policy_version = decision_metadata.get("policy_version", "v1.2.0-human-first")
+        data_quality_score = decision_metadata.get("data_quality_score")
+        data_quality_issues = []
+        if data_quality_score is not None:
+            try:
+                import config
+                from utils.policy_context import policy_value
+                threshold = float(policy_value("data_quality_refer_threshold", config.DATA_QUALITY_REFER_THRESHOLD))
+                if data_quality_score < threshold:
+                    data_quality_issues.append(f"DATA_QUALITY_BELOW_THRESHOLD:{data_quality_score:.2f}")
+            except Exception:
+                data_quality_issues.append(f"DATA_QUALITY_SCORE:{data_quality_score}")
         
         # Initial Rationale components
         summary = ""
@@ -216,6 +227,14 @@ class ExplanationAgent:
             officer_view_str += behavioral_text
             audit_view += f"\nBEHAVIORAL_STABILITY: {behavioral_stability:.2f}\nDEPOSIT_CONSISTENCY: {deposit_consistency:.2f}"
 
+        adverse_action = {
+            "decision": decision,
+            "policy_constraints": blocking_factors,
+            "data_quality_issues": data_quality_issues,
+            "primary_reason_codes": blocking_factors if blocking_factors else [],
+            "next_steps": action_item
+        }
+
         # Final result structure
         result = {
             "decision_summary": decision_summary,
@@ -225,6 +244,7 @@ class ExplanationAgent:
             "officer_view": "".join(c for c in officer_view_str if ord(c) < 128),
             "audit_view": "".join(c for c in audit_view if ord(c) < 128),
             "blocking_factors": blocking_factors,
+            "adverse_action": adverse_action,
             "explanation": "".join(c for c in officer_view_str if ord(c) < 128), # Legacy fallback
             "explanation_source": "engine_deterministic" # Locked V1 Policy
         }

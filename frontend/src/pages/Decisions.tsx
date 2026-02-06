@@ -131,7 +131,7 @@ export default function Decisions() {
                                         <span className={`font-mono text-xs font-bold ${getRiskColor(d.risk_score)}`}>{(d.risk_score * 100).toFixed(0)}%</span>
                                     </div>
                                 </td>
-                                <td className="px-6 py-4 font-bold text-slate-700 font-mono italic">${(d.recommended_amount || 0).toLocaleString()}</td>
+                                <td className="px-6 py-4 font-bold text-slate-700 font-mono italic">ZMW {(d.recommended_amount || 0).toLocaleString()}</td>
                                 <td className="px-6 py-4">
                                     <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest border ${getStatusColor(d.decision)}`}>
                                         {d.decision}

@@ -107,7 +107,7 @@ IntakeAgent.process(raw_data: dict) -> Borrower
 
 **Input**: `Borrower` object
 **Output**: Risk results dictionary with:
-- `risk_score` (0-100)
+- `risk_score` (0-1)
 - `risk_level` (LOW/MEDIUM/HIGH)
 - `flags` (list of risk flags)
 - `metrics` (DTI, affordability, ML probability, etc.)
@@ -118,7 +118,7 @@ RiskAgent.evaluate(borrower: Borrower) -> dict
 ```
 
 **Safety Gates:**
-1. Critical flags force `risk_score = 100`
+1. Critical flags force `risk_score = 1.0`
 2. ML cannot reduce rule-based score
 3. Ensemble weighting respects `RULE_WEIGHT` and `ML_WEIGHT`
 
@@ -170,13 +170,13 @@ MLRiskAgent.predict(borrower: Borrower) -> dict
 **Purpose**: Loan recommendation logic
 
 Translates risk scores into business decisions:
-- **LOW risk (0-40)**: APPROVED at base rate (15%)
-- **MEDIUM risk (41-70)**: CONDITIONAL_APPROVAL at higher rate (20%)
-- **HIGH risk (71-100)**: REJECT
+- **LOW risk (< 0.3)**: APPROVE at base rate (15%)
+- **MEDIUM risk (< 0.7)**: CONDITIONAL at higher rate (20%)
+- **HIGH risk (>= 0.7)**: REJECT
 
 **Input**: Risk results + Borrower
 **Output**: Decision dictionary with:
-- `decision` (APPROVED/CONDITIONAL_APPROVAL/REJECT)
+- `decision` (APPROVE/CONDITIONAL/REJECT/REFER)
 - `recommended_amount`
 - `recommended_interest_rate`
 
@@ -345,9 +345,12 @@ sequenceDiagram
   "assessment_id": "ASMT-X1Y2Z3A4",
   "borrower_id": "BOR-A1B2C3D4",
   "organization_id": "ORG-12345",
-  "risk_score": 45,
+  "risk_score": 0.45,
+  "risk_score_percent": 45.0,
+  "risk_score_scale": "0-1",
   "risk_level": "MEDIUM",
-  "decision": "CONDITIONAL_APPROVAL",
+  "decision": "CONDITIONAL",
+  "decision_legacy": "CONDITIONAL_APPROVAL",
   "recommended_amount": 15000,
   "recommended_interest_rate": 20.0,
   "requested_amount": 15000,

@@ -2,6 +2,8 @@ import secrets
 import hashlib
 from datetime import datetime, timedelta
 from typing import Optional
+import logging
+logger = logging.getLogger(__name__)
 
 from fastapi import HTTPException, Security, Depends
 from fastapi.security import APIKeyHeader, OAuth2PasswordBearer
@@ -156,14 +158,14 @@ class AuthAgent:
         )
         
         if not token:
-            print("[AUTH DEBUG] No token provided")
+            logger.debug("[AUTH DEBUG] No token provided")
             raise credentials_exception
 
         try:
             # Force DB/Firebase Initialization
             Database.get_db()
         except Exception as db_error:
-            print(f"[AUTH DEBUG] Database initialization failed: {db_error}")
+            logger.error(f"[AUTH DEBUG] Database initialization failed: {db_error}")
             raise HTTPException(
                 status_code=500,
                 detail=f"Database initialization failed: {str(db_error)}"
@@ -173,44 +175,45 @@ class AuthAgent:
         
         # 1. ATTEMPT LOCAL JWT (HS256)
         try:
-            print("[AUTH DEBUG] Attempting local HS256 JWT decoding...")
+            logger.debug("[AUTH DEBUG] Attempting local HS256 JWT decoding...")
             payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
             email = payload.get("sub")
             if email:
-                print(f"[AUTH DEBUG] Valid local JWT found for: {email}")
+                logger.debug(f"[AUTH DEBUG] Valid local JWT found for: {email}")
         except JWTError:
             # This is expected for standard dashboard users who send Firebase tokens
-            print("[AUTH DEBUG] Local JWT decode failed. Attempting Firebase ID token...")
+            logger.error("[AUTH DEBUG] Local JWT decode failed. Attempting Firebase ID token...")
         except Exception as e:
-            print(f"[AUTH DEBUG] Unexpected local JWT error: {e}")
+            logger.error(f"[AUTH DEBUG] Unexpected local JWT error: {e}")
 
         # 2. ATTEMPT FIREBASE ID TOKEN (RS256)
         if not email:
             try:
                 # Decodes and verifies the token using Firebase Public Keys
-                decoded_token = firebase_auth.verify_id_token(token)
+                app = firebase_admin.get_app()
+                decoded_token = firebase_auth.verify_id_token(token, app=app)
                 email = decoded_token.get("email")
                 if email:
-                     print(f"[AUTH DEBUG] Valid Firebase ID token found for: {email}")
+                     logger.debug(f"[AUTH DEBUG] Valid Firebase ID token found for: {email}")
             except Exception as e:
-                print(f"[AUTH DEBUG] Firebase token verification failed: {e}")
+                logger.error(f"[AUTH DEBUG] Firebase token verification failed: {e}")
                 raise credentials_exception
         
         if not email:
-            print("[AUTH DEBUG] All auth methods failed.")
+            logger.error("[AUTH DEBUG] All auth methods failed.")
             raise credentials_exception
         
         try:
-            print(f"[AUTH DEBUG] Looking up user by email: {email}")
+            logger.debug(f"[AUTH DEBUG] Looking up user by email: {email}")
             user = Database.get_user_by_email(email)
             if user is None:
-                print(f"[AUTH DEBUG] User {email} not found in Firestore Users collection")
+                logger.debug(f"[AUTH DEBUG] User {email} not found in Firestore Users collection")
                 raise credentials_exception
-            print(f"[AUTH DEBUG] Found user: {user.id}, org={user.organization_id}")
+            logger.debug(f"[AUTH DEBUG] Found user: {user.id}, org={user.organization_id}")
         except HTTPException:
             raise
         except Exception as user_err:
-            print(f"[AUTH DEBUG] User lookup failed: {user_err}")
+            logger.error(f"[AUTH DEBUG] User lookup failed: {user_err}")
             raise HTTPException(
                 status_code=500,
                 detail=f"User lookup failed: {str(user_err)}"
@@ -218,30 +221,30 @@ class AuthAgent:
             
         try:
             # Check Organization Status
-            print(f"[AUTH DEBUG] Looking up organization: {user.organization_id}")
+            logger.debug(f"[AUTH DEBUG] Looking up organization: {user.organization_id}")
             org = Database.get_organization(user.organization_id)
             if not org:
-                print(f"[AUTH DEBUG] Organization {user.organization_id} not found")
+                logger.debug(f"[AUTH DEBUG] Organization {user.organization_id} not found")
                 raise HTTPException(status_code=HTTP_403_FORBIDDEN, detail="Organization not found")
             
             if org.status != OrgStatus.ACTIVE:
                 # Handle cases where OrgStatus is still a string in old records or Enum
                 status_val = org.status.value if hasattr(org.status, 'value') else org.status
                 if status_val != "ACTIVE":
-                    print(f"[AUTH DEBUG] Organization status is {status_val}, not ACTIVE")
+                    logger.debug(f"[AUTH DEBUG] Organization status is {status_val}, not ACTIVE")
                     raise HTTPException(
                         status_code=HTTP_403_FORBIDDEN, detail="Organization is suspended or invalid"
                     )
         except HTTPException:
             raise
         except Exception as org_err:
-            print(f"[AUTH DEBUG] Organization lookup failed: {org_err}")
+            logger.error(f"[AUTH DEBUG] Organization lookup failed: {org_err}")
             raise HTTPException(
                 status_code=500,
                 detail=f"Organization lookup failed: {str(org_err)}"
             )
                  
-        print(f"[AUTH DEBUG] Authentication successful for {email}")
+        logger.debug(f"[AUTH DEBUG] Authentication successful for {email}")
         return user
 
     @classmethod
@@ -259,28 +262,40 @@ class AuthAgent:
                 password=password,
                 display_name=display_name
             )
-            print(f"DEBUG AUTH: Created Firebase user {user.uid} for {email}")
+            logger.debug(f"DEBUG AUTH: Created Firebase user {user.uid} for {email}")
             return user.uid
         except firebase_admin.exceptions.AlreadyExistsError:
             # If user already exists in Firebase, we should probably try to get their UID
             # and reuse it, or raise an error if this is unexpected.
             user = firebase_auth.get_user_by_email(email)
-            print(f"DEBUG AUTH: Firebase user {email} already exists. Reusing UID {user.uid}")
+            logger.debug(f"DEBUG AUTH: Firebase user {email} already exists. Reusing UID {user.uid}")
             return user.uid
         except Exception as e:
-            print(f"DEBUG AUTH: Failed to create Firebase user: {e}")
+            logger.error(f"DEBUG AUTH: Failed to create Firebase user: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to create authentication record: {str(e)}")
+
+    @classmethod
+    def update_firebase_user_password(cls, user_id: str, new_password: str):
+        """
+        Updates a user's password in Firebase Authentication.
+        """
+        Database.get_db()
+        try:
+            firebase_auth.update_user(user_id, password=new_password)
+        except Exception as e:
+            print(f"DEBUG AUTH: Failed to update Firebase password: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to update authentication record: {str(e)}")
 
     @classmethod
     async def authenticate_user(cls, email: str, password: str) -> Optional[User]:
         user = Database.get_user_by_email(email)
         if not user:
-            print(f"Auth Debug: User {email} not found in DB")
+            logger.debug(f"Auth Debug: User {email} not found in DB")
             return None
         
         # Verify password
         if not cls.verify_password(password, user.password_hash):
-            print(f"Auth Debug: Password verification failed for {email}.")
+            logger.error(f"Auth Debug: Password verification failed for {email}.")
             return None
             
         return user
@@ -370,7 +385,7 @@ class AuthAgent:
 class AuthUser:
     def __init__(self, role: str, organization_id: str, environment: str = "SANDBOX", email: Optional[str] = None):
         self.role = role
-        self.organization_id = organization_id
+        self.organization_id = organization_id.upper() if organization_id else "DEFAULT_ORG"
         self.environment = environment
         self.email = email or f"key_user_{organization_id.lower()}"
 

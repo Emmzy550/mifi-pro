@@ -1,0 +1,147 @@
+import os
+import firebase_admin
+from firebase_admin import credentials, firestore
+import sys
+
+# Mock Firestore for local development/testing without credentials
+class MockCollection:
+    def __init__(self, name):
+        self.name = name
+    def document(self, id=None):
+        return MockDocument(id)
+    def where(self, field, op, value):
+        return self
+    def order_by(self, field, direction=None):
+        return self
+    def limit(self, count):
+        return self
+    def stream(self):
+        return []
+    def get(self):
+        return MockSnapshot(None)
+
+class MockDocument:
+    def __init__(self, id=None):
+        self.id = id or "mock-id"
+    def collection(self, name):
+        return MockCollection(name)
+    def get(self):
+        return MockSnapshot(self.id)
+    def set(self, data, merge=False):
+        return None
+    def update(self, data):
+        return None
+    def delete(self):
+        return None
+
+class MockSnapshot:
+    def __init__(self, id):
+        self.id = id
+        self.exists = False
+    def to_dict(self):
+        return {}
+
+class MockFirestore:
+    def collection(self, name):
+        return MockCollection(name)
+    def document(self, path):
+        return MockDocument(path)
+    def collections(self):
+        return []
+
+class Database:
+    _db = None
+
+    @classmethod
+    def get_db(cls):
+        if cls._db is None:
+            service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT", "serviceAccountKey.json")
+            project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "mfi--pro")
+            
+            try:
+                if os.path.exists(service_account_path):
+                    cred = credentials.Certificate(service_account_path)
+                    if not len(firebase_admin._apps):
+                        firebase_admin.initialize_app(cred, {
+                            'projectId': project_id
+                        })
+                    cls._db = firestore.client()
+                    print(f"DEBUG: Firestore initialized using {service_account_path} and project {project_id}")
+                    sys.stdout.flush()
+                else:
+                    # Production / Cloud Run: Use Application Default Credentials
+                    print(f"DEBUG: Service key not found at {service_account_path}. Using Application Default Credentials (ADC) for project {project_id}...")
+                    sys.stdout.flush()
+                    if not len(firebase_admin._apps):
+                        # Explicitly set project ID if it's available
+                        firebase_admin.initialize_app(options={
+                            'projectId': project_id
+                        })
+                    cls._db = firestore.client()
+                    print(f"DEBUG: Firestore initialized using ADC for project {project_id}")
+                    sys.stdout.flush()
+            except Exception as e:
+                import traceback
+                print(f"WARNING: Real Firestore failed, falling back to Mock. Error: {e}")
+                traceback.print_exc()
+                sys.stdout.flush()
+                cls._db = MockFirestore()
+        return cls._db
+
+    @classmethod
+    def list_organizations(cls):
+        db = cls.get_db()
+        docs = db.collection("organizations").stream()
+        from models.organization import Organization
+        return [Organization(**{**doc.to_dict(), "id": doc.id}) for doc in docs]
+
+    @classmethod
+    def get_organization(cls, org_id):
+        db = cls.get_db()
+        doc = db.collection("organizations").document(org_id).get()
+        if not doc.exists:
+            return None
+        from models.organization import Organization
+        return Organization(**{**doc.to_dict(), "id": doc.id})
+
+    @classmethod
+    def get_user_by_email(cls, email):
+        db = cls.get_db()
+        users = list(db.collection("users").where("email", "==", email).stream())
+        if not users:
+            return None
+        from models.user import User
+        doc = users[0]
+        return User(**{**doc.to_dict(), "id": doc.id})
+    
+    @classmethod
+    def list_loans(cls):
+        db = cls.get_db()
+        docs = db.collection("loans").stream()
+        from models.loan import Loan
+        return [Loan(**{**doc.to_dict(), "id": doc.id}) for doc in docs]
+
+    @classmethod
+    def list_assessments(cls):
+        db = cls.get_db()
+        docs = db.collection("assessments").stream()
+        from models.assessment import Assessment
+        return [Assessment(**{**doc.to_dict(), "id": doc.id}) for doc in docs]
+
+    @classmethod
+    def get_api_key(cls, key_hash: str):
+        db = cls.get_db()
+        keys = list(db.collection("api_keys").where("key_hash", "==", key_hash).stream())
+        if not keys:
+            return None
+        from models.api_key import APIKey
+        doc = keys[0]
+        return APIKey(**{**doc.to_dict(), "id": doc.id})
+
+    @classmethod
+    def list_api_keys(cls, org_id: str):
+        db = cls.get_db()
+        docs = db.collection("api_keys").where("organization_id", "==", org_id).stream()
+        from models.api_key import APIKey
+        return [APIKey(**{**doc.to_dict(), "id": doc.id}) for doc in docs]
+ nanomations

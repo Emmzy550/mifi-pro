@@ -2,6 +2,8 @@ import re
 from typing import List, Optional
 from models.document import ExtractionResult, DocumentType, PayslipSummary
 from utils.extractors.base import BaseExtractor
+import logging
+logger = logging.getLogger(__name__)
 
 class PayslipExtractor(BaseExtractor):
     def extract(self, text: str) -> ExtractionResult:
@@ -12,46 +14,43 @@ class PayslipExtractor(BaseExtractor):
         
         # Basic Regex Extraction (robust for line breaks and currency)
         # Try GROSS PAY first
+        # Pattern: Prioritize comma-separated format OR 1+ digits (non-greedy to not stop at comma if it's there)
+        amount_pattern = r'([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]{2})?|[0-9]{1,3}(?:\.[0-9]{2})?)'
+        
         gross_match = re.search(
-            r'GROSS\s*PAY[^0-9]*([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})',
+            rf'(?:GROSS\s*PAY|GROSS\s*EARNINGS|GROSS\s*AMOUNT|GROSS\s*SALARY)[^0-9]*{amount_pattern}',
             text,
             re.IGNORECASE
         )
         if not gross_match:
             gross_match = re.search(
-                r'GROSS\s*PAY[\s\S]{0,40}([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})',
-                text,
-                re.IGNORECASE
-            )
-        # Also try GROSS EARNINGS (alternative format)
-        if not gross_match:
-            gross_match = re.search(
-                r'GROSS\s*EARNINGS[^0-9]*([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})',
+                rf'(?:GROSS\s*PAY|GROSS\s*EARNINGS|GROSS\s*AMOUNT|GROSS\s*SALARY)[\s\S]{0,50}{amount_pattern}',
                 text,
                 re.IGNORECASE
             )
 
+        # Robust Net Pay Extraction
+        net_synonyms = r'NET\s*PAY|NET\s*AMOUNT|TAKE\s*HOME|TOTAL\s*PAID|NET\s*SALARY|NET\s*INCOME|NET\s*PAYABLE|TOTAL\s*NET|NET\s*EARNINGS|NET\s*PAID|AMOUNT\s*PAYABLE|NET\s*TAKE\s*HOME|TOTAL\s*PAYABLE'
         net_match = re.search(
-            r'NET\s*PAY[^0-9]*([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})',
+            rf'(?:{net_synonyms})[^0-9]*{amount_pattern}',
             text,
             re.IGNORECASE
         )
         if not net_match:
             net_match = re.search(
-                r'NET\s*PAY[\s\S]{0,40}([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})',
+                rf'(?:{net_synonyms})[\s\S]{0,50}{amount_pattern}',
                 text,
                 re.IGNORECASE
             )
 
         deductions_match = re.search(
-            r'TOTAL\s+DEDUCTIONS?.*?\s+([0-9,]+\.[0-9]{2})',
+            rf'(?:TOTAL\s+DEDUCTIONS?|GROSS\s*DEDUCTIONS?)[^0-9]*{amount_pattern}',
             text,
             re.IGNORECASE
         )
-        # Also try GROSS DEDUCTIONS
         if not deductions_match:
-            deductions_match = re.search(
-                r'GROSS\s*DEDUCTIONS?[^0-9]*([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})',
+             deductions_match = re.search(
+                rf'(?:TOTAL\s+DEDUCTIONS?|GROSS\s*DEDUCTIONS?)[\s\S]{0,50}{amount_pattern}',
                 text,
                 re.IGNORECASE
             )
@@ -67,6 +66,12 @@ class PayslipExtractor(BaseExtractor):
         if deductions_match:
             summary.deductions = self._parse_amount(deductions_match.group(1))
             reasons.append("deductions_match")
+
+        # Fallback Calculation: Net = Gross - Deductions
+        if summary.net_pay is None and summary.gross_pay is not None and summary.deductions is not None:
+            summary.net_pay = round(summary.gross_pay - summary.deductions, 2)
+            reasons.append("calculated_net_pay")
+            logger.debug(f"DEBUG: Calculated net_pay ({summary.net_pay}) from gross ({summary.gross_pay}) and deductions ({summary.deductions})")
             
         # Detect employer - multiple strategies
         # Strategy 1: Explicit "EMPLOYER:" label

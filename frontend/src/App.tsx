@@ -13,6 +13,8 @@ import UsageBilling from './pages/UsageBilling';
 import AdminDashboard from './pages/AdminDashboard';
 import ManualAssessments from './pages/ManualAssessments';
 import DecisionReview from './pages/DecisionReview';
+import PolicyStudio from './pages/PolicyStudio';
+import Team from './pages/Team';
 import { Toaster } from 'react-hot-toast';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -42,6 +44,8 @@ export default function App() {
                         <Route path="manual-assessments" element={<ManualAssessments />} />
                         <Route path="decisions" element={<Decisions />} />
                         <Route path="decisions/:assessmentId" element={<DecisionReview />} />
+                        <Route path="policy-studio" element={<PolicyStudio />} />
+                        <Route path="team" element={<Team />} />
                         <Route path="audit-logs" element={<AuditLogs />} />
                         <Route path="documentation" element={<Documentation />} />
                         <Route path="usage-billing" element={<UsageBilling />} />

@@ -3,6 +3,8 @@ import io
 import os
 import shutil
 import glob
+import logging
+logger = logging.getLogger(__name__)
 try:
     import PyPDF2
 except ImportError:
@@ -90,46 +92,69 @@ class TransactionParser:
                 confidence=confidence,
                 warnings=["Document classification confidence below threshold or unsupported type"]
             )
+            if not result.raw_text_preview:
+                result.raw_text_preview = text[:200]
             return self._finalize_result(result)
         
         # 3. Dispatch (Strategy-based, isolated per document type)
         if doc_type == DocumentType.BANK_STATEMENT:
-            return self._finalize_result(self._extract_bank_statement(text))
+            result = self._extract_bank_statement(text)
+            if not result.raw_text_preview:
+                result.raw_text_preview = text[:200]
+            return self._finalize_result(result)
         if doc_type == DocumentType.PAYSLIP:
-            return self._finalize_result(self._extract_payslip(text))
+            result = self._extract_payslip(text)
+            if not result.raw_text_preview:
+                result.raw_text_preview = text[:200]
+            return self._finalize_result(result)
         if doc_type == DocumentType.NRC_ID:
-            return self._finalize_result(self._extract_nrc(text))
+            result = self._extract_nrc(text)
+            if not result.raw_text_preview:
+                result.raw_text_preview = text[:200]
+            return self._finalize_result(result)
         if doc_type == DocumentType.GENERIC_CSV:
-            return self._finalize_result(self._extract_csv(text))
+            result = self._extract_csv(text)
+            if not result.raw_text_preview:
+                result.raw_text_preview = text[:200]
+            return self._finalize_result(result)
 
         # 4. Unknown / fallback
-        return self._finalize_result(FallbackExtractor().extract(text))
+        result = FallbackExtractor().extract(text)
+        if not result.raw_text_preview:
+            result.raw_text_preview = text[:200]
+        return self._finalize_result(result)
 
     def _extract_text(self, content: bytes, filename: str) -> Optional[str]:
         lower_name = filename.lower()
         if lower_name.endswith('.pdf'):
             if not PyPDF2:
-                 print("WARNING: PyPDF2 not installed. Cannot parse PDF.")
+                 logger.warning("WARNING: PyPDF2 not installed. Cannot parse PDF.")
                  return None
             try:
                 reader = PyPDF2.PdfReader(io.BytesIO(content))
                 extracted = "".join(page.extract_text() or "" for page in reader.pages)
+                extracted = extracted or ""
                 if extracted.strip():
+                    # OCR assist if text is too thin (scanned PDF with weak text layer)
+                    if len(extracted.strip()) < 200:
+                        ocr_text = self._extract_text_from_pdf_ocr(content) or ""
+                        if ocr_text.strip():
+                            return extracted + "\n" + ocr_text
                     return extracted + "\n"
                 # Fallback to OCR for scanned PDFs
                 return self._extract_text_from_pdf_ocr(content) or None
             except Exception as e:
-                print(f"PDF Read Error: {e}")
+                logger.error(f"PDF Read Error: {e}")
                 return self._extract_text_from_pdf_ocr(content)
         if lower_name.endswith((".png", ".jpg", ".jpeg")):
             if not Image or not pytesseract:
-                print("WARNING: OCR dependencies missing (pillow/pytesseract). Cannot parse image.")
+                logger.warning("WARNING: OCR dependencies missing (pillow/pytesseract). Cannot parse image.")
                 return None
             try:
                 image = Image.open(io.BytesIO(content))
                 return (pytesseract.image_to_string(image) or "") + "\n"
             except Exception as e:
-                print(f"OCR Read Error: {e}")
+                logger.error(f"OCR Read Error: {e}")
                 return None
         else:
             # Assume text/csv
@@ -140,12 +165,12 @@ class TransactionParser:
 
     def _extract_text_from_pdf_ocr(self, content: bytes) -> Optional[str]:
         if not Image or not pytesseract or not convert_from_bytes:
-            print("WARNING: PDF OCR dependencies missing (pillow/pytesseract/pdf2image).")
+            logger.warning("WARNING: PDF OCR dependencies missing (pillow/pytesseract/pdf2image).")
             return None
         poppler_env = os.environ.get("POPPLER_PATH")
         poppler_path = poppler_env if poppler_env and os.path.exists(poppler_env) else None
         if not poppler_path and not shutil.which("pdftoppm"):
-            print("WARNING: Poppler not found on PATH or POPPLER_PATH. Cannot OCR scanned PDFs.")
+            logger.warning("WARNING: Poppler not found on PATH or POPPLER_PATH. Cannot OCR scanned PDFs.")
             return None
         try:
             images = convert_from_bytes(content, fmt="png", poppler_path=poppler_path)
@@ -154,7 +179,7 @@ class TransactionParser:
                 ocr_text += (pytesseract.image_to_string(image) or "") + "\n"
             return ocr_text
         except Exception as e:
-            print(f"PDF OCR Error: {e}")
+            logger.error(f"PDF OCR Error: {e}")
             return None
 
     def _extract_bank_statement(self, text: str) -> ExtractionResult:
@@ -168,7 +193,14 @@ class TransactionParser:
             result.warnings.append(f"Bank statement primary extractor failed: {e}")
 
         summary = result.bank_statement_summary
-        is_success = bool(summary and summary.closing_balance is not None and summary.statement_period is not None)
+        # RELAXED SUCCESS: If we have transactions AND at least one of (closing balance, period), consider it good enough.
+        # OR if we have > 5 transactions, it's definitely a viable extraction.
+        is_success = bool(
+            summary and (
+                (summary.closing_balance is not None and summary.statement_period is not None) or
+                len(result.transactions) > 5
+            )
+        )
         if not is_success:
             # PRESERVE identity fields from primary extraction before falling back
             primary_account_holder = summary.account_holder_name if summary else None
@@ -180,18 +212,21 @@ class TransactionParser:
                 fallback.warnings = []
             
             # CRITICAL: Copy identity fields from primary extraction if fallback lost them
+            if not fallback.bank_statement_summary:
+                fallback.bank_statement_summary = BankStatementSummary()
+                
             if fallback.bank_statement_summary:
                 if not fallback.bank_statement_summary.account_holder_name and primary_account_holder:
                     fallback.bank_statement_summary.account_holder_name = primary_account_holder
-                    print(f"DEBUG: Preserved account_holder '{primary_account_holder}' from primary extraction")
+                    logger.debug(f"DEBUG: Preserved account_holder '{primary_account_holder}' from primary extraction")
                 if not fallback.bank_statement_summary.bank_name and primary_bank_name:
                     fallback.bank_statement_summary.bank_name = primary_bank_name
-                    print(f"DEBUG: Preserved bank_name '{primary_bank_name}' from primary extraction")
+                    logger.debug(f"DEBUG: Preserved bank_name '{primary_bank_name}' from primary extraction")
                     
             # Preserve transactions if fallback didn't extract any
             if not fallback.transactions and primary_transactions:
                 fallback.transactions = primary_transactions
-                print(f"DEBUG: Preserved {len(primary_transactions)} transactions from primary extraction")
+                logger.debug(f"DEBUG: Preserved {len(primary_transactions)} transactions from primary extraction")
                     
             fallback.warnings.append("Bank statement fallback missing closing balance or statement period.")
             fallback.warnings.append("Bank statement extraction incomplete; using fallback summary.")
@@ -288,5 +323,13 @@ class TransactionParser:
 
             if not summary_profile:
                 raise ValueError("Extraction contract violated: summary_profile missing")
+
+        if result.quality_score is None:
+            summary_present = bool(result.bank_statement_summary or result.payslip_summary or result.nrc_summary)
+            tx_count = len(result.transactions or [])
+            tx_bonus = min(tx_count / 100.0, 1.0)
+            summary_bonus = 0.2 if summary_present else 0.0
+            base = result.confidence or 0.0
+            result.quality_score = round(min(1.0, (base * 0.6) + (tx_bonus * 0.3) + summary_bonus), 2)
 
         return result

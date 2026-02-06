@@ -7,6 +7,7 @@ from models.assessment import Assessment
 from models.borrower import Borrower
 from models.decision_counterfactual import DecisionCounterfactual, CounterfactualOutcome
 from utils.db import Database
+from utils.policy_context import policy_value
 
 
 class DecisionCounterfactualAgent:
@@ -24,10 +25,12 @@ class DecisionCounterfactualAgent:
 
     @staticmethod
     def _risk_threshold_for_level(level: str) -> float:
-        thresholds = config.RISK_LEVEL_THRESHOLDS.get(level)
-        if not thresholds:
-            return 0.6
-        return thresholds[1]
+        level_upper = (level or "").upper()
+        if level_upper == "LOW":
+            return float(policy_value("risk_low_max", config.RISK_LEVEL_THRESHOLDS.get("LOW", (0.0, 0.3))[1]))
+        if level_upper == "MEDIUM":
+            return float(policy_value("risk_medium_max", config.RISK_LEVEL_THRESHOLDS.get("MEDIUM", (0.3, 0.6))[1]))
+        return float(policy_value("risk_high_max", config.RISK_LEVEL_THRESHOLDS.get("HIGH", (0.6, 1.0))[1]))
 
     @staticmethod
     def _normalize_risk_level(risk_level) -> str:
@@ -70,7 +73,7 @@ class DecisionCounterfactualAgent:
             add_counterfactual(
                 factor_name="Requested duration (days)",
                 current_value=assessment.requested_duration_days,
-                required_value=cap_config.MIN_DURATION_DAYS,
+                required_value=policy_value("min_duration_days", cap_config.MIN_DURATION_DAYS),
                 policy_rule_id="MIN_DURATION_DAYS",
                 impact_description="Meeting minimum duration allows the system to evaluate standard capacity rules.",
                 outcome_if_met=CounterfactualOutcome.REFER
@@ -80,7 +83,7 @@ class DecisionCounterfactualAgent:
             add_counterfactual(
                 factor_name="Verified transaction count",
                 current_value=assessment.transaction_count,
-                required_value=cap_config.MIN_TRANSACTION_COUNT,
+                required_value=policy_value("min_transaction_count", cap_config.MIN_TRANSACTION_COUNT),
                 policy_rule_id="MIN_TRANSACTION_COUNT",
                 impact_description="Additional verified transactions enable a full capacity assessment.",
                 outcome_if_met=CounterfactualOutcome.REFER
@@ -90,7 +93,7 @@ class DecisionCounterfactualAgent:
             add_counterfactual(
                 factor_name="Verified history days",
                 current_value=assessment.history_days,
-                required_value=cap_config.MIN_HISTORY_DAYS,
+                required_value=policy_value("min_history_days", cap_config.MIN_HISTORY_DAYS),
                 policy_rule_id="MIN_HISTORY_DAYS",
                 impact_description="A longer verified history window allows the system to reassess risk and capacity.",
                 outcome_if_met=CounterfactualOutcome.REFER
@@ -111,7 +114,7 @@ class DecisionCounterfactualAgent:
             add_counterfactual(
                 factor_name="Observed deposit volume",
                 current_value=assessment.observed_deposit_volume,
-                required_value=cap_config.MIN_CAPACITY_THRESHOLD,
+                required_value=policy_value("min_capacity_threshold", cap_config.MIN_CAPACITY_THRESHOLD),
                 policy_rule_id="MIN_CAPACITY_THRESHOLD",
                 impact_description="Meeting the minimum deposit volume enables a non-zero capacity calculation.",
                 outcome_if_met=CounterfactualOutcome.REFER
@@ -133,7 +136,7 @@ class DecisionCounterfactualAgent:
             add_counterfactual(
                 factor_name="Verified history days",
                 current_value=assessment.history_days,
-                required_value=cap_config.STARTER_HISTORY_THRESHOLD_DAYS,
+                required_value=policy_value("starter_history_threshold_days", cap_config.STARTER_HISTORY_THRESHOLD_DAYS),
                 policy_rule_id="STARTER_HISTORY_THRESHOLD_DAYS",
                 impact_description="A longer verified history window may remove starter loan caps.",
                 outcome_if_met=CounterfactualOutcome.REFER

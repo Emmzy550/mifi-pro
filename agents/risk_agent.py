@@ -1,3 +1,5 @@
+import logging
+logger = logging.getLogger(__name__)
 """
 Risk Agent - Core Risk Evaluation Engine
 =========================================
@@ -33,17 +35,18 @@ from rules.lending_rules import (
     check_critical_flags
 )
 from utils.scoring import calculate_risk_score, derive_risk_level
+from utils.policy_context import policy_value
 from models.document import SummaryProfile
 
 # Conditionally import behavioral agent based on version
 if config.ENABLE_BEHAVIORAL_V2:
     try:
         from agents.behavioral_agent_v2 import BehavioralAgentV2 as BehavioralAgent
-        print("[OK] Using BehavioralAgentV2 (enhanced)")
+        logger.info("[OK] Using BehavioralAgentV2 (enhanced)")
     except ImportError:
         # Fallback to V1 if V2 not yet implemented
         from agents.behavioral_agent import BehavioralAgent
-        print("[WARN] BehavioralAgentV2 not found, using V1")
+        logger.warning("[WARN] BehavioralAgentV2 not found, using V1")
 else:
     from agents.behavioral_agent import BehavioralAgent
 
@@ -81,7 +84,7 @@ class RiskAgent:
         if not check_income_stability(borrower):
             flags.append("Warning: Income instability detected")
             
-        if check_dti_ratio(borrower) > config.MAX_DEBT_TO_INCOME_RATIO:
+        if check_dti_ratio(borrower) > policy_value("max_debt_to_income_ratio", config.MAX_DEBT_TO_INCOME_RATIO):
             flags.append("High Risk: Debt-to-Income ratio exceeds 50%")
             
         is_affordable, _ = check_affordability(borrower)
@@ -118,11 +121,11 @@ class RiskAgent:
                     # STRICT: Rename to raw_score
                     ml_score = ml_result.get("prob_default", 0.0) # Assume agent still returns prob_default key internally
                     ml_feature_importance = ml_result.get("feature_importance", [])
-                    print(f"DEBUG: ML Risk Signal: {ml_score}")
+                    logger.debug(f"DEBUG: ML Risk Signal: {ml_score}")
                 else:
-                    print(f"WARN: ML Prediction failed: {ml_result['error']}")
+                    logger.error(f"WARN: ML Prediction failed: {ml_result['error']}")
             except Exception as e:
-                print(f"ERROR: ML Agent failed: {e}")
+                logger.error(f"ERROR: ML Agent failed: {e}")
 
         # ====================================================================
         # STEP 3: BEHAVIORAL INTELLIGENCE (OPTIONAL - V2)
@@ -137,7 +140,7 @@ class RiskAgent:
         try:
             if external_behavioral_results:
                 # PILOT PIPELINE: Use uploaded data analysis
-                print("INFO: Using USER-UPLOADED behavioral data (Pilot)")
+                logger.info("INFO: Using USER-UPLOADED behavioral data (Pilot)")
                 behavioral_results = external_behavioral_results
                 data_source = "USER_UPLOADED_STATEMENT"
             else:
@@ -152,7 +155,7 @@ class RiskAgent:
                 flags.extend(prefixed_warnings)
                 
         except Exception as e:
-            print(f"WARNING: Behavioral analysis failed: {e}")
+            logger.error(f"WARNING: Behavioral analysis failed: {e}")
 
         # ... (Ensemble Logic) ...
         
@@ -170,7 +173,7 @@ class RiskAgent:
                 original_penalty = behavioral_penalty
                 behavioral_penalty = min(behavioral_penalty, config.MAX_BEHAVIORAL_IMPACT_CAP)
                 if original_penalty > behavioral_penalty:
-                    print(f"INFO: Behavioral penalty capped from {original_penalty} to {behavioral_penalty} (Pilot Safety)")
+                    logger.info(f"INFO: Behavioral penalty capped from {original_penalty} to {behavioral_penalty} (Pilot Safety)")
             
             # ... (Rest of logic) ...
 
@@ -314,7 +317,7 @@ class RiskAgent:
             override_applied = True
             override_reason = capacity_results["rejection_reason"]
             
-            print(f"CAPACITY REJECTION: {capacity_results['rejection_reason']}")
+            logger.info(f"CAPACITY REJECTION: {capacity_results['rejection_reason']}")
         
         # Add capacity metrics to output
         metrics.update({
@@ -403,4 +406,3 @@ class RiskAgent:
             # Capacity validation results (for DecisionAgent)
             "capacity_validation": capacity_results
         }
-

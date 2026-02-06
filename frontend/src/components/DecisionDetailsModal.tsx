@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, User, ShieldCheck, ClipboardList, AlertCircle, Cpu, Send, CheckCircle2, History, Download } from 'lucide-react';
+import { X, User, ShieldCheck, ClipboardList, AlertCircle, Cpu, Send, CheckCircle2, History, Download, Loader2 } from 'lucide-react';
 import { api } from '../context/AuthContext';
 import toast from 'react-hot-toast';
 
@@ -169,19 +169,23 @@ export default function DecisionDetailsModal({ assessment, onClose }: DecisionDe
                         <button
                             onClick={() => handleExport('PDF')}
                             disabled={exportBusy || exportsLoading}
-                            className="px-3 py-1.5 text-xs font-bold rounded-lg border border-slate-200 text-slate-600 hover:text-slate-900 hover:border-slate-300 transition-colors disabled:opacity-50"
+                            className="export-btn export-btn--pdf min-w-[120px]"
                         >
-                            <span className="flex items-center gap-1">
-                                <Download size={14} /> Export PDF
+                            <span className="flex items-center gap-1 justify-center">
+                                {exportBusy && <Loader2 size={12} className="animate-spin" />}
+                                {!exportBusy && <Download size={14} />}
+                                Export PDF
                             </span>
                         </button>
                         <button
                             onClick={() => handleExport('XLSX')}
                             disabled={exportBusy || exportsLoading}
-                            className="px-3 py-1.5 text-xs font-bold rounded-lg border border-slate-200 text-slate-600 hover:text-slate-900 hover:border-slate-300 transition-colors disabled:opacity-50"
+                            className="export-btn export-btn--xlsx min-w-[130px]"
                         >
-                            <span className="flex items-center gap-1">
-                                <Download size={14} /> Export Excel
+                            <span className="flex items-center gap-1 justify-center">
+                                {exportBusy && <Loader2 size={12} className="animate-spin" />}
+                                {!exportBusy && <Download size={14} />}
+                                Export Excel
                             </span>
                         </button>
                         <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-full transition-colors ml-auto sm:ml-0">
@@ -241,9 +245,8 @@ export default function DecisionDetailsModal({ assessment, onClose }: DecisionDe
                             )}
                             {activeTab === 'audit' && (
                                 <div className="bg-indigo-50/50 border border-indigo-100 p-5 rounded-2xl space-y-3 min-h-[160px]">
-                                    <p className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest font-mono">Observed Volume</p>
                                     <p className="text-2xl font-bold text-indigo-900">
-                                        ${(assessment.observed_deposit_volume || 0).toLocaleString()}
+                                        ZMW {(assessment.observed_deposit_volume || 0).toLocaleString()}
                                     </p>
                                     <p className="text-xs text-indigo-600">Based on {assessment.transaction_count} transactions over {assessment.history_days} days.</p>
                                 </div>
@@ -367,7 +370,11 @@ export default function DecisionDetailsModal({ assessment, onClose }: DecisionDe
                                                 disabled={submitting}
                                                 className="w-full bg-slate-900 text-white font-bold py-3 rounded-xl hover:bg-slate-800 disabled:opacity-50 transition-all flex items-center justify-center gap-2"
                                             >
-                                                {submitting ? 'Recording decision...' : <><CheckCircle2 size={18} /> Confirm Final Decision</>}
+                                                {submitting ? (
+                                                    <><Loader2 className="animate-spin" size={18} /> Recording decision...</>
+                                                ) : (
+                                                    <><CheckCircle2 size={18} /> Confirm Final Decision</>
+                                                )}
                                             </button>
                                         </div>
                                     </div>
@@ -383,7 +390,7 @@ export default function DecisionDetailsModal({ assessment, onClose }: DecisionDe
                                 <div className="p-5 border border-slate-100 rounded-2xl bg-slate-50/50">
                                     <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 font-mono">Recommended Limit</p>
                                     <p className="text-2xl font-bold text-slate-900 tracking-tight">
-                                        ${(assessment.recommended_amount || 0).toLocaleString()}
+                                        ZMW {(assessment.recommended_amount || 0).toLocaleString()}
                                     </p>
                                 </div>
                                 <div className="p-5 border border-slate-100 rounded-2xl bg-slate-50/50">

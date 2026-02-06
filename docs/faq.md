@@ -129,9 +129,9 @@ A: You can:
 ?**
 
 A:
-- **0-40 (LOW)**: Strong candidate, low default risk
-- **41-70 (MEDIUM)**: Acceptable with conditions, moderate risk
-- **71-100 (HIGH)**: High default risk, not recommended
+- **< 0.3 (LOW)**: Strong candidate, low default risk
+- **< 0.7 (MEDIUM)**: Acceptable with conditions, moderate risk
+- **>= 0.7 (HIGH)**: High default risk, not recommended
 
 The score is based on:
 - Debt-to-income ratio
@@ -439,3 +439,4 @@ Configure in Settings → Billing.
 ---
 
 **We're here to help!** 🎉
+

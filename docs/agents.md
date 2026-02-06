@@ -118,12 +118,12 @@ def evaluate(borrower: Borrower, external_behavioral_results: dict = None) -> di
 ```python
 # Gate 1: Critical flags force maximum risk
 if any(flag["severity"] == "CRITICAL" for flag in flags):
-    risk_score = 100
+    risk_score = 1.0
     risk_level = "HIGH"
     
 # Gate 2: ML cannot reduce rule score
 if ml_enabled:
-    ensemble_score = (RULE_WEIGHT * rule_score) + (ML_WEIGHT * ml_prob * 100)
+    ensemble_score = (RULE_WEIGHT * rule_score) + (ML_WEIGHT * ml_prob)
     final_score = max(rule_score, ensemble_score)  # Rules override optimistic ML
 ```
 
@@ -142,7 +142,7 @@ if borrower.loan_amount_requested > (annual_income * 0.5):
         "severity": "CRITICAL",
         "message": f"Loan exceeds 50% of annual income"
     })
-    risk_score = 100
+    risk_score = 1.0
 ```
 
 ---
@@ -321,18 +321,18 @@ def recommend(risk_results: dict, borrower: Borrower) -> dict
 ```python
 risk_score = risk_results["risk_score"]
 
-if risk_score <= 40:  # LOW RISK
+if risk_score < 0.3:  # LOW RISK
     return {
-        "decision": "APPROVED",
+        "decision": "APPROVE",
         "recommended_amount": borrower.loan_amount_requested,
         "recommended_interest_rate": config.BASE_INTEREST_RATE  # 15%
     }
     
-elif risk_score <= 70:  # MEDIUM RISK
+elif risk_score < 0.7:  # MEDIUM RISK
     # Conditional approval with higher rate
     reduction_factor = 1.0  # Can add haircut if needed
     return {
-        "decision": "CONDITIONAL_APPROVAL",
+        "decision": "CONDITIONAL",
         "recommended_amount": borrower.loan_amount_requested * reduction_factor,
         "recommended_interest_rate": config.CONDITIONAL_INTEREST_RATE  # 20%
     }
@@ -350,13 +350,13 @@ else:  # HIGH RISK
 Add graduated interest rates:
 
 ```python
-if 0 <= risk_score <= 25:
+if 0 <= risk_score <= 0.25:
     interest_rate = 12.0  # Best rate
-elif 26 <= risk_score <= 40:
+elif 0.26 <= risk_score <= 0.4:
     interest_rate = 15.0  # Standard rate
-elif 41 <= risk_score <= 55:
+elif 0.41 <= risk_score <= 0.55:
     interest_rate = 18.0  # Moderate risk
-elif 56 <= risk_score <= 70:
+elif 0.56 <= risk_score <= 0.7:
     interest_rate = 22.0  # Higher risk
 else:
     return {"decision": "REJECT", ...}
@@ -399,11 +399,11 @@ def generate(risk_results: dict, decision_results: dict, borrower: Borrower) -> 
 
 ```python
 # LOW RISK
-if decision == "APPROVED":
+if decision == "APPROVE":
     summary = f"✅ Approved at {interest_rate}% interest rate. Strong financial profile."
 
 # MEDIUM RISK
-elif decision == "CONDITIONAL_APPROVAL":
+elif decision == "CONDITIONAL":
     summary = f"⚠️ Conditionally approved with elevated rate ({interest_rate}%)."
 
 # HIGH RISK
@@ -595,3 +595,4 @@ async def custom_analyze(data: dict):
 - [Architecture Guide](./architecture.md) - System design overview
 - [Integration Guide](./integration.md) - Using agents in your app
 - [Testing Guide](./testing.md) - Testing agents
+

@@ -120,30 +120,34 @@ This data helps improve the accuracy of risk assessments.
 
 ## Understanding Risk Assessments
 
-### Risk Score (0-100)
+### Risk Score (0-1)
 
 The system assigns a risk score:
 
 | Score | Risk Level | Meaning |
 |-------|-----------|---------|
-| 0-40 | **LOW** 🟢 | Low risk borrower |
-| 41-70 | **MEDIUM** 🟡 | Moderate risk |
-| 71-100 | **HIGH** 🔴 | High risk |
+| < 0.3 | **LOW** 🟢 | Low risk borrower |
+| < 0.7 | **MEDIUM** 🟡 | Moderate risk |
+| >= 0.7 | **HIGH** 🔴 | High risk |
 
 ### AI Recommendation
 
-The system provides one of three recommendations:
+The system provides one of four recommendations:
 
-**✅ APPROVED**
+**✅ APPROVE**
 - Low risk profile
 - Strong ability to repay
 - Recommended at standard interest rate (typically 15%)
 
-**⚠️ CONDITIONAL APPROVAL**
+**⚠️ CONDITIONAL**
 - Medium risk profile
 - Can afford the loan but with higher risk
 - Recommended at higher interest rate (typically 20%)
 - May recommend reducing loan amount
+
+**⏳ REFER**
+- Manual review required
+- Used when data is insufficient or requires verification
 
 **❌ REJECT**
 - High risk profile
@@ -299,7 +303,7 @@ Export reports for management:
 
 - **Review every application** - Don't blindly follow AI recommendations
 - **Verify information** - Call the borrower if something seems off
-- **Document your decisions** - Add notes explaining why you approved/rejected
+- **Document your decisions** - Add notes explaining why you APPROVE/rejected
 - **Check alternative data** - It provides valuable insights
 - **Keep credentials secure** - Never share your password
 
@@ -362,3 +366,8 @@ Check for system updates and new features regularly.
 **You're ready to start processing loans more efficiently!** 🎉
 
 If you have questions, refer to the [FAQ](./faq.md) or contact your system administrator.
+
+
+
+
+

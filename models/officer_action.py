@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional
 from enum import Enum
 from datetime import datetime, timezone
@@ -27,6 +27,7 @@ class OfficerAction(BaseModel):
     final_duration_days: int = Field(..., description="The final duration approved by the officer")
     final_interest_rate: float = Field(..., description="The final interest rate approved by the officer")
     is_override: bool = Field(False, description="Whether this decision overrode the AI recommendation")
+    override_reason_code: Optional[str] = Field(None, description="Reason code for override decisions")
     ai_recommendation_snapshot: Optional[dict] = Field(None, description="Snapshot of the AI recommendation at the time of decision")
     sealed_at: Optional[str] = Field(None, description="ISO timestamp for legacy frontend support")
     
@@ -44,3 +45,12 @@ class OfficerAction(BaseModel):
             if phrase in lower_v:
                 raise ValueError(f"Message contains non-compliant phrase: '{phrase}'")
         return v
+
+    @model_validator(mode='after')
+    def enforce_override_rationale(self) -> 'OfficerAction':
+        if self.is_override:
+            if not self.officer_notes or not self.officer_notes.strip():
+                raise ValueError("Override requires officer_notes for audit compliance.")
+            if not self.override_reason_code or not self.override_reason_code.strip():
+                raise ValueError("Override requires override_reason_code for audit compliance.")
+        return self

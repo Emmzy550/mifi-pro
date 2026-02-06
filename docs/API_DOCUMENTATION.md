@@ -171,9 +171,12 @@ Content-Type: application/json
 {
   "assessment_id": "ASMT-X1Y2Z3W4",
   "borrower_id": "BOR-A1B2C3D4",
-  "risk_score": 35,
+  "risk_score": 0.35,
+  "risk_score_percent": 35.0,
+  "risk_score_scale": "0-1",
   "risk_level": "LOW",
-  "decision": "APPROVED",
+  "decision": "APPROVE",
+  "decision_legacy": "APPROVED",
   "recommended_amount": 25000,
   "recommended_interest_rate": 15.0,
   "requested_amount": 25000,
@@ -212,9 +215,11 @@ Content-Type: application/json
 |-------|-------------|
 | `assessment_id` | Unique ID for this assessment (for your records) |
 | `borrower_id` | ID of the borrower being assessed |
-| `risk_score` | Risk score from 0-100 (lower is better) |
-| `risk_level` | `LOW` (0-40), `MEDIUM` (41-70), or `HIGH` (71-100) |
-| `decision` | Recommendation: `APPROVED`, `CONDITIONAL_APPROVAL`, or `REJECT` |
+| `risk_score` | Normalized risk score from 0.0–1.0 (lower is better) |
+| `risk_score_percent` | Convenience percent (0–100) |
+| `risk_level` | `LOW` (< 0.3), `MEDIUM` (< 0.7), or `HIGH` (>= 0.7) |
+| `decision` | Recommendation: `APPROVE`, `CONDITIONAL`, `REJECT`, or `REFER` |
+| `decision_legacy` | Backward-compatible label (`APPROVED`/`CONDITIONAL_APPROVAL`) |
 | `recommended_amount` | Suggested loan amount (may differ from requested) |
 | `recommended_interest_rate` | Suggested annual interest rate (%) |
 | `requested_amount` | Amount the borrower requested |
@@ -226,7 +231,7 @@ Content-Type: application/json
 
 ## Understanding Decisions
 
-### APPROVED
+### APPROVE
 
 **What it means:**
 - Low risk profile
@@ -240,7 +245,7 @@ Content-Type: application/json
 
 ---
 
-### CONDITIONAL_APPROVAL
+### CONDITIONAL
 
 **What it means:**
 - Medium risk profile
@@ -287,8 +292,11 @@ curl -X POST https://api.loanofficerai.com/assessment/run \
 ```json
 {
   "assessment_id": "ASMT-X1Y2Z3W4",
-  "decision": "APPROVED",
-  "risk_score": 35,
+  "decision": "APPROVE",
+  "decision_legacy": "APPROVED",
+  "risk_score": 0.35,
+  "risk_score_percent": 35.0,
+  "risk_score_scale": "0-1",
   "risk_level": "LOW",
   "recommended_amount": 25000,
   "recommended_interest_rate": 15.0,
@@ -329,7 +337,7 @@ The API expects clean, validated data:
 - **Review each assessment** – Don't auto-approve based solely on API response
 - **Use your expertise** – You know your customers better than any algorithm
 - **Document your decisions** – Keep records of approvals/rejections for compliance
-- **Override when appropriate** – You may approve a "REJECT" or reject an "APPROVED" based on context
+- **Override when appropriate** – You may approve a "REJECT" or reject an "APPROVE" based on context
 
 ### 5. Handle Errors Gracefully
 
@@ -424,3 +432,4 @@ When contacting support, please include:
 **You're ready to integrate!** If you have questions, contact support or visit our documentation hub.
 
 **Version:** 2.0.0 | **Last Updated:** January 2026
+

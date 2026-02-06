@@ -334,8 +334,11 @@ When a loan decision is made, the system sends:
   "data": {
     "assessment_id": "ASMT-X1Y2Z3A4",
     "borrower_id": "BOR-A1B2C3D4",
-    "decision": "CONDITIONAL_APPROVAL",
-    "risk_score": 45,
+    "decision": "CONDITIONAL",
+    "decision_legacy": "CONDITIONAL_APPROVAL",
+    "risk_score": 0.45,
+    "risk_score_percent": 45.0,
+    "risk_score_scale": "0-1",
     "risk_level": "MEDIUM",
     "recommended_amount": 15000,
     "recommended_interest_rate": 20.0
@@ -549,7 +552,7 @@ async def complete_loan_flow():
     print(f"Initial Decision: {assessment['decision']}")
     
     # 2. Upload transactions (optional)
-    if assessment['decision'] == 'CONDITIONAL_APPROVAL':
+    if assessment['decision'] == 'CONDITIONAL' or assessment.get('decision_legacy') == 'CONDITIONAL_APPROVAL':
         await service.upload_transactions(
             borrower_id=assessment['borrower_id'],
             file_path='transactions.csv'
@@ -564,7 +567,7 @@ async def complete_loan_flow():
         print(f"Updated Decision: {new_assessment.json()['decision']}")
     
     # 3. If approved, disburse loan
-    if assessment['decision'] in ['APPROVED', 'CONDITIONAL_APPROVAL']:
+    if assessment['decision'] in ['APPROVE', 'CONDITIONAL'] or assessment.get('decision_legacy') in ['APPROVED', 'CONDITIONAL_APPROVAL']:
         # Officer disburses via dashboard or API
         pass
 

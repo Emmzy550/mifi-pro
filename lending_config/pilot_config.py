@@ -60,8 +60,12 @@ MIN_HISTORY_DAYS_WITH_VERIFIED_INCOME = 14  # 2 weeks instead of 30 days
 # Minimum deposit volume for non-verified-income path (pilot)
 MIN_CAPACITY_THRESHOLD_PILOT = 500  # Reduced from 1000 (production)
 
-# Minimum transactions for deposit volume path (pilot)
+# Minimum transaction count for deposit volume path (pilot)
 MIN_TRANSACTION_COUNT_PILOT = 3  # Reduced from 5 (production)
+
+# Observation window for deposit volume (pilot)
+# WHY: Allow capturing older salary credits in thin-file or manual uploads
+PILOT_OBSERVATION_WINDOW_DAYS = 90  # Standard is 30
 
 # ====================================================================
 # REJECTION REASON CODES

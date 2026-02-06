@@ -5,6 +5,7 @@ import {
 } from 'recharts';
 import { ArrowUpRight, ArrowDownRight, Activity, Users, DollarSign, AlertTriangle } from 'lucide-react';
 import { api } from '../context/AuthContext';
+import { Link } from 'react-router-dom';
 
 const StatCard = ({ title, value, icon: Icon, color }: any) => (
     <div className="card">
@@ -19,11 +20,10 @@ const StatCard = ({ title, value, icon: Icon, color }: any) => (
 );
 
 const formatCurrency = (val: number) => {
-    return new Intl.NumberFormat('en-US', {
+    return new Intl.NumberFormat('en-ZM', {
         style: 'currency',
-        currency: 'USD',
-        notation: 'compact',
-        maximumFractionDigits: 1
+        currency: 'ZMW',
+        maximumFractionDigits: 0
     }).format(val);
 };
 
@@ -31,6 +31,8 @@ export default function Dashboard() {
     const [metrics, setMetrics] = useState<any>(null);
     const [loading, setLoading] = useState(true);
     const [timeRange, setTimeRange] = useState(30);
+    const [watchlist, setWatchlist] = useState<any[]>([]);
+    const [watchlistLoading, setWatchlistLoading] = useState(false);
 
     const fetchMetrics = async (days: number) => {
         setLoading(true);
@@ -44,8 +46,21 @@ export default function Dashboard() {
         }
     };
 
+    const fetchWatchlist = async () => {
+        setWatchlistLoading(true);
+        try {
+            const res = await api.get(`/org/watchlist?limit=8`);
+            setWatchlist(res.data || []);
+        } catch (err) {
+            console.error("Failed to fetch watchlist", err);
+        } finally {
+            setWatchlistLoading(false);
+        }
+    };
+
     useEffect(() => {
         fetchMetrics(timeRange);
+        fetchWatchlist();
     }, [timeRange]);
 
     // Default data for charts if no real data
@@ -128,6 +143,47 @@ export default function Dashboard() {
                             icon={AlertTriangle}
                             color="bg-orange-500"
                         />
+                    </div>
+
+                    <div className="card">
+                        <div className="flex items-center justify-between mb-4">
+                            <div>
+                                <h3 className="font-bold text-slate-900">Portfolio at Risk (PAR)</h3>
+                                <p className="text-slate-500 text-sm">Snapshot based on active loans past 30/60/90 days.</p>
+                            </div>
+                            <span className="text-[10px] font-bold uppercase tracking-widest bg-slate-100 text-slate-500 px-2 py-1 rounded-full">
+                                Basic
+                            </span>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                            <div className="bg-slate-50 border border-slate-200 rounded-xl p-4">
+                                <div className="text-xs text-slate-500 uppercase tracking-widest">PAR 30</div>
+                                <div className="text-2xl font-bold text-slate-900">
+                                    {metrics?.par_snapshot?.par_30 || 0}
+                                </div>
+                                <div className="text-xs text-slate-500">
+                                    {metrics?.par_snapshot?.par_30_rate?.toFixed(1) || 0}% of active loans
+                                </div>
+                            </div>
+                            <div className="bg-slate-50 border border-slate-200 rounded-xl p-4">
+                                <div className="text-xs text-slate-500 uppercase tracking-widest">PAR 60</div>
+                                <div className="text-2xl font-bold text-slate-900">
+                                    {metrics?.par_snapshot?.par_60 || 0}
+                                </div>
+                                <div className="text-xs text-slate-500">
+                                    {metrics?.par_snapshot?.par_60_rate?.toFixed(1) || 0}% of active loans
+                                </div>
+                            </div>
+                            <div className="bg-slate-50 border border-slate-200 rounded-xl p-4">
+                                <div className="text-xs text-slate-500 uppercase tracking-widest">PAR 90</div>
+                                <div className="text-2xl font-bold text-slate-900">
+                                    {metrics?.par_snapshot?.par_90 || 0}
+                                </div>
+                                <div className="text-xs text-slate-500">
+                                    {metrics?.par_snapshot?.par_90_rate?.toFixed(1) || 0}% of active loans
+                                </div>
+                            </div>
+                        </div>
                     </div>
 
                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -240,6 +296,65 @@ export default function Dashboard() {
                                 ))}
                             </div>
                         </div>
+                    </div>
+
+                    {/* Risk Watchlist */}
+                    <div className="card">
+                        <div className="flex items-center justify-between mb-4">
+                            <div>
+                                <h3 className="font-bold text-slate-900">Risk Watchlist</h3>
+                                <p className="text-slate-500 text-sm">Auto-flagged cases that require attention</p>
+                            </div>
+                            <span className="text-[10px] font-bold uppercase tracking-widest bg-slate-100 text-slate-500 px-2 py-1 rounded-full">
+                                Monitoring
+                            </span>
+                        </div>
+                        {watchlistLoading ? (
+                            <div className="text-sm text-slate-400">Loading watchlist...</div>
+                        ) : watchlist.length === 0 ? (
+                            <div className="text-sm text-slate-500 bg-slate-50 border border-slate-100 rounded-xl p-4">
+                                No watchlist alerts in the selected window.
+                            </div>
+                        ) : (
+                            <div className="space-y-3">
+                                {watchlist.map((alert: any) => {
+                                    const severityColor = alert.severity === 'CRITICAL'
+                                        ? 'text-red-600 bg-red-50 border-red-200'
+                                        : alert.severity === 'HIGH'
+                                            ? 'text-amber-700 bg-amber-50 border-amber-200'
+                                            : 'text-slate-600 bg-slate-50 border-slate-200';
+                                    return (
+                                        <Link
+                                            key={alert.alert_id}
+                                            to={`/decisions/${alert.assessment_id}`}
+                                            className="block border border-slate-100 rounded-2xl p-4 hover:border-primary/30 hover:bg-primary/5 transition-all"
+                                        >
+                                            <div className="flex items-start justify-between gap-4">
+                                                <div className="space-y-1">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className={`text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full border ${severityColor}`}>
+                                                            {alert.severity}
+                                                        </span>
+                                                        <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">{alert.type?.replace(/_/g, ' ')}</span>
+                                                    </div>
+                                                    <p className="text-sm text-slate-700">{alert.message}</p>
+                                                    <p className="text-[10px] text-slate-400">Assessment {alert.assessment_id}</p>
+                                                </div>
+                                                <div className="text-right">
+                                                    <p className="text-[10px] text-slate-400 uppercase tracking-widest">Risk Score</p>
+                                                    <p className="text-sm font-bold text-slate-900">
+                                                        {alert.risk_score != null ? (alert.risk_score * 100).toFixed(0) + '%' : 'N/A'}
+                                                    </p>
+                                                    {alert.data_quality_score != null && (
+                                                        <p className="text-[10px] text-slate-400">Data Q: {Number(alert.data_quality_score).toFixed(2)}</p>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </Link>
+                                    );
+                                })}
+                            </div>
+                        )}
                     </div>
 
                     <div className="pt-6 border-t border-slate-100 mt-8">

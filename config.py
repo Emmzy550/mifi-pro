@@ -150,6 +150,12 @@ RISK_LEVEL_THRESHOLDS: Dict[str, tuple] = {
     "HIGH": (0.6, 1.0)      # 60-100%: Reject or require collateral
 }
 
+# ============================================================================
+# DATA QUALITY GOVERNANCE
+# ============================================================================
+# If data quality is below this threshold, the system will refer for manual review.
+DATA_QUALITY_REFER_THRESHOLD: float = float(os.getenv("DATA_QUALITY_REFER_THRESHOLD", "0.6"))
+
 # Behavioral penalty per warning flag
 # WHY: Each behavioral red flag incrementally increases risk score
 BEHAVIORAL_PENALTY_PER_FLAG: float = 0.1  # +10% risk per flag
@@ -241,6 +247,10 @@ def get_config_snapshot() -> Dict[str, Any]:
     Returns current configuration as a dictionary.
     Used for audit logging to track what settings were active at decision time.
     """
+    from utils.policy_context import policy_value
+    risk_low = policy_value("risk_low_max", RISK_LEVEL_THRESHOLDS.get("LOW", (0.0, 0.3))[1])
+    risk_medium = policy_value("risk_medium_max", RISK_LEVEL_THRESHOLDS.get("MEDIUM", (0.3, 0.6))[1])
+    risk_high = policy_value("risk_high_max", RISK_LEVEL_THRESHOLDS.get("HIGH", (0.6, 1.0))[1])
     return {
         "feature_flags": {
             "ml_enabled": ENABLE_ML_RISK_SCORING,
@@ -253,10 +263,15 @@ def get_config_snapshot() -> Dict[str, Any]:
             "rule_weight": RULE_WEIGHT
         },
         "business_rules": {
-            "min_income": MIN_MONTHLY_INCOME,
-            "max_dti": MAX_DEBT_TO_INCOME_RATIO,
-            "affordability_target": AFFORDABILITY_RATIO_TARGET,
-            "base_rate": BASE_INTEREST_RATE
+            "min_income": policy_value("min_monthly_income", MIN_MONTHLY_INCOME),
+            "max_dti": policy_value("max_debt_to_income_ratio", MAX_DEBT_TO_INCOME_RATIO),
+            "affordability_target": policy_value("affordability_ratio_target", AFFORDABILITY_RATIO_TARGET),
+            "base_rate": BASE_INTEREST_RATE,
+            "risk_thresholds": {
+                "LOW_MAX": risk_low,
+                "MEDIUM_MAX": risk_medium,
+                "HIGH_MAX": risk_high
+            }
         },
         "security": {
             # Never include raw SECRET_KEY in logs

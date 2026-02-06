@@ -45,6 +45,7 @@ class Organization(BaseModel):
     payment_status: PaymentStatus = Field(PaymentStatus.UNPAID, description="Strict payment status for gatekeeping")
     last_payment_id: Optional[str] = Field(None, description="ID of the most recent payment attempt")
     monthly_limit: Optional[int] = Field(None, description="Custom override for monthly limit (e.g. Enterprise)")
+    user_limit: Optional[int] = Field(None, description="Custom override for user seat limit")
     current_period_start: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Current billing period start")
     current_period_end: datetime = Field(default_factory=lambda: datetime.now(timezone.utc) + timedelta(days=30), description="Current billing period end")
     
@@ -109,6 +110,7 @@ class Organization(BaseModel):
                 "status": "ACTIVE",
                 "plan_name": "starter",
                 "monthly_limit": 5000,
+                "user_limit": 10,
                 "unit_cost": 0.05,
                 "usage_count": 243,
                 "billing_status": "active"

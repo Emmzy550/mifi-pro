@@ -38,7 +38,10 @@ document.addEventListener('DOMContentLoaded', () => {
             const intakeRes = await fetch(`${API_BASE}/intake/start`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(data)
+                body: JSON.stringify({
+                    ...data,
+                    organization_id: new URLSearchParams(window.location.search).get('org_id')
+                })
             });
 
             if (!intakeRes.ok) {

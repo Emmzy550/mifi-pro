@@ -25,6 +25,7 @@ export default function AdminDashboard() {
     const [newOrgPlan, setNewOrgPlan] = useState('sandbox');
     const [newOrgAdminEmail, setNewOrgAdminEmail] = useState('');
     const [credentials, setCredentials] = useState<{ email: string, password: string } | null>(null);
+    const [inviteNotice, setInviteNotice] = useState<{ email: string } | null>(null);
 
     // Organization Detail Drawer State
     const [selectedOrgId, setSelectedOrgId] = useState<string | null>(null);
@@ -84,6 +85,7 @@ export default function AdminDashboard() {
     const handleCreateOrg = async (e: React.FormEvent) => {
         e.preventDefault();
         setCredentials(null);
+        setInviteNotice(null);
         setLoading(true);
         try {
             const res = await api.post('/admin/organizations', {
@@ -93,8 +95,12 @@ export default function AdminDashboard() {
             });
 
             if (res.data && res.data.user_created) {
-                // Success case: show credentials
-                setCredentials(res.data.initial_credentials);
+                if (res.data.invite_sent) {
+                    setInviteNotice({ email: newOrgAdminEmail });
+                }
+                if (res.data.initial_credentials) {
+                    setCredentials(res.data.initial_credentials);
+                }
                 setNewOrgName('');
                 setNewOrgAdminEmail('');
                 fetchOrgs();
@@ -235,7 +241,7 @@ export default function AdminDashboard() {
                     <div className="flex justify-between mb-4">
                         <h2 className="text-xl font-semibold">Registered Clients</h2>
                         <button
-                            onClick={() => { setShowAddOrg(true); setCredentials(null); }}
+                            onClick={() => { setShowAddOrg(true); setCredentials(null); setInviteNotice(null); }}
                             className="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700"
                         >
                             + Add Organization
@@ -244,7 +250,7 @@ export default function AdminDashboard() {
 
                     {showAddOrg && (
                         <div className="bg-white p-4 mb-4 rounded shadow border">
-                            {!credentials ? (
+                            {(!credentials && !inviteNotice) ? (
                                 <>
                                     <h3 className="font-bold mb-2">New Organization</h3>
                                     <form onSubmit={handleCreateOrg} className="flex flex-wrap gap-4 items-end">
@@ -290,14 +296,27 @@ export default function AdminDashboard() {
                                         </div>
                                     </form>
                                 </>
+                            ) : inviteNotice ? (
+                                <div className="bg-emerald-50 p-4 border border-emerald-200 rounded">
+                                    <h3 className="text-emerald-800 font-bold mb-2">Organization Created Successfully!</h3>
+                                    <p className="text-emerald-700">
+                                        An invitation email was sent to <strong>{inviteNotice.email}</strong>.
+                                    </p>
+                                    <button
+                                        onClick={() => setShowAddOrg(false)}
+                                        className="mt-4 bg-slate-800 text-white px-6 py-2 rounded font-bold hover:bg-slate-700 transition-colors"
+                                    >
+                                        Done
+                                    </button>
+                                </div>
                             ) : (
                                 <div className="bg-green-50 p-4 border border-green-200 rounded">
-                                    <h3 className="text-green-800 font-bold mb-2">✅ Organization Created Successfully!</h3>
-                                    <p className="mb-4 text-green-700">Please provide these credentials to the client administrator:</p>
+                                    <h3 className="text-green-800 font-bold mb-2">Organization Created Successfully!</h3>
+                                    <p className="mb-4 text-green-700">Email delivery is not configured. Please provide these credentials to the client administrator:</p>
                                     <div className="bg-white p-4 border rounded font-mono text-sm shadow-inner">
                                         <p><strong>URL:</strong> {window.location.origin}/login</p>
-                                        <p><strong>Email:</strong> {credentials.email}</p>
-                                        <p><strong>Password:</strong> <span className="text-red-600 font-bold select-all bg-red-50 px-1">{credentials.password}</span></p>
+                                        <p><strong>Email:</strong> {credentials?.email}</p>
+                                        <p><strong>Password:</strong> <span className="text-red-600 font-bold select-all bg-red-50 px-1">{credentials?.password}</span></p>
                                     </div>
                                     <p className="mt-4 text-xs text-red-600 italic">!! Make sure to copy the password now. It will not be shown again.</p>
                                     <button

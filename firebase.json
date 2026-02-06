@@ -30,63 +30,63 @@
             {
                 "source": "/api/**",
                 "run": {
-                    "serviceId": "loan-officer-ai",
+                    "serviceId": "loan-officer-api",
                     "region": "us-central1"
                 }
             },
             {
                 "source": "/intake/**",
                 "run": {
-                    "serviceId": "loan-officer-ai",
+                    "serviceId": "loan-officer-api",
                     "region": "us-central1"
                 }
             },
             {
                 "source": "/assessment/**",
                 "run": {
-                    "serviceId": "loan-officer-ai",
+                    "serviceId": "loan-officer-api",
                     "region": "us-central1"
                 }
             },
             {
                 "source": "/behavior/**",
                 "run": {
-                    "serviceId": "loan-officer-ai",
+                    "serviceId": "loan-officer-api",
                     "region": "us-central1"
                 }
             },
             {
                 "source": "/documents/**",
                 "run": {
-                    "serviceId": "loan-officer-ai",
+                    "serviceId": "loan-officer-api",
                     "region": "us-central1"
                 }
             },
             {
                 "source": "/admin/**",
                 "run": {
-                    "serviceId": "loan-officer-ai",
+                    "serviceId": "loan-officer-api",
                     "region": "us-central1"
                 }
             },
             {
                 "source": "/auth/**",
                 "run": {
-                    "serviceId": "loan-officer-ai",
+                    "serviceId": "loan-officer-api",
                     "region": "us-central1"
                 }
             },
             {
                 "source": "/billing/**",
                 "run": {
-                    "serviceId": "loan-officer-ai",
+                    "serviceId": "loan-officer-api",
                     "region": "us-central1"
                 }
             },
             {
                 "source": "/org/**",
                 "run": {
-                    "serviceId": "loan-officer-ai",
+                    "serviceId": "loan-officer-api",
                     "region": "us-central1"
                 }
             },

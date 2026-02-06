@@ -7,6 +7,8 @@ from models.usage_log import UsageLog
 from utils.db import Database
 from pricing_config import PLAN_CONFIG
 from agents.audit_agent import AuditAgent
+import logging
+logger = logging.getLogger(__name__)
 
 class BillingAgent:
     """
@@ -56,7 +58,7 @@ class BillingAgent:
         record = BillingAgent.check_usage_period(record)
         
         # DEBUG LOGGING (Temporary)
-        print(f"[BILLING_CHECK] Org: {org.id}, Env: {environment}, Usage: {record.assessment_count}, OrgLimit: {org.monthly_limit}")
+        logger.info(f"[BILLING_CHECK] Org: {org.id}, Env: {environment}, Usage: {record.assessment_count}, OrgLimit: {org.monthly_limit}")
 
         # Rule 1: PRODUCTION requires ACTIVE billing status
         # Note: Enterprise might be "ACTIVE" billing status even if custom check
@@ -175,7 +177,7 @@ class BillingAgent:
 
         # Fix: Support Sandbox overrides in summary
         # If a custom limit is set on the org, it applies to Sandbox too (for now)
-        print(f"DEBUG: BillingAgent loaded org {fresh_org.id} with monthly_limit: {fresh_org.monthly_limit}")
+        logger.debug(f"DEBUG: BillingAgent loaded org {fresh_org.id} with monthly_limit: {fresh_org.monthly_limit}")
         sandbox_limit = (
             fresh_org.monthly_limit
             if fresh_org.monthly_limit is not None
@@ -198,4 +200,3 @@ class BillingAgent:
             "payment_status": fresh_org.payment_status.value if hasattr(fresh_org.payment_status, 'value') else fresh_org.payment_status,
             "period_end": fresh_org.current_period_end.isoformat()
         }
-

@@ -15,6 +15,7 @@ All decisions are deterministic given the same risk inputs.
 from models.assessment import Decision
 from models.borrower import Borrower
 import config
+from utils.policy_context import policy_value, policy_label, policy_version_id
 
 class DecisionAgent:
     """
@@ -83,7 +84,8 @@ class DecisionAgent:
             "deposit_transaction_count": capacity_validation.get("audit_trail", {}).get("deposit_volume_calculation", {}).get("deposit_count", 0),
             "deposit_source": "MOBILE_MONEY_DEPOSITS_ONLY",
             "observation_window_days": capacity_validation.get("observation_window_days", 30),
-            "policy_version": "v1.5.0-duration-handling",
+            "policy_version": policy_label("v1.5.0-duration-handling"),
+            "policy_version_id": policy_version_id("unknown"),
             "blocking_factors": [],
             "adjustments_applied": []
         }
@@ -92,11 +94,15 @@ class DecisionAgent:
         # RULE 1: DURATION POLICY ENFORCEMENT
         # ====================================================================
         
-        if requested_duration_days < cap_config.MIN_DURATION_DAYS:
+        min_duration_days = int(policy_value("min_duration_days", cap_config.MIN_DURATION_DAYS))
+        max_duration_days = int(policy_value("max_duration_days", cap_config.MAX_DURATION_DAYS))
+        starter_max_duration = int(policy_value("starter_loan_max_duration_days", cap_config.STARTER_LOAN_MAX_DURATION_DAYS))
+
+        if requested_duration_days < min_duration_days:
             decision = Decision.REJECT
             decision_metadata["blocking_factors"].append("DURATION_POLICY_VIOLATION")
             decision_metadata["duration_rejection_reason"] = (
-                f"Requested duration ({requested_duration_days} days) below minimum ({cap_config.MIN_DURATION_DAYS} days)"
+                f"Requested duration ({requested_duration_days} days) below minimum ({min_duration_days} days)"
             )
             return {
                 "decision": decision,
@@ -108,9 +114,9 @@ class DecisionAgent:
             }
 
         # Calculate recommended duration
-        max_allowed_duration = cap_config.MAX_DURATION_DAYS
+        max_allowed_duration = max_duration_days
         if starter_loan_applied:
-            max_allowed_duration = min(max_allowed_duration, cap_config.STARTER_LOAN_MAX_DURATION_DAYS)
+            max_allowed_duration = min(max_allowed_duration, starter_max_duration)
 
         recommended_duration = min(requested_duration_days, max_allowed_duration)
 
@@ -128,7 +134,7 @@ class DecisionAgent:
                     "type": "DURATION_POLICY_CAP_APPLIED",
                     "requested": requested_duration_days,
                     "recommended": recommended_duration,
-                    "reason": f"Duration capped at policy maximum of {cap_config.MAX_DURATION_DAYS} days"
+                    "reason": f"Duration capped at policy maximum of {max_duration_days} days"
                 })
 
         # ====================================================================

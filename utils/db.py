@@ -1,7 +1,8 @@
 import firebase_admin
 from firebase_admin import credentials, firestore
 import os
-from typing import Dict, List, Optional
+import sys
+from typing import Dict, List, Optional, Any
 from datetime import datetime
 from models.borrower import Borrower
 from models.assessment import Assessment
@@ -18,6 +19,10 @@ from models.usage_record import UsageRecord
 from models.payment import Payment
 from models.organization import OrgEnvironment
 from models.officer_action import OfficerAction
+from models.sms_log import SMSLog
+from models.follow_up_task import FollowUpTask
+import logging
+logger = logging.getLogger(__name__)
 
 class MockFirestore:
     """A simple in-memory mock to simulate Firestore locally with basic filtering.
@@ -40,7 +45,7 @@ class MockFirestore:
                         for doc_id, doc_data in col_data.items():
                             collection.document(doc_id).set(doc_data)
              except Exception as e:
-                print(f"WARNING: Failed to load mock DB: {e}")
+                logger.error(f"WARNING: Failed to load mock DB: {e}")
 
     def save(self):
         import json
@@ -50,7 +55,7 @@ class MockFirestore:
         
         with open(self.DB_FILE, 'w') as f:
             json.dump(data, f, indent=2, default=str)
-        print(f"DEBUG: Mock DB saved to {self.DB_FILE}")
+        logger.debug(f"DEBUG: Mock DB saved to {self.DB_FILE}")
 
     def collection(self, name):
         if name not in self.collections:
@@ -103,33 +108,57 @@ class MockDocument:
     def to_dict(self):
         return self.data
 
-from models.sms_log import SMSLog
-
 class Database:
     _db = None
 
     @classmethod
     def get_db(cls):
         if cls._db is None:
+            # Check if we are on Cloud Run
+            is_cloud_run = os.getenv("K_SERVICE") is not None
             service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT", "serviceAccountKey.json")
+            project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "mfi--pro")
+            
+            logger.debug(f"DEBUG: Initializing Database. Cloud Run: {is_cloud_run}, Project: {project_id}")
             
             try:
+                # Priority 1: Service Account Key File (mostly for local development)
                 if os.path.exists(service_account_path):
+                    logger.debug(f"DEBUG: Found service account key at {service_account_path}")
                     cred = credentials.Certificate(service_account_path)
-                    # Check if app is already initialized to avoid ValueError
                     if not len(firebase_admin._apps):
-                        firebase_admin.initialize_app(cred)
+                        firebase_admin.initialize_app(cred, {'projectId': project_id})
                     cls._db = firestore.client()
-                    print(f"DEBUG: Firestore initialized using {service_account_path}")
+                    logger.debug(f"DEBUG: Firestore initialized using key file.")
+                
+                # Priority 2: Application Default Credentials (for Cloud Run / GCP)
                 else:
-                    # Production / Cloud Functions: Use Application Default Credentials
-                    print("DEBUG: Service key not found. Attempting Application Default Credentials (ADC)...")
+                    logger.debug(f"DEBUG: Service key NOT found. Attempting Application Default Credentials (ADC)...")
                     if not len(firebase_admin._apps):
-                        firebase_admin.initialize_app()
+                        # On Cloud Run, this should automatically use the per-service identity
+                        try:
+                            firebase_admin.initialize_app(options={'projectId': project_id})
+                            logger.debug(f"DEBUG: Firebase Admin initialized with project_id={project_id}")
+                        except Exception as init_err:
+                            logger.error(f"DEBUG: Simple initialization failed: {init_err}")
+                            # Fallback: maybe it's already initialized but without project_id?
+                            if len(firebase_admin._apps):
+                                logger.debug("DEBUG: App already exists, continuing to firestore.client()")
+                            else:
+                                raise init_err
+                    
                     cls._db = firestore.client()
-                    print("DEBUG: Firestore initialized using ADC")
+                    logger.debug(f"DEBUG: Firestore client created successfully via ADC.")
+                
+                sys.stdout.flush()
             except Exception as e:
-                print(f"WARNING: Real Firestore failed, falling back to Mock. Error: {e}")
+                import traceback
+                logger.error(f"CRITICAL: Real Firestore initialization failed! Fallback to Mock occurred.")
+                logger.error(f"Error Details: {e}")
+                traceback.print_exc()
+                sys.stdout.flush()
+                # We still fall back to Mock to avoid crashing the whole app, 
+                # but we've logged exactly why it failed.
                 cls._db = MockFirestore()
         return cls._db
 
@@ -137,7 +166,7 @@ class Database:
     def reload_db(cls):
         """Forces a reload of the database connection or mock data."""
         if cls._db and isinstance(cls._db, MockFirestore):
-            print("DEBUG: Reloading MockFirestore from disk...")
+            logger.debug("DEBUG: Reloading MockFirestore from disk...")
             cls._db.load()
 
     @classmethod
@@ -146,6 +175,8 @@ class Database:
         # Encrypt PII before saving
         data = borrower.model_dump()
         data["phone"] = EncryptionAgent.encrypt(borrower.phone)
+        if borrower.national_id:
+            data["national_id"] = EncryptionAgent.encrypt(borrower.national_id)
         db.collection("borrowers").document(borrower.id).set(data)
 
     @classmethod
@@ -156,6 +187,8 @@ class Database:
             data = doc.to_dict()
             # Decrypt PII after retrieval
             data["phone"] = EncryptionAgent.decrypt(data.get("phone", ""))
+            if data.get("national_id"):
+                data["national_id"] = EncryptionAgent.decrypt(data["national_id"])
             return Borrower(**data)
         return None
 
@@ -171,12 +204,16 @@ class Database:
         for doc in docs:
             data = doc.to_dict()
             data["phone"] = EncryptionAgent.decrypt(data.get("phone", ""))
+            if data.get("national_id"):
+                data["national_id"] = EncryptionAgent.decrypt(data["national_id"])
             results.append(Borrower(**data))
         return results
 
     @classmethod
     def save_assessment(cls, assessment: Assessment):
         db = cls.get_db()
+        logger.info(f"[DB SAVE] Saving assessment {assessment.assessment_id} to collection 'assessments' with org_id: {assessment.organization_id}. DB Type: {type(db)}")
+        sys.stdout.flush()
         db.collection("assessments").document(assessment.assessment_id).set(assessment.model_dump())
 
     @classmethod
@@ -200,7 +237,7 @@ class Database:
             try:
                 results.append(Assessment(**doc.to_dict()))
             except Exception as e:
-                print(f"Skipping malformed assessment {doc.id}: {e}")
+                logger.info(f"Skipping malformed assessment {doc.id}: {e}")
         return cls._sort_assessments_by_time(results)
 
     @classmethod
@@ -216,29 +253,91 @@ class Database:
             return AlternativeData(**doc.to_dict())
         return None
 
+    # ------------------------------------------------------------------
+    # SMS/USSD Sessions (Borrower Journeys)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def save_channel_session(cls, session_id: str, data: Dict[str, Any]):
+        db = cls.get_db()
+        db.collection("channel_sessions").document(session_id).set(data)
+
+    @classmethod
+    def get_channel_session(cls, session_id: str) -> Optional[Dict[str, Any]]:
+        db = cls.get_db()
+        doc = db.collection("channel_sessions").document(session_id).get()
+        if doc.exists:
+            return doc.to_dict()
+        return None
+
+    # ------------------------------------------------------------------
+    # Consent Events (Regulatory Ledger)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def save_consent_event(cls, event_id: str, data: Dict[str, Any]):
+        db = cls.get_db()
+        db.collection("consent_events").document(event_id).set(data)
+
+    @classmethod
+    def get_consent_event(cls, event_id: str) -> Optional[Dict[str, Any]]:
+        db = cls.get_db()
+        doc = db.collection("consent_events").document(event_id).get()
+        if doc.exists:
+            return doc.to_dict()
+        return None
+
+    @classmethod
+    def list_consent_events_for_borrower(cls, borrower_id: str) -> List[Dict[str, Any]]:
+        db = cls.get_db()
+        docs = db.collection("consent_events").where("borrower_id", "==", borrower_id).stream()
+        return [doc.to_dict() for doc in docs]
+
     @classmethod
     def save_loan(cls, loan: Loan):
         db = cls.get_db()
         db.collection("loans").document(loan.loan_id).set(loan.model_dump(mode='json'))
 
+    # ------------------------------------------------------------------
+    # Document Ingestion Jobs (Async Uploads)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def save_ingestion_job(cls, job_id: str, data: Dict[str, Any]):
+        db = cls.get_db()
+        db.collection("ingestion_jobs").document(job_id).set(data)
+
+    @classmethod
+    def get_ingestion_job(cls, job_id: str) -> Optional[Dict[str, Any]]:
+        db = cls.get_db()
+        doc = db.collection("ingestion_jobs").document(job_id).get()
+        if doc.exists:
+            return doc.to_dict()
+        return None
+
+    @classmethod
+    def get_ingestion_job_by_idempotency_key(cls, org_id: str, key: str) -> Optional[Dict[str, Any]]:
+        if not key:
+            return None
+        db = cls.get_db()
+        query = db.collection("ingestion_jobs").where("organization_id", "==", org_id).where("idempotency_key", "==", key)
+        docs = query.stream()
+        for doc in docs:
+            return doc.to_dict()
+        return None
+
     @classmethod
     def get_assessments_by_org(cls, organization_id: str, limit: int = 50) -> List[Assessment]:
         """Fetches the most recent assessments for a specific organization."""
         db = cls.get_db()
-        # Note: In real Firestore, you'd need a composite index on organization_id + timestamp
-        
-        # Query: where org_id == X, ordered by timestamp (if we had one, or rely on client-side sort for V1)
         query = db.collection("assessments").where("organization_id", "==", organization_id)
-        
-        # Since Mock/Real might act differently on orderBy without index, we'll fetch then sort/slice for now
         docs = query.stream()
         results = []
         for doc in docs:
             try:
-                # Basic validation
                 results.append(Assessment(**doc.to_dict()))
             except Exception as e:
-                print(f"Skipping malformed assessment {doc.id}: {e}")
+                logger.info(f"Skipping malformed assessment {doc.id}: {e}")
                 
         results = cls._sort_assessments_by_time(results)
         return results[:limit]
@@ -276,10 +375,6 @@ class Database:
         docs = query.stream()
         return [Loan(**doc.to_dict()) for doc in docs]
 
-    # ============================================================================
-    # B2B DASHBOARD METHODS
-    # ============================================================================
-
     @classmethod
     def save_organization(cls, org: Organization):
         db = cls.get_db()
@@ -306,9 +401,15 @@ class Database:
         return [User(**doc.to_dict()) for doc in docs]
 
     @classmethod
+    def list_users_by_org(cls, organization_id: str) -> List[User]:
+        db = cls.get_db()
+        query = db.collection("users").where("organization_id", "==", organization_id)
+        docs = query.stream()
+        return [User(**doc.to_dict()) for doc in docs]
+
+    @classmethod
     def save_api_key(cls, api_key: APIKey):
         db = cls.get_db()
-        # Store by hash to allow lookup by hash
         db.collection("api_keys").document(api_key.key_hash).set(api_key.model_dump(mode='json'))
 
     @classmethod
@@ -322,7 +423,6 @@ class Database:
     @classmethod
     def list_api_keys(cls, organization_id: str) -> List[APIKey]:
         db = cls.get_db()
-        # In real Firestore this needs an index
         query = db.collection("api_keys").where("organization_id", "==", organization_id)
         docs = query.stream()
         return [APIKey(**doc.to_dict()) for doc in docs]
@@ -337,93 +437,62 @@ class Database:
         db = cls.get_db()
         query = db.collection("users").where("email", "==", email)
         docs = query.stream()
-        # db.stream() returns generator, convert to list
         results = [doc for doc in docs]
         if results:
             return User(**results[0].to_dict())
         return None
-    
-    # ============================================================================
-    # BILLING METHODS
-    # ============================================================================
+
+    @classmethod
+    def get_user_by_id(cls, user_id: str) -> Optional[User]:
+        db = cls.get_db()
+        doc = db.collection("users").document(user_id).get()
+        if doc.exists:
+            return User(**doc.to_dict())
+        return None
     
     @classmethod
     def save_usage_log(cls, usage_log: UsageLog):
-        """Save a billable usage log entry."""
         db = cls.get_db()
         db.collection("usage_logs").document(usage_log.log_id).set(usage_log.model_dump(mode='json'))
     
     @classmethod
     def get_usage_logs(cls, org_id: str, limit: int = 100, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> List[UsageLog]:
-        """
-        Get usage logs for an organization.
-        
-        Args:
-            org_id: Organization ID
-            limit: Maximum number of logs to return
-            start_date: Optional start date filter
-            end_date: Optional end date filter
-            
-        Returns:
-            List of UsageLog records
-        """
         db = cls.get_db()
         query = db.collection("usage_logs").where("org_id", "==", org_id)
-        
-        # Note: Date filtering would require composite indexes in real Firestore
-        # For now, we fetch and filter client-side
         docs = query.stream()
         results = []
-        
         for doc in docs:
             try:
                 log = UsageLog(**doc.to_dict())
-                
-                # Apply date filters if provided
-                if start_date and log.timestamp < start_date:
-                    continue
-                if end_date and log.timestamp > end_date:
-                    continue
-                    
+                if start_date and log.timestamp < start_date: continue
+                if end_date and log.timestamp > end_date: continue
                 results.append(log)
             except Exception as e:
-                print(f"Skipping malformed usage log {doc.id}: {e}")
-        
-        # Sort by timestamp descending (most recent first)
+                logger.info(f"Skipping malformed usage log {doc.id}: {e}")
         results.sort(key=lambda x: x.timestamp, reverse=True)
-        
         return results[:limit]
+
     @classmethod
     def save_usage_record(cls, record: UsageRecord):
-        """Save an environment-specific usage record."""
         db = cls.get_db()
-        # Convert environment enum to string for consistent storage
         doc_id = f"{record.organization_id}_{str(record.environment.value if hasattr(record.environment, 'value') else record.environment)}"
         data = record.model_dump(mode='json')
-        # Ensure environment is stored as string
-        if 'environment' in data:
-            data['environment'] = str(data['environment'])
+        if 'environment' in data: data['environment'] = str(data['environment'])
         db.collection("usage_records").document(doc_id).set(data)
 
     @classmethod
     def get_usage_record(cls, org_id: str, environment: OrgEnvironment) -> UsageRecord:
-        """Get or create an environment-specific usage record."""
         db = cls.get_db()
-        # Convert environment enum to string for consistent lookup
         env_str = str(environment.value if hasattr(environment, 'value') else environment)
         doc_id = f"{org_id}_{env_str}"
         doc = db.collection("usage_records").document(doc_id).get()
-        if doc.exists:
-            return UsageRecord(**doc.to_dict())
-        
-        # Create default if non-existent
+        if doc.exists: return UsageRecord(**doc.to_dict())
         record = UsageRecord(organization_id=org_id, environment=environment)
         cls.save_usage_record(record)
         return record
 
     @classmethod
     def list_usage_records(cls, org_id: str) -> List[UsageRecord]:
-        """List all usage records for an organization."""
         db = cls.get_db()
         docs = db.collection("usage_records").where("organization_id", "==", org_id).stream()
         return [UsageRecord(**doc.to_dict()) for doc in docs]
@@ -437,8 +506,7 @@ class Database:
     def get_payment(cls, payment_id: str) -> Optional[Payment]:
         db = cls.get_db()
         doc = db.collection("payments").document(payment_id).get()
-        if doc.exists:
-            return Payment(**doc.to_dict())
+        if doc.exists: return Payment(**doc.to_dict())
         return None
 
     @classmethod
@@ -447,8 +515,7 @@ class Database:
         query = db.collection("payments").where("transaction_id", "==", transaction_id)
         docs = query.stream()
         results = [doc for doc in docs]
-        if results:
-            return Payment(**results[0].to_dict())
+        if results: return Payment(**results[0].to_dict())
         return None
 
     @classmethod
@@ -456,10 +523,6 @@ class Database:
         db = cls.get_db()
         docs = db.collection("payments").where("org_id", "==", org_id).stream()
         return [Payment(**doc.to_dict()) for doc in docs]
-
-    # ============================================================================
-    # DECISION EXPORTS
-    # ============================================================================
 
     @classmethod
     def save_decision_export(cls, export: DecisionExport):
@@ -470,8 +533,7 @@ class Database:
     def get_decision_export(cls, export_id: str) -> Optional[DecisionExport]:
         db = cls.get_db()
         doc = db.collection("decision_exports").document(export_id).get()
-        if doc.exists:
-            return DecisionExport(**doc.to_dict())
+        if doc.exists: return DecisionExport(**doc.to_dict())
         return None
 
     @classmethod
@@ -497,12 +559,10 @@ class Database:
         docs = db.collection("decision_counterfactuals").where("decision_id", "==", decision_id).stream()
         for doc in docs:
             try:
-                if hasattr(doc, "reference"):
-                    doc.reference.delete()
-                else:
-                    db.collection("decision_counterfactuals").document(doc.id).delete()
-            except Exception:
-                pass
+                if hasattr(doc, "reference"): doc.reference.delete()
+                else: db.collection("decision_counterfactuals").document(doc.id).delete()
+            except Exception: pass
+
     @classmethod
     def save_officer_action(cls, action: OfficerAction):
         db = cls.get_db()
@@ -513,8 +573,7 @@ class Database:
     def get_officer_action(cls, assessment_id: str) -> Optional[OfficerAction]:
         db = cls.get_db()
         doc = db.collection("officer_actions").document(assessment_id).get()
-        if doc.exists:
-            return OfficerAction(**doc.to_dict())
+        if doc.exists: return OfficerAction(**doc.to_dict())
         return None
 
     @classmethod
@@ -529,3 +588,35 @@ class Database:
         query = db.collection("sms_logs").where("assessment_id", "==", assessment_id)
         docs = query.stream()
         return [SMSLog(**doc.to_dict()) for doc in docs]
+
+    # ------------------------------------------------------------------
+    # Follow-up Tasks (Officer Workflow)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def save_follow_up_task(cls, task: FollowUpTask):
+        db = cls.get_db()
+        db.collection("follow_up_tasks").document(task.task_id).set(task.model_dump(mode='json'))
+        if hasattr(db, 'save'): db.save()
+
+    @classmethod
+    def list_follow_up_tasks(
+        cls,
+        organization_id: Optional[str] = None,
+        assessment_id: Optional[str] = None
+    ) -> List[FollowUpTask]:
+        db = cls.get_db()
+        query = db.collection("follow_up_tasks")
+        if organization_id:
+            query = query.where("organization_id", "==", organization_id)
+        if assessment_id:
+            query = query.where("assessment_id", "==", assessment_id)
+        docs = query.stream()
+        tasks = []
+        for doc in docs:
+            try:
+                tasks.append(FollowUpTask(**doc.to_dict()))
+            except Exception as e:
+                logger.info(f"Skipping malformed follow-up task {doc.id}: {e}")
+        tasks.sort(key=lambda t: t.created_at, reverse=True)
+        return tasks

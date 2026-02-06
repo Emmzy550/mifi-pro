@@ -1,3 +1,5 @@
+import logging
+logger = logging.getLogger(__name__)
 """
 Scoring Utility
 Computes a normalized risk score (0-1).
@@ -6,6 +8,7 @@ Computes a normalized risk score (0-1).
 
 from models.borrower import Borrower
 from typing import List
+from utils.policy_context import policy_value
 
 def calculate_risk_score(borrower: Borrower, flags: List[str] = None) -> float:
     """
@@ -39,9 +42,11 @@ def calculate_risk_score(borrower: Borrower, flags: List[str] = None) -> float:
 
 def derive_risk_level(score: float) -> str:
     """Maps score to categorical level."""
-    if score < 0.3:
+    low_max = float(policy_value("risk_low_max", 0.3))
+    med_max = float(policy_value("risk_medium_max", 0.6))
+    if score < low_max:
         return "LOW"
-    elif score < 0.7:
+    elif score < med_max:
         return "MEDIUM"
     else:
         return "HIGH"
@@ -58,19 +63,19 @@ def validate_decision_consistency(risk_score: float, risk_level: str, decision: 
     # 1. SAFETY GATE: HIGH RISK -> MUST BE REJECT OR WAIT
     if normalized_risk == "HIGH" and normalized_decision not in ["REJECT", "WAIT"]:
         # Log consistency failure for audit trail
-        print(f"CRITICAL CONSISTENCY FAILURE: Attempted {normalized_decision} for HIGH risk ({risk_score}). Force REJECT.")
+        logger.error(f"CRITICAL CONSISTENCY FAILURE: Attempted {normalized_decision} for HIGH risk ({risk_score}). Force REJECT.")
         return "REJECT" # Safe Fallback
     
     # 2. RATIONALITY GATE: LOW RISK -> NOT REJECT WITHOUT CAUSE
     if normalized_risk == "LOW" and normalized_decision == "REJECT":
         has_critical_flag = any("CRITICAL" in f.upper() for f in (flags or []))
         if not has_critical_flag:
-             print(f"CONSISTENCY WARNING: LOW risk ({risk_score}) rejected without critical flags. Moving to WAIT.")
+             logger.error(f"CONSISTENCY WARNING: LOW risk ({risk_score}) rejected without critical flags. Moving to WAIT.")
              return "WAIT" # Fallback to human review
              
     # 3. POLICY GATE: MEDIUM RISK -> NO PURE APPROVAL
     if normalized_risk == "MEDIUM" and normalized_decision == "APPROVE":
-        print(f"CONSISTENCY ENFORCEMENT: MEDIUM risk upgraded to CONDITIONAL.")
+        logger.info(f"CONSISTENCY ENFORCEMENT: MEDIUM risk upgraded to CONDITIONAL.")
         return "CONDITIONAL"
         
     # 4. WAIT LOGIC VALIDATION
@@ -80,6 +85,6 @@ def validate_decision_consistency(risk_score: float, risk_level: str, decision: 
         is_justified = any(any(reason in f.upper() for reason in data_reasons) for f in (flags or []))
         if not is_justified:
              # If we are waiting but don't know why, it's logically inconsistent
-             print("CONSISTENCY WARNING: Decision is WAIT but no data-confidence flags detected.")
+             logger.warning("CONSISTENCY WARNING: Decision is WAIT but no data-confidence flags detected.")
              
     return normalized_decision

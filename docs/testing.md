@@ -137,13 +137,13 @@ class TestCustomFeature:
     def test_feature_success_case(self, sample_borrower):
         """Test successful scenario"""
         result = RiskAgent.evaluate(sample_borrower)
-        assert result["risk_score"] <= 70
+        assert result["risk_score"] <= 0.7
     
     def test_feature_edge_case(self, sample_borrower):
         """Test edge case"""
         sample_borrower.monthly_income = 0
         result = RiskAgent.evaluate(sample_borrower)
-        assert result["risk_score"] == 100
+        assert result["risk_score"] == 1.0
         
     def test_feature_error_handling(self):
         """Test error handling"""
@@ -237,7 +237,7 @@ curl -X POST http://localhost:8000/assessment/run \
 }
 ```
 
-**Expected:** `APPROVED` at 15% interest
+**Expected:** `APPROVE` at 15% interest
 
 ---
 
@@ -275,7 +275,7 @@ curl -X POST http://localhost:8000/assessment/run \
 }
 ```
 
-**Expected:** `CONDITIONAL_APPROVAL` at 20% interest
+**Expected:** `CONDITIONAL` at 20% interest
 
 ---
 
@@ -337,7 +337,7 @@ curl -X POST http://localhost:8000/behavior/upload \
   "risk_assessment": {
     "score": 32,
     "level": "LOW",
-    "decision": "APPROVED"
+    "decision": "APPROVE"
   }
 }
 ```
@@ -418,3 +418,4 @@ jobs:
 - [Deployment Guide](./deployment.md) - Deploy to production
 - [Troubleshooting](./troubleshooting.md) - Debug common issues
 - [Contributing](./CONTRIBUTING.md) - Contribute new tests
+

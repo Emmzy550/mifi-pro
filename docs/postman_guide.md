@@ -95,7 +95,8 @@ This is where the engine analyzes the data and provides a result.
 
 The engine will return a detailed JSON response. Key fields to look for:
 
-- **`status`**: `APPROVED`, `CONDITIONAL`, or `REJECTED`.
+- **`decision`**: `APPROVE`, `CONDITIONAL`, `REJECT`, or `REFER`.
+- **`decision_legacy`**: Backward-compatible label for older clients.
 - **`risk_score`**: A value between 0 and 1 (lower is better).
 - **`explanation`**: A detailed breakdown of why the decision was made.
 - **`recommended_terms`**: Suggested loan amount and interest rate.
@@ -105,7 +106,8 @@ The engine will return a detailed JSON response. Key fields to look for:
 ```json
 {
   "assessment_id": "ASSESS-ABC123",
-  "status": "APPROVED",
+  "decision": "APPROVE",
+  "decision_legacy": "APPROVED",
   "risk_score": 0.15,
   "explanation": "Borrower has stable income and high affordability ratio...",
   "recommended_terms": {

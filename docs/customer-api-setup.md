@@ -152,9 +152,12 @@ Typical response time: **2-3 seconds**
 {
   "assessment_id": "ASMT-X1Y2Z3W4",
   "borrower_id": "BOR-A1B2C3D4",
-  "risk_score": 35,
+  "risk_score": 0.35,
+  "risk_score_percent": 35.0,
+  "risk_score_scale": "0-1",
   "risk_level": "LOW",
-  "decision": "APPROVED",
+  "decision": "APPROVE",
+  "decision_legacy": "APPROVED",
   "recommended_amount": 25000,
   "recommended_interest_rate": 15.0,
   "requested_amount": 25000,
@@ -175,7 +178,10 @@ Typical response time: **2-3 seconds**
 
 | Field | Description |
 |-------|-------------|
-| `decision` | **APPROVED**, **CONDITIONAL_APPROVAL**, or **REJECT** |
+| `decision` | **APPROVE**, **CONDITIONAL**, **REJECT**, or **REFER** |
+| `decision_legacy` | Legacy label for backwards compatibility (**APPROVED**/**CONDITIONAL_APPROVAL**) |
+| `risk_score` | Normalized risk score from **0.0–1.0** (lower is better) |
+| `risk_score_percent` | Convenience percent (0–100) |
 | `customer_message` | Safe, ready-to-display message for the borrower |
 | `recommended_amount` | Suggested loan amount (capped by capacity) |
 | `policy_cap_amount` | The maximum safe amount if the request was capped |
@@ -190,12 +196,12 @@ Our engine uses strictly Conservative Capacity Logic.
 
 ### Decision Types
 
-**APPROVED**
+**APPROVE**
 - Low risk profile
 - Strong repayment capacity
 - **Your action:** Proceed with standard loan terms
 
-**CONDITIONAL_APPROVAL**
+**CONDITIONAL**
 - Medium risk profile
 - Acceptable with conditions
 - **Your action:** Consider higher interest rate or reduced amount
@@ -490,8 +496,11 @@ curl -X POST https://api.loanofficerai.com/assessment/run \
 ```json
 {
   "assessment_id": "ASMT-XXX",
-  "decision": "APPROVED",
-  "risk_score": 35,
+  "decision": "APPROVE",
+  "decision_legacy": "APPROVED",
+  "risk_score": 0.35,
+  "risk_score_percent": 35.0,
+  "risk_score_scale": "0-1",
   "risk_level": "LOW",
   "recommended_amount": 25000,
   "recommended_interest_rate": 15.0,

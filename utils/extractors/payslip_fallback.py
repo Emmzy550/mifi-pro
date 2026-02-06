@@ -12,13 +12,15 @@ class PayslipFallbackExtractor(BaseExtractor):
         summary = PayslipSummary()
         reasons = []
 
+        amount_pattern = r'([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]{2})?|[0-9]{1,3}(?:\.[0-9]{2})?)'
+        net_synonyms = r'NET\s*PAY|NET\s*AMOUNT|TAKE\s*HOME|TOTAL\s*PAID|NET\s*SALARY|NET\s*INCOME|NET\s*PAYABLE|TOTAL\s*NET|NET\s*EARNINGS|NET\s*PAID|AMOUNT\s*PAYABLE|NET\s*TAKE\s*HOME|TOTAL\s*PAYABLE'
         net_match = re.search(
-            r'NET\s*PAY[^0-9]*([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})',
+            rf'(?:{net_synonyms})[^0-9]*{amount_pattern}',
             text,
             re.IGNORECASE
         )
         gross_match = re.search(
-            r'GROSS\s*PAY[^0-9]*([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})',
+            rf'(?:GROSS\s*PAY|GROSS\s*EARNINGS|GROSS\s*AMOUNT|GROSS\s*SALARY)[^0-9]*{amount_pattern}',
             text,
             re.IGNORECASE
         )

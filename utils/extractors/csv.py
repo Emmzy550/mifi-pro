@@ -1,24 +1,49 @@
 import csv
 from datetime import datetime
 from io import StringIO
+from typing import Optional
 from models.document import ExtractionResult, DocumentType, Transaction
 from utils.extractors.base import BaseExtractor
 
 class CsvExtractor(BaseExtractor):
     def extract(self, text: str) -> ExtractionResult:
         transactions = []
+        def _parse_amount(value: str) -> Optional[float]:
+            if value is None:
+                return None
+            raw = str(value).strip()
+            if not raw:
+                return None
+            # Remove common currency symbols and thousand separators
+            raw = raw.replace(",", "")
+            for sym in ["$", "€", "£", "K", "ZMW", "KES", "USD"]:
+                raw = raw.replace(sym, "")
+            raw = raw.strip()
+            try:
+                return float(raw)
+            except Exception:
+                return None
+
         try:
             reader = csv.DictReader(StringIO(text))
             for row in reader:
                 # Flexible column matching
-                date_str = row.get('Date') or row.get('date')
+                date_str = row.get('Date') or row.get('date') or row.get('Transaction Date') or row.get('transaction_date')
                 amount_str = row.get('Amount') or row.get('amount')
-                desc = row.get('Description') or row.get('description') or "Unknown"
+                credit_str = row.get('Credit') or row.get('credit')
+                debit_str = row.get('Debit') or row.get('debit')
+                desc = (
+                    row.get('Description')
+                    or row.get('description')
+                    or row.get('Narration')
+                    or row.get('Details')
+                    or "Unknown"
+                )
                 
                 # Check for explicit type/direction
                 tx_type = row.get('Type') or row.get('type')
                 
-                if date_str and amount_str:
+                if date_str and (amount_str or credit_str or debit_str):
                     try:
                         # Try multiple date formats
                         timestamp = None
@@ -28,14 +53,26 @@ class CsvExtractor(BaseExtractor):
                                 break
                             except: continue
                             
-                        if not timestamp: continue
-                        
-                        amount = float(amount_str)
+                        if not timestamp:
+                            continue
+
+                        amount = _parse_amount(amount_str)
+                        credit_amt = _parse_amount(credit_str)
+                        debit_amt = _parse_amount(debit_str)
+                        if amount is None:
+                            if credit_amt is not None:
+                                amount = credit_amt
+                                tx_type = tx_type or "CREDIT"
+                            elif debit_amt is not None:
+                                amount = debit_amt
+                                tx_type = tx_type or "DEBIT"
+                        if amount is None:
+                            continue
                         
                         # Determine direction
                         direction = "OUTFLOW" # Default
                         if amount > 0:
-                             direction = "INFLOW"
+                            direction = "INFLOW"
                         
                         # Override if explicit type provided
                         if tx_type:
@@ -48,7 +85,7 @@ class CsvExtractor(BaseExtractor):
                         
                         credit = abs(amount) if direction == "INFLOW" else None
                         debit = abs(amount) if direction == "OUTFLOW" else None
-                        confidence_score = 1.0
+                        confidence_score = 1.0 if tx_type or amount_str else 0.8
                         transactions.append(Transaction(
                             date=timestamp.strftime("%Y-%m-%d"),
                             description=desc,

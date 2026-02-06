@@ -5,6 +5,7 @@ from models.organization import BillingPlan
 PLAN_CONFIG = {
     "SANDBOX": {
         "monthly_limit": 10,
+        "user_limit": 2,
         "price": 0,
         "name": "Sandbox",
         "production_access": False,
@@ -13,6 +14,7 @@ PLAN_CONFIG = {
     },
     "STARTER": {
         "monthly_limit": 1000,
+        "user_limit": 5,
         "price": 1,
         "name": "Starter",
         "production_access": True,
@@ -21,6 +23,7 @@ PLAN_CONFIG = {
     },
     "GROWTH": {
         "monthly_limit": 5000,
+        "user_limit": 20,
         "price": 149,
         "name": "Growth",
         "production_access": True,
@@ -29,6 +32,7 @@ PLAN_CONFIG = {
     },
     "ENTERPRISE": {
         "monthly_limit": None, # Unlimited or Custom
+        "user_limit": None, # Unlimited or Custom
         "price": None, # Negotiated
         "name": "Enterprise",
         "production_access": True,

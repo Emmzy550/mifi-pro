@@ -37,3 +37,7 @@ exports/
 # OS
 .DS_Store
 Thumbs.db
+
+# Invoices
+invoices/
+invoices_old/

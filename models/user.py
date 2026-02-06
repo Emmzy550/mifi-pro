@@ -5,6 +5,7 @@ from datetime import datetime
 
 class UserRole(str, Enum):
     ORG_ADMIN = "ORG_ADMIN"
+    OFFICER = "OFFICER"
     DEVELOPER = "DEVELOPER"
     VIEWER = "VIEWER"
     AUDITOR = "AUDITOR"
