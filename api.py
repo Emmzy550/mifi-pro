@@ -1,5 +1,6 @@
 import uuid
 from fastapi import FastAPI, HTTPException, Body, Depends, Security, UploadFile, File, Form, Request, Header, BackgroundTasks
+from pydantic import ValidationError
 from fastapi.responses import FileResponse
 from typing import Dict, List, Optional, Any
 import io
@@ -1484,6 +1485,36 @@ async def assessment_manual(
     Unified endpoint for Manual UI Assessments.
     Handles borrower creation, file parsing, and core assessment logic.
     """
+    def normalize_employment_type(raw_value: str) -> str:
+        if not raw_value:
+            return raw_value
+        normalized = raw_value.strip().lower().replace("-", " ").replace("_", " ")
+        normalized = " ".join(normalized.split())
+        mapping = {
+            "employed": "salaried",
+            "salaried": "salaried",
+            "salary": "salaried",
+            "self employed": "self_employed",
+            "self employed business": "self_employed",
+            "self employed professional": "self_employed",
+            "self employed owner": "self_employed",
+            "self employed entrepreneur": "self_employed",
+            "self employed trader": "self_employed",
+            "self-employed": "self_employed",
+            "self_employed": "self_employed",
+            "trader": "trader",
+            "business owner": "trader",
+            "merchant": "trader",
+            "farmer": "farmer",
+            "gig": "gig",
+            "gig worker": "gig",
+            "contractor": "gig",
+            "freelancer": "gig",
+        }
+        if normalized in mapping:
+            return mapping[normalized]
+        return raw_value.strip()
+
     # 1. Security & Billing Check
     org = Database.get_organization(current_user.organization_id)
     if not org: raise HTTPException(status_code=500, detail="Org context missing")
@@ -1530,22 +1561,40 @@ async def assessment_manual(
                 id_type = IDType.PASSPORT
 
         borrower_id = f"BOR-{uuid.uuid4().hex[:8].upper()}"
-        borrower = Borrower(
-            id=borrower_id,
-            organization_id=current_user.organization_id,
-            name=full_name,
-            phone=phone,
-            employment_type=employment_type,
-            monthly_income=monthly_income,
-            monthly_expenses=monthly_expenses,
-            existing_debt=0, # Default for manual UI if not provided
-            loan_amount_requested=requested_amount,
-            loan_purpose=loan_purpose or "Not Specified",
-            national_id=national_id,
-            id_provided=id_provided,
-            id_type=id_type,
-            id_review_status=IDReviewStatus.NOT_REVIEWED
-        )
+        employment_type = normalize_employment_type(employment_type)
+        try:
+            borrower = Borrower(
+                id=borrower_id,
+                organization_id=current_user.organization_id,
+                name=full_name,
+                phone=phone,
+                employment_type=employment_type,
+                monthly_income=monthly_income,
+                monthly_expenses=monthly_expenses,
+                existing_debt=0, # Default for manual UI if not provided
+                loan_amount_requested=requested_amount,
+                loan_purpose=loan_purpose or "Not Specified",
+                national_id=national_id,
+                id_provided=id_provided,
+                id_type=id_type,
+                id_review_status=IDReviewStatus.NOT_REVIEWED
+            )
+        except ValidationError as exc:
+            issues = []
+            for err in exc.errors():
+                loc = ".".join([str(v) for v in err.get("loc", [])])
+                issues.append({
+                    "field": loc or "borrower",
+                    "issue": err.get("msg", "Invalid value")
+                })
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "Borrower data is invalid. Review the highlighted fields and retry.",
+                    "issues": issues,
+                    "suggestion": "Check required fields, numeric formats, and remove invalid characters."
+                }
+            )
     
     # 2b. Persist (New or Migrated)
     Database.save_borrower(borrower)
@@ -1670,19 +1719,42 @@ async def assessment_manual(
     # 5. Assessment Gating - BLOCK if not ready
     logger.debug(f"DEBUG: Profile assessment readiness: {unified_profile.assessment_readiness}")
     logger.debug(f"DEBUG: Blocking reasons: {unified_profile.blocking_reasons}")
-    
+    allow_manual_without_docs = False
     if unified_profile.assessment_readiness == AssessmentReadiness.BLOCKED:
-        error_msg = "Assessment Blocked: " + "; ".join(unified_profile.blocking_reasons)
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "message": error_msg,
-                "blocking_reasons": unified_profile.blocking_reasons,
-                "missing_documents": unified_profile.document_coverage.missing_required_documents,
-                "incomplete_documents": unified_profile.document_coverage.incomplete_documents,
-                "borrower_id": borrower_id
-            }
+        doc_only_keywords = [
+            "Payslip",
+            "Bank statement",
+            "Account holder",
+            "income",
+            "transactions",
+            "transaction history",
+            "identity",
+        ]
+        doc_only_block = all(
+            any(keyword.lower() in reason.lower() for keyword in doc_only_keywords)
+            for reason in unified_profile.blocking_reasons
         )
+        no_docs_uploaded = len(document_summaries) == 0
+
+        if doc_only_block and no_docs_uploaded:
+            allow_manual_without_docs = True
+            logger.warning(
+                "WARNING: Proceeding without documents for manual assessment. "
+                f"Blocking reasons: {unified_profile.blocking_reasons}"
+            )
+        else:
+            error_msg = "Assessment Blocked: " + "; ".join(unified_profile.blocking_reasons)
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": error_msg,
+                    "blocking_reasons": unified_profile.blocking_reasons,
+                    "missing_documents": unified_profile.document_coverage.missing_required_documents,
+                    "incomplete_documents": unified_profile.document_coverage.incomplete_documents,
+                    "borrower_id": borrower_id,
+                    "suggestion": "Upload a payslip and bank statement, or correct missing data before retrying."
+                }
+            )
     
     # PARTIAL readiness - proceed with warnings
     if unified_profile.assessment_readiness == AssessmentReadiness.PARTIAL:
@@ -1779,8 +1851,13 @@ async def assessment_manual(
 
     assessment.metrics = assessment.metrics or {}
     assessment.metrics["document_summaries"] = document_summaries
-    assessment.metrics["readiness"] = True
-    assessment.metrics["missing_documents"] = []
+    if allow_manual_without_docs:
+        assessment.metrics["readiness"] = False
+        assessment.metrics["missing_documents"] = unified_profile.document_coverage.missing_required_documents
+        assessment.metrics["readiness_warnings"] = unified_profile.blocking_reasons
+    else:
+        assessment.metrics["readiness"] = True
+        assessment.metrics["missing_documents"] = []
 
     # 6. Persist and Meter
     logger.debug(f"[MANUAL ASSESSMENT DEBUG] User: {current_user.email}, User Org: {current_user.organization_id}")
@@ -1850,7 +1927,16 @@ async def get_org_decisions(
     # Use the helper we just added to DB
     org_id = current_user.organization_id.upper() if current_user.organization_id else "DEFAULT_ORG"
     assessments = Database.get_assessments_by_org(org_id, limit=limit)
-    
+    borrower_lookup: Dict[str, Optional[Borrower]] = {}
+    if assessments:
+        unique_ids = {a.borrower_id for a in assessments if getattr(a, "borrower_id", None)}
+        for borrower_id in unique_ids:
+            borrower_lookup[borrower_id] = Database.get_borrower(borrower_id)
+        for assessment in assessments:
+            borrower = borrower_lookup.get(assessment.borrower_id)
+            if borrower and getattr(borrower, "name", None):
+                assessment.borrower_name = borrower.name
+
     logger.debug(f"[DECISIONS DEBUG] Fetching for Org: {org_id} (Original: {current_user.organization_id})")
     
     # CRITICAL Trace for Visibility

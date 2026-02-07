@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Upload, FileText, X, ArrowLeft, CheckCircle2 } from 'lucide-react';
+import { Upload, FileText, X, ArrowLeft, CheckCircle2, Pencil } from 'lucide-react';
 import { api } from '../context/AuthContext';
 import { requiredColumns, resolveColumnIndex } from '../utils/borrowerUpload';
 
@@ -183,12 +183,26 @@ export default function ManualAssessmentDocuments() {
                     successIds.push(assessmentId);
                 }
             } catch (err: any) {
-                const message =
-                    err?.response?.data?.detail?.message ||
-                    err?.response?.data?.detail ||
+                const detail = err?.response?.data?.detail;
+                let message =
+                    detail?.message ||
+                    detail ||
                     err?.response?.data?.message ||
                     err?.message ||
                     'Failed to submit assessment';
+
+                if (detail?.issues?.length) {
+                    const issueText = detail.issues
+                        .map((issue: { field?: string; issue?: string }) =>
+                            `${issue.field || 'field'}: ${issue.issue || 'invalid'}`
+                        )
+                        .join(', ');
+                    message = `${message} (${issueText})`;
+                }
+
+                if (detail?.suggestion) {
+                    message = `${message} Suggestion: ${detail.suggestion}`;
+                }
                 setRowStatus((prev) => ({
                     ...prev,
                     [rowKey]: { state: 'error', message }
@@ -313,8 +327,8 @@ export default function ManualAssessmentDocuments() {
                                         onClick={() => setExpandedRow(isOpen ? null : idx)}
                                         className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-700 hover:border-primary hover:text-primary hover:bg-primary/5 transition"
                                     >
-                                        <Upload size={14} />
-                                        {isOpen ? 'Hide uploads' : 'Attach documents'}
+                                        <Pencil size={14} />
+                                        {isOpen ? 'Hide details' : 'Edit details'}
                                     </button>
                                 </div>
                             </div>

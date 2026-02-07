@@ -14,6 +14,7 @@ import {
 interface Assessment {
     assessment_id: string;
     borrower_id: string;
+    borrower_name?: string;
     risk_score: number;
     risk_level: string;
     decision: string;
@@ -135,7 +136,21 @@ export default function Decisions() {
                                         {d.assessment_source === 'MANUAL_UI' ? 'Manual Sub' : 'API Node'}
                                     </span>
                                 </td>
-                                <td className="px-6 py-4 text-slate-900 font-bold">{d.borrower_id}</td>
+                                <td className="px-6 py-4">
+                                    <div className="flex flex-col leading-tight">
+                                        <span
+                                            className="text-slate-900 font-semibold text-[13px] truncate"
+                                            title={d.borrower_name ? `Borrower reference: ${d.borrower_id}` : undefined}
+                                        >
+                                            {d.borrower_name?.trim() || d.borrower_id}
+                                        </span>
+                                        {d.borrower_name && (
+                                            <span className="text-[11px] text-slate-500 font-mono truncate">
+                                                {d.borrower_id}
+                                            </span>
+                                        )}
+                                    </div>
+                                </td>
                                 <td className="px-6 py-4">
                                     <div className="flex items-center gap-2">
                                         <div className={`w-12 h-1.5 rounded-full bg-slate-100 overflow-hidden shadow-inner`}>

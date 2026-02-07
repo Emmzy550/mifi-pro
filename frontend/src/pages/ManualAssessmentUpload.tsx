@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
-import { Upload, FileSpreadsheet, ArrowRight, AlertTriangle, CheckCircle2, X } from 'lucide-react';
+import { Upload, FileSpreadsheet, ArrowRight, AlertTriangle, CheckCircle2, X, Plus, Trash2 } from 'lucide-react';
 import { requiredColumns, columnAliases, normalizeHeader } from '../utils/borrowerUpload';
 
 export default function ManualAssessmentUpload() {
@@ -69,6 +69,39 @@ export default function ManualAssessmentUpload() {
             setMissingColumns(computeMissingColumns(next));
             return next;
         });
+    };
+
+    const addColumn = () => {
+        setHeaders((prev) => {
+            const baseName = 'New Column';
+            let nextName = baseName;
+            let counter = 1;
+            const normalized = new Set(prev.map((header) => normalizeHeader(header)));
+            while (normalized.has(normalizeHeader(nextName))) {
+                counter += 1;
+                nextName = `${baseName} ${counter}`;
+            }
+            const next = [...prev, nextName];
+            setMissingColumns(computeMissingColumns(next));
+            return next;
+        });
+        setRows((prev) => prev.map((row) => [...row, '']));
+    };
+
+    const addRow = () => {
+        setRows((prev) => {
+            const newRow = Array.from({ length: headers.length }, () => '');
+            return [newRow, ...prev];
+        });
+    };
+
+    const removeColumn = (headerIndex: number) => {
+        setHeaders((prev) => {
+            const next = prev.filter((_, idx) => idx !== headerIndex);
+            setMissingColumns(computeMissingColumns(next));
+            return next;
+        });
+        setRows((prev) => prev.map((row) => row.filter((_, idx) => idx !== headerIndex)));
     };
 
     const handleCellChange = (rowIndex: number, headerIndex: number, value: string) => {
@@ -180,8 +213,26 @@ export default function ManualAssessmentUpload() {
                             </div>
 
                             <div className="border border-slate-200 rounded-xl overflow-hidden">
-                                <div className="bg-slate-50 px-4 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                                    Preview (first {previewRows.length} rows) - editable
+                                <div className="bg-slate-50 px-4 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center justify-between gap-3">
+                                    <span>Preview (first {previewRows.length} rows) - editable</span>
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={addRow}
+                                            className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2 py-1 text-[10px] font-semibold text-slate-600 hover:border-primary hover:text-primary hover:bg-primary/5 transition"
+                                        >
+                                            <Plus size={12} />
+                                            Add row
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={addColumn}
+                                            className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2 py-1 text-[10px] font-semibold text-slate-600 hover:border-primary hover:text-primary hover:bg-primary/5 transition"
+                                        >
+                                            <Plus size={12} />
+                                            Add column
+                                        </button>
+                                    </div>
                                 </div>
                                 <div className="overflow-x-auto">
                                     <table className="min-w-full text-xs text-slate-700">
@@ -189,11 +240,21 @@ export default function ManualAssessmentUpload() {
                                             <tr>
                                                 {headerMeta.map(({ header, idx }) => (
                                                     <th key={`${header}-${idx}`} className="px-3 py-2 text-left font-semibold border-b border-slate-100">
-                                                        <input
-                                                            value={header}
-                                                            onChange={(event) => handleHeaderChange(idx, event.target.value)}
-                                                            className="w-full min-w-[140px] bg-white border border-slate-200 rounded px-2 py-1 text-xs font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/30"
-                                                        />
+                                                        <div className="flex items-center gap-2 min-w-[180px]">
+                                                            <input
+                                                                value={header}
+                                                                onChange={(event) => handleHeaderChange(idx, event.target.value)}
+                                                                className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                                                            />
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => removeColumn(idx)}
+                                                                className="text-slate-400 hover:text-red-500 transition"
+                                                                title="Delete column"
+                                                            >
+                                                                <Trash2 size={14} />
+                                                            </button>
+                                                        </div>
                                                     </th>
                                                 ))}
                                             </tr>

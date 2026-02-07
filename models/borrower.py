@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Union
 from enum import Enum
 
 class EmploymentType(str, Enum):
@@ -24,7 +24,7 @@ class Borrower(BaseModel):
     organization_id: str = Field("DEFAULT_ORG", description="ID of the MFI this borrower belongs to")
     name: str = Field(..., description="Full name of the borrower")
     phone: str = Field(..., description="Phone number for contact/verification")
-    employment_type: EmploymentType = Field(..., description="Type of employment")
+    employment_type: Union[EmploymentType, str] = Field(..., description="Type of employment")
     monthly_income: float = Field(..., description="Average monthly income in local currency", ge=0)
     monthly_expenses: float = Field(..., description="Average monthly expenses", ge=0)
     existing_debt: float = Field(0.0, description="Total current outstanding debt", ge=0)

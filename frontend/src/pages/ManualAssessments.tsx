@@ -28,6 +28,7 @@ type ParsedExcelUpload = {
 export default function ManualAssessments() {
     const navigate = useNavigate();
     const formRef = useRef<HTMLFormElement | null>(null);
+    const manualSectionRef = useRef<HTMLDivElement | null>(null);
     const [submitting, setSubmitting] = useState(false);
     const [pendingDocs, setPendingDocs] = useState<string[]>([]);
     const [borrowerId, setBorrowerId] = useState<string | null>(null);
@@ -174,6 +175,13 @@ export default function ManualAssessments() {
         setCanRunAssessment(Boolean(formRef.current?.checkValidity()));
     }, [formData]);
 
+    useEffect(() => {
+        if (!showManualForm) return;
+        requestAnimationFrame(() => {
+            manualSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+    }, [showManualForm]);
+
     const removeFile = (type: 'bank_statement' | 'mobile_money_statement' | 'payslip') => {
         setFiles(prev => ({ ...prev, [type]: null }));
     };
@@ -195,6 +203,7 @@ export default function ManualAssessments() {
                 const successIds: string[] = [];
                 let skippedCount = 0;
                 let errorCount = 0;
+                const errorMessages: string[] = [];
                 for (let idx = 0; idx < excelUpload.rows.length; idx += 1) {
                     setBatchProgress({ current: idx + 1, total: excelUpload.rows.length });
                     const row = excelUpload.rows[idx];
@@ -228,13 +237,33 @@ export default function ManualAssessments() {
                         if (assessmentId) {
                             successIds.push(assessmentId);
                         }
-                    } catch {
+                    } catch (err: any) {
+                        const detail = err?.response?.data?.detail;
+                        let message =
+                            detail?.message ||
+                            detail ||
+                            err?.response?.data?.message ||
+                            err?.message ||
+                            'Failed to submit assessment';
+                        if (detail?.issues?.length) {
+                            const issueText = detail.issues
+                                .map((issue: { field?: string; issue?: string }) =>
+                                    `${issue.field || 'field'}: ${issue.issue || 'invalid'}`
+                                )
+                                .join(', ');
+                            message = `${message} (${issueText})`;
+                        }
+                        if (detail?.suggestion) {
+                            message = `${message} Suggestion: ${detail.suggestion}`;
+                        }
+                        errorMessages.push(`Row ${idx + 2}: ${message}`);
                         errorCount += 1;
                     }
                 }
 
                 if (successIds.length === 0) {
-                    toast.error('No assessments were created. Fix validation issues and try again.');
+                    const fallback = errorMessages[0] || 'No assessments were created. Fix validation issues and try again.';
+                    toast.error(fallback, { duration: 7000 });
                     return;
                 }
 
@@ -285,9 +314,22 @@ export default function ManualAssessments() {
                     toast.error("Payment required. Please check your billing status.");
                 } else if (status === 400) {
                     const errorDetail = data?.detail;
-                    const message = typeof errorDetail === 'string'
+                    let message = typeof errorDetail === 'string'
                         ? errorDetail
                         : (errorDetail?.message || data?.message || 'Assessment blocked by risk policy');
+
+                    if (errorDetail?.issues?.length) {
+                        const issueText = errorDetail.issues
+                            .map((issue: { field?: string; issue?: string }) =>
+                                `${issue.field || 'field'}: ${issue.issue || 'invalid'}`
+                            )
+                            .join(', ');
+                        message = `${message} (${issueText})`;
+                    }
+
+                    if (errorDetail?.suggestion) {
+                        message = `${message} Suggestion: ${errorDetail.suggestion}`;
+                    }
 
                     if (Array.isArray(errorDetail?.missing_documents)) {
                         setPendingDocs(errorDetail.missing_documents);
@@ -359,6 +401,57 @@ export default function ManualAssessments() {
                 </div>
             </header>
 
+            <div className="card mb-8 bg-slate-50/80 border-slate-200">
+                <div className="space-y-6 text-sm text-slate-600">
+                    <div>
+                        <h2 className="text-lg font-semibold text-slate-900">How manual credit assessments work</h2>
+                    </div>
+                    <div className="space-y-2">
+                        <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Recommended intake</h3>
+                        <p>
+                            Upload a borrower Excel or spreadsheet for faster, more accurate assessments. Manual entry is supported for single borrowers.
+                        </p>
+                    </div>
+                    <div className="space-y-2">
+                        <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">What we validate automatically</h3>
+                        <ul className="list-disc pl-5 space-y-1">
+                            <li>Required borrower fields (income, expenses, loan details, national ID)</li>
+                            <li>Data consistency and missing values</li>
+                            <li>Policy thresholds and basic affordability checks</li>
+                        </ul>
+                    </div>
+                    <div className="space-y-2">
+                        <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">What happens after submission</h3>
+                        <p>
+                            Once submitted, the system runs the full credit assessment and stores the outcome in the Decisions page with a complete audit trail.
+                        </p>
+                    </div>
+                    <div className="space-y-2">
+                        <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Batch assessments</h3>
+                        <p>
+                            Spreadsheets may contain multiple borrowers. Each row is processed independently and results appear as separate decisions.
+                        </p>
+                    </div>
+                    <div className="space-y-2">
+                        <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Before you upload (checklist)</h3>
+                        <ul className="list-disc pl-5 space-y-1">
+                            <li>Borrower details completed</li>
+                            <li>Monthly income and expenses provided</li>
+                            <li>Loan amount and duration included</li>
+                            <li>National ID format valid</li>
+                        </ul>
+                    </div>
+                    <div>
+                        <a
+                            href="/decisions"
+                            className="text-xs font-semibold text-primary hover:underline"
+                        >
+                            View assessment outcomes in Decisions →
+                        </a>
+                    </div>
+                </div>
+            </div>
+
             <form ref={formRef} onSubmit={handleSubmit} className="space-y-8">
                 {pendingDocs.length > 0 && (
                     <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-amber-900 text-sm font-semibold">
@@ -386,7 +479,7 @@ export default function ManualAssessments() {
                     )}
                     <div className={showManualForm ? '' : 'opacity-40 pointer-events-none'}>
                         {/* SECTION 1: BORROWER & LOAN DETAILS */}
-                        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+                        <div ref={manualSectionRef} className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
                             <div className="bg-slate-50 px-6 py-3 border-b border-slate-200 flex items-center gap-2">
                                 <User size={18} className="text-primary" />
                                 <h2 className="text-sm font-semibold text-slate-700 uppercase tracking-wider">Section 1: Borrower & Loan Details</h2>

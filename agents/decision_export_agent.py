@@ -199,39 +199,51 @@ class DecisionExportAgent:
 
     @staticmethod
     def _write_pdf(file_path: str, payload: Dict):
-        from reportlab.platypus import HRFlowable
-        
+        from reportlab.platypus import HRFlowable, Image, Table, TableStyle, Spacer, Paragraph
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib import colors
+        from reportlab.lib.units import inch
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        import os
+
         styles = getSampleStyleSheet()
-        accent_color = colors.Color(0.12, 0.16, 0.23) # Dark Slate #1E293B equivalent
-        
+        brand_color = colors.HexColor("#0F172A")  # Deep navy
+        label_color = colors.HexColor("#64748B")
+        border_color = colors.HexColor("#E2E8F0")
+        card_bg = colors.HexColor("#F8FAFC")
+        approve_bg = colors.HexColor("#ECFDF3")
+        approve_text = colors.HexColor("#166534")
+        review_bg = colors.HexColor("#FFFBEB")
+        review_text = colors.HexColor("#92400E")
+        reject_bg = colors.HexColor("#FEF2F2")
+        reject_text = colors.HexColor("#B91C1C")
+
         # Custom styles for MFI-friendly, institution-grade look
         title_style = ParagraphStyle(
             'MFITitle',
             parent=styles['Title'],
-            fontSize=22,
+            fontSize=20,
             fontName='Helvetica-Bold',
-            spaceAfter=5,
+            spaceAfter=4,
             alignment=0,
-            textColor=accent_color
+            textColor=brand_color
         )
-        
+
         section_header_style = ParagraphStyle(
             'MFISectionHeader',
             parent=styles['Heading2'],
-            fontSize=11,
+            fontSize=12,
             fontName='Helvetica-Bold',
-            spaceBefore=12,
+            spaceBefore=10,
             spaceAfter=6,
-            textColor=accent_color,
-            textTransform='UPPERCASE',
-            letterSpacing=1
+            textColor=brand_color
         )
 
         label_style = ParagraphStyle(
             'MFILabel',
             parent=styles['Normal'],
             fontSize=9,
-            textColor=colors.grey,
+            textColor=label_color,
             fontName='Helvetica'
         )
 
@@ -242,21 +254,62 @@ class DecisionExportAgent:
             textColor=colors.black,
             fontName='Helvetica-Bold'
         )
-        
+
+        large_value_style = ParagraphStyle(
+            'MFILargeValue',
+            parent=styles['Normal'],
+            fontSize=13,
+            textColor=brand_color,
+            fontName='Helvetica-Bold'
+        )
+
+        def _decision_colors(decision: str):
+            decision_upper = (decision or "").upper()
+            if decision_upper in ["APPROVE", "APPROVED"]:
+                return approve_bg, approve_text
+            if decision_upper == "REJECT":
+                return reject_bg, reject_text
+            return review_bg, review_text
+
+        def _card(flowables: List, doc_width: float):
+            table = Table([[flowables]], colWidths=[doc_width])
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, -1), card_bg),
+                ('BOX', (0, 0), (-1, -1), 0.6, border_color),
+                ('LEFTPADDING', (0, 0), (-1, -1), 12),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 12),
+                ('TOPPADDING', (0, 0), (-1, -1), 10),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ]))
+            return table
+
         doc = SimpleDocTemplate(
-            file_path, 
-            pagesize=letter, 
-            leftMargin=0.75*inch, 
-            rightMargin=0.75*inch,
-            topMargin=0.75*inch,
+            file_path,
+            pagesize=A4,
+            leftMargin=0.7*inch,
+            rightMargin=0.7*inch,
+            topMargin=0.7*inch,
             bottomMargin=0.75*inch
         )
         content = []
 
-        # 1. Header: Title and Divider
-        content.append(Paragraph("Credit Decision Summary", title_style))
-        content.append(HRFlowable(width="100%", thickness=1.5, color=accent_color, spaceAfter=15))
-        
+        # Header: Logo + Title
+        logo_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "logo.png"))
+        logo_cell = ""
+        if os.path.exists(logo_path):
+            logo_cell = Image(logo_path, width=0.4*inch, height=0.4*inch)
+        header_table = Table(
+            [[logo_cell, Paragraph("Credit Decision Summary", title_style)]],
+            colWidths=[0.55*inch, doc.width - 0.55*inch]
+        )
+        header_table.setStyle(TableStyle([
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ]))
+        content.append(header_table)
+        content.append(HRFlowable(width="100%", thickness=1.2, color=brand_color, spaceAfter=14))
+
         # 2. Applicant and Assessment Details (Two-column Grid)
         details_data = [
             [
@@ -268,47 +321,52 @@ class DecisionExportAgent:
                 [Paragraph("POLICY VERSION", label_style), Paragraph(payload['policy_version'], value_style)]
             ]
         ]
-        
-        details_table = Table(details_data, colWidths=[3.5*inch, 3.5*inch])
+
+        details_table = Table(details_data, colWidths=[doc.width/2, doc.width/2])
         details_table.setStyle(TableStyle([
             ('ALIGN', (0,0), (-1,-1), 'LEFT'),
             ('VALIGN', (0,0), (-1,-1), 'TOP'),
             ('BOTTOMPADDING', (0,0), (-1,-1), 10),
         ]))
-        content.append(details_table)
-        content.append(Spacer(1, 10))
+        content.append(_card([details_table], doc.width))
+        content.append(Spacer(1, 12))
 
         # 3. Decision Summary Box (Key Outcome)
-        # We use a nested table for the background fill and border
-        summary_inner_data = [
-            [Paragraph("DECISION OUTCOME", label_style), Paragraph("RISK LEVEL", label_style), Paragraph("RISK SCORE", label_style)],
-            [
-                Paragraph(f"<font size=16 color='{accent_color}'><b>{payload['decision_outcome']}</b></font>", styles['Normal']),
-                Paragraph(f"<font size=16 color='{accent_color}'><b>{payload['risk_level']}</b></font>", styles['Normal']),
-                Paragraph(f"<font size=16 color='{accent_color}'><b>{payload['risk_score_pct']}</b></font>", styles['Normal'])
-            ]
-        ]
-        summary_inner_table = Table(summary_inner_data, colWidths=[2.3*inch, 2.3*inch, 2.3*inch])
-        summary_inner_table.setStyle(TableStyle([
-            ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-            ('BOTTOMPADDING', (0,1), (-1,1), 12),
-            ('TOPPADDING', (0,0), (-1,0), 12),
+        status_bg, status_text = _decision_colors(payload['decision_outcome'])
+        status_pill = Table(
+            [[Paragraph(f"<font color='{status_text}'><b>{payload['decision_outcome']}</b></font>", styles['Normal'])]],
+            colWidths=[1.8*inch]
+        )
+        status_pill.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), status_bg),
+            ('BOX', (0, 0), (-1, -1), 0.6, status_text),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
         ]))
 
-        summary_box_table = Table([[summary_inner_table]], colWidths=[7.0*inch])
-        summary_box_table.setStyle(TableStyle([
-            ('BOX', (0,0), (-1,-1), 0.5, colors.grey),
-            ('BACKGROUND', (0,0), (-1,-1), colors.Color(0.97, 0.98, 1.0)), # Very light blue/grey #F8FAFC
+        summary_data = [
+            [Paragraph("DECISION OUTCOME", label_style), Paragraph("RISK LEVEL", label_style), Paragraph("RISK SCORE", label_style)],
+            [
+                status_pill,
+                Paragraph(f"{payload['risk_level']}", large_value_style),
+                Paragraph(f"{payload['risk_score_pct']}", large_value_style)
+            ]
+        ]
+        summary_table = Table(summary_data, colWidths=[doc.width/3, doc.width/3, doc.width/3])
+        summary_table.setStyle(TableStyle([
             ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+            ('BOTTOMPADDING', (0, 1), (-1, 1), 12),
+            ('TOPPADDING', (0, 0), (-1, 0), 8),
         ]))
-        content.append(summary_box_table)
-        content.append(Spacer(1, 25))
+        content.append(_card([summary_table], doc.width))
+        content.append(Spacer(1, 18))
 
         # 4. Loan Recommendation Section
         content.append(Paragraph("Financial Recommendation", section_header_style))
-        content.append(HRFlowable(width="100%", thickness=0.5, color=colors.grey, spaceAfter=10))
-        
+
         reco_data = [
             [
                 [Paragraph("RECOMMENDED AMOUNT", label_style), Paragraph(payload['recommended_amount'], value_style)],
@@ -319,45 +377,44 @@ class DecisionExportAgent:
                 [Paragraph("IDENTIFICATION STATUS", label_style), Paragraph(f"Provided ({payload['id_type']})" if payload['identification_provided'] == "Yes" else "Not Provided", value_style)]
             ]
         ]
-        
-        reco_table = Table(reco_data, colWidths=[3.5*inch, 3.5*inch])
+
+        reco_table = Table(reco_data, colWidths=[doc.width/2, doc.width/2])
         reco_table.setStyle(TableStyle([
             ('ALIGN', (0,0), (-1,-1), 'LEFT'),
             ('VALIGN', (0,0), (-1,-1), 'TOP'),
             ('BOTTOMPADDING', (0,0), (-1,-1), 10),
         ]))
-        content.append(reco_table)
-        content.append(Spacer(1, 15))
+        content.append(_card([reco_table], doc.width))
+        content.append(Spacer(1, 12))
 
         # 5. Policy & Risk Analysis
         content.append(Paragraph("Risk Assessment Factors", section_header_style))
-        content.append(HRFlowable(width="100%", thickness=0.5, color=colors.grey, spaceAfter=10))
-        
-        for factor in payload['key_factors']:
-            content.append(Paragraph(f"<font color='#475569'>•</font> {factor}", styles['Normal']))
-            content.append(Spacer(1, 5))
-        
-        content.append(Spacer(1, 15))
-        content.append(Paragraph("Policy Justification", section_header_style))
-        content.append(HRFlowable(width="100%", thickness=0.5, color=colors.grey, spaceAfter=10))
-        content.append(Paragraph(payload["decision_summary"], styles["Normal"]))
-        
-        # 6. Footer & Disclaimer
-        content.append(Spacer(1, 40))
-        content.append(HRFlowable(width="100%", thickness=0.5, color=colors.lightgrey, spaceAfter=10))
-        
-        footer_data = [
-            [Paragraph(f"<font color='grey'>{DecisionExportAgent.DISCLAIMER}</font>", styles["Italic"]), 
-             Paragraph(f"<font color='grey' size=8>System Version: v1.0.0 | Model: {payload['model_version']}</font>", styles["Normal"])]
-        ]
-        footer_table = Table(footer_data, colWidths=[5.0*inch, 2.0*inch])
-        footer_table.setStyle(TableStyle([
-            ('VALIGN', (0,0), (-1,-1), 'TOP'),
-            ('ALIGN', (1,0), (1,0), 'RIGHT'),
-        ]))
-        content.append(footer_table)
 
-        doc.build(content)
+        risk_lines = []
+        for factor in payload['key_factors']:
+            risk_lines.append(Paragraph(f"<font color='#475569'>•</font> {factor}", styles['Normal']))
+            risk_lines.append(Spacer(1, 4))
+
+        content.append(_card(risk_lines, doc.width))
+        content.append(Spacer(1, 12))
+
+        content.append(Paragraph("Policy Justification", section_header_style))
+        content.append(_card([Paragraph(payload["decision_summary"], styles["Normal"])], doc.width))
+
+        def _footer(canvas, doc_obj):
+            canvas.saveState()
+            canvas.setStrokeColor(border_color)
+            canvas.setLineWidth(0.6)
+            canvas.line(doc.leftMargin, 0.6 * inch, doc.pagesize[0] - doc.rightMargin, 0.6 * inch)
+            canvas.setFont("Helvetica", 8)
+            footer_left = f"Loan Officer AI \u2013 Partner Console | Generated {payload['generated_at'].strftime('%Y-%m-%d %H:%M')}"
+            canvas.setFillColor(label_color)
+            canvas.drawString(doc.leftMargin, 0.45 * inch, footer_left)
+            page_text = f"Page {canvas.getPageNumber()}"
+            canvas.drawRightString(doc.pagesize[0] - doc.rightMargin, 0.45 * inch, page_text)
+            canvas.restoreState()
+
+        doc.build(content, onFirstPage=_footer, onLaterPages=_footer)
 
     @staticmethod
     def _write_xlsx(file_path: str, payload: Dict, assessment: Assessment, borrower: Borrower):

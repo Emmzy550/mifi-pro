@@ -44,9 +44,9 @@ export default function Layout() {
     };
 
     return (
-        <div className={`flex min-h-screen app-shell ${isDarkMode ? 'theme-dark' : ''}`}>
+        <div className={`flex h-screen overflow-hidden app-shell ${isDarkMode ? 'theme-dark' : ''}`}>
             {/* Sidebar */}
-            <aside className="w-64 sidebar-shell flex flex-col">
+            <aside className="w-64 sidebar-shell flex flex-col sticky top-0 min-h-screen h-screen flex-shrink-0">
                 <div className="p-6 border-b border-slate-100">
                     <div className="flex items-center gap-3 text-primary font-bold text-xl">
                         <img src="/logo.png" alt="Mifi Pro" className="h-12 w-auto object-contain" />
@@ -54,7 +54,7 @@ export default function Layout() {
                     <div className="text-xs text-slate-400 mt-1 uppercase tracking-wider font-medium">Partner Console</div>
                 </div>
 
-                <nav className="flex-1 p-4 space-y-1">
+                <nav className="p-4 space-y-1 sidebar-nav">
                     <SidebarItem icon={LayoutDashboard} label="Overview" path="/" />
                     <SidebarItem icon={Key} label="API Keys" path="/keys" />
                     <SidebarItem icon={ClipboardList} label="Manual Assessments" path="/manual-assessments" />
@@ -66,13 +66,15 @@ export default function Layout() {
                     <SidebarItem path="/audit-logs" icon={Shield} label="Audit Logs" />
                     <SidebarItem path="/documentation" icon={BookOpen} label="Documentation" />
                     <SidebarItem path="/usage-billing" icon={CreditCard} label="Usage & Billing" />
-                    <SidebarItem path="/settings" icon={Settings} label="Settings" />
-                    {user?.role === 'SUPER_ADMIN' && (
-                        <SidebarItem path="/admin" icon={Lock} label="Admin" />
-                    )}
                 </nav>
 
-                <div className="p-4 border-t border-slate-100">
+                <div className="p-4 sidebar-bottom mt-auto border-t border-slate-100">
+                    <div className="space-y-1">
+                        <SidebarItem path="/settings" icon={Settings} label="Settings" />
+                        {user?.role === 'SUPER_ADMIN' && (
+                            <SidebarItem path="/admin" icon={Lock} label="Admin" />
+                        )}
+                    </div>
                     <button
                         onClick={() => setIsDarkMode((prev) => !prev)}
                         className="w-full mb-2 flex items-center gap-3 px-4 py-2 text-sm text-slate-700 hover:bg-slate-100 rounded-lg transition-colors"
@@ -100,7 +102,7 @@ export default function Layout() {
             </aside>
 
             {/* Main Content */}
-            <main className="flex-1">
+            <main className="flex-1 overflow-y-auto">
                 <div className="page-shell">
                     <Outlet />
                 </div>

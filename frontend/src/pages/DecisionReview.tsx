@@ -694,17 +694,24 @@ export default function DecisionReview() {
 
                         {/* Decision Snapshot */}
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-5">
-                            <div className="p-4 bg-white border border-slate-100 rounded-2xl min-h-[108px]">
+                            <div className="system-metric-card system-metric-card--decision p-4 bg-white border border-slate-100 rounded-2xl">
                                 <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Decision</p>
-                                <p className="text-sm font-bold text-slate-800">{assessment.decision}</p>
+                                <p className="system-metric-value system-metric-value--decision text-slate-800">{assessment.decision}</p>
                                 {assessment.decision_legacy && (
-                                    <p className="text-[10px] text-slate-400">Legacy: {assessment.decision_legacy}</p>
+                                    <p className="system-metric-meta text-slate-400" title={`Legacy: ${assessment.decision_legacy}`}>
+                                        Legacy: {assessment.decision_legacy}
+                                    </p>
                                 )}
                             </div>
-                            <div className="p-4 bg-white border border-slate-100 rounded-2xl min-h-[108px]">
+                            <div className="system-metric-card p-4 bg-white border border-slate-100 rounded-2xl">
                                 <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Risk Score</p>
-                                <p className="text-sm font-bold text-slate-800">{formatRiskScore(assessment.risk_score)}</p>
-                                <p className="text-[10px] text-slate-400">Scale: 0–1 ({(assessment.risk_score * 100).toFixed(0)}%)</p>
+                                <p className="system-metric-value text-slate-800">{formatRiskScore(assessment.risk_score)}</p>
+                                <p
+                                    className="system-metric-meta text-slate-400"
+                                    title={`Scale: 0-1 (${(assessment.risk_score * 100).toFixed(0)}%)`}
+                                >
+                                    Scale: 0-1 ({(assessment.risk_score * 100).toFixed(0)}%)
+                                </p>
                                 <div className="mt-2 h-2 rounded-full bg-gradient-to-r from-emerald-400 via-amber-400 to-rose-500 relative">
                                     <span
                                         className="absolute -top-1 w-3 h-3 rounded-full border-2 border-white shadow"
@@ -712,12 +719,17 @@ export default function DecisionReview() {
                                     />
                                 </div>
                             </div>
-                            <div className="p-4 bg-white border border-slate-100 rounded-2xl min-h-[108px]">
+                            <div className="system-metric-card p-4 bg-white border border-slate-100 rounded-2xl">
                                 <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Risk Level</p>
-                                <p className="text-sm font-bold text-slate-800">{assessment.risk_level}</p>
-                                <p className="text-[10px] text-slate-400">Policy {assessment.policy_version || 'v1.5.0'}</p>
+                                <p className="system-metric-value text-slate-800">{assessment.risk_level}</p>
+                                <p
+                                    className="system-metric-meta text-slate-400"
+                                    title={`Policy ${assessment.policy_version || 'v1.5.0'}`}
+                                >
+                                    Policy {assessment.policy_version || 'v1.5.0'}
+                                </p>
                             </div>
-                            <div className="p-4 bg-white border border-slate-100 rounded-2xl min-h-[108px]">
+                            <div className="system-metric-card p-4 bg-white border border-slate-100 rounded-2xl">
                                 <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Data Provenance</p>
                                 <div className="flex flex-wrap gap-2 mt-2 max-w-[220px] overflow-hidden">
                                     {(assessment.data_used?.data_sources || ['Internal']).map((src: string) => (
@@ -726,7 +738,12 @@ export default function DecisionReview() {
                                         </span>
                                     ))}
                                 </div>
-                                <p className="text-[10px] text-slate-400 mt-1">{assessment.transaction_count || 0} tx analyzed</p>
+                                <p
+                                    className="system-metric-meta text-slate-400 mt-1"
+                                    title={`${assessment.transaction_count || 0} tx analyzed`}
+                                >
+                                    {assessment.transaction_count || 0} tx analyzed
+                                </p>
                             </div>
                         </div>
 

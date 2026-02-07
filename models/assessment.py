@@ -18,6 +18,7 @@ class Decision(str, Enum):
 class Assessment(BaseModel):
     assessment_id: str = Field(default_factory=lambda: "ASMT-LEGACY", description="Unique ID for this assessment")
     borrower_id: str = Field("BOR-UNKNOWN", description="Reference to the borrower")
+    borrower_name: Optional[str] = Field(None, description="Borrower full name")
     organization_id: str = Field("DEFAULT_ORG", description="MFI Organization ID")
     risk_score: float = Field(0.5, description="Numeric risk score between 0 and 1", ge=0, le=1)
     risk_level: RiskLevel = Field(RiskLevel.MEDIUM, description="Categorical risk level")
