@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../context/AuthContext';
 import {
@@ -17,12 +17,25 @@ import {
     CreditCard
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
+import { resolveColumnIndex } from '../utils/borrowerUpload';
+
+type ParsedExcelUpload = {
+    fileName?: string;
+    headers: string[];
+    rows: any[][];
+};
 
 export default function ManualAssessments() {
     const navigate = useNavigate();
+    const formRef = useRef<HTMLFormElement | null>(null);
     const [submitting, setSubmitting] = useState(false);
     const [pendingDocs, setPendingDocs] = useState<string[]>([]);
     const [borrowerId, setBorrowerId] = useState<string | null>(null);
+    const [showManualForm, setShowManualForm] = useState(false);
+    const [excelUpload, setExcelUpload] = useState<ParsedExcelUpload | null>(null);
+    const [excelValidationPassed, setExcelValidationPassed] = useState(false);
+    const [canRunAssessment, setCanRunAssessment] = useState(false);
+    const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(null);
 
     // Form State
     const [formData, setFormData] = useState({
@@ -62,6 +75,40 @@ export default function ManualAssessments() {
         }
     };
 
+    const getCellFromRow = (row: any[], headers: string[], key: string) => {
+        const idx = resolveColumnIndex(headers, key);
+        if (idx === -1) return '';
+        return row?.[idx] ?? '';
+    };
+
+    const parseNumber = (value: any) => {
+        if (typeof value === 'number') return value;
+        if (value === null || value === undefined) return '';
+        const cleaned = `${value}`.replace(/,/g, '').trim();
+        if (cleaned === '') return '';
+        const parsedNumber = Number(cleaned);
+        return Number.isNaN(parsedNumber) ? '' : parsedNumber;
+    };
+
+    const getRowValidationIssues = (row: any[], headers: string[]) => {
+        const issues: string[] = [];
+        const fullName = `${getCellFromRow(row, headers, 'full_name')}`.trim();
+        const phone = `${getCellFromRow(row, headers, 'phone')}`.trim();
+        const employment = `${getCellFromRow(row, headers, 'employment_type')}`.trim();
+        const income = parseNumber(getCellFromRow(row, headers, 'monthly_income'));
+        const expenses = parseNumber(getCellFromRow(row, headers, 'monthly_expenses'));
+        const amount = parseNumber(getCellFromRow(row, headers, 'requested_amount'));
+
+        if (!fullName) issues.push('full_name missing');
+        if (!phone) issues.push('phone missing');
+        if (!employment) issues.push('employment_type missing');
+        if (income === '') issues.push('monthly_income missing');
+        if (expenses === '') issues.push('monthly_expenses missing');
+        if (amount === '') issues.push('requested_amount missing');
+
+        return issues;
+    };
+
     useEffect(() => {
         if (!borrowerId || pendingDocs.length === 0 || submitting) return;
 
@@ -76,24 +123,140 @@ export default function ManualAssessments() {
         }
     }, [borrowerId, pendingDocs, files.payslip, files.bank_statement, submitting]);
 
+    useEffect(() => {
+        const raw = sessionStorage.getItem('manual_assessment_upload');
+        if (!raw) return;
+
+        try {
+            const parsed = JSON.parse(raw) as { fileName?: string; headers?: string[]; rows?: any[][] };
+            const headers = parsed?.headers || [];
+            const rows = parsed?.rows || [];
+            if (rows.length === 0 || headers.length === 0) {
+                sessionStorage.removeItem('manual_assessment_upload');
+                return;
+            }
+            setExcelUpload({ fileName: parsed?.fileName, headers, rows });
+            const requiredColumns = ['full_name', 'phone', 'employment_type', 'monthly_income', 'monthly_expenses', 'requested_amount'];
+            const missingRequiredColumns = requiredColumns.filter((column) => resolveColumnIndex(headers, column) === -1);
+            const invalidRows = rows.filter((row) => getRowValidationIssues(row, headers).length > 0);
+            setExcelValidationPassed(missingRequiredColumns.length === 0 && invalidRows.length === 0);
+
+            const firstRow = rows[0] || [];
+            const rawEmployment = `${getCellFromRow(firstRow, headers, 'employment_type')}`.trim().toLowerCase();
+            const normalizedEmployment = rawEmployment.replace(/[\s-]+/g, '_');
+            const allowedEmployment = new Set(['trader', 'salaried', 'farmer', 'gig']);
+            const employmentValue = allowedEmployment.has(normalizedEmployment) ? normalizedEmployment : 'trader';
+
+            setFormData((prev) => ({
+                ...prev,
+                full_name: `${getCellFromRow(firstRow, headers, 'full_name')}`.trim(),
+                phone: `${getCellFromRow(firstRow, headers, 'phone')}`.trim(),
+                employment_type: employmentValue,
+                monthly_income: `${parseNumber(getCellFromRow(firstRow, headers, 'monthly_income'))}`,
+                monthly_expenses: `${parseNumber(getCellFromRow(firstRow, headers, 'monthly_expenses'))}`,
+                requested_amount: `${parseNumber(getCellFromRow(firstRow, headers, 'requested_amount'))}`,
+                requested_duration_days: `${parseNumber(getCellFromRow(firstRow, headers, 'requested_duration_days')) || '30'}`,
+                loan_purpose: `${getCellFromRow(firstRow, headers, 'loan_purpose')}`.trim(),
+                national_id: `${getCellFromRow(firstRow, headers, 'national_id')}`.trim()
+            }));
+
+            // Consume once to avoid showing stale "processed successfully" banners
+            // when the user revisits this page without a fresh upload.
+            sessionStorage.removeItem('manual_assessment_upload');
+        } catch {
+            setExcelUpload(null);
+            setExcelValidationPassed(false);
+            sessionStorage.removeItem('manual_assessment_upload');
+        }
+    }, []);
+
+    useEffect(() => {
+        setCanRunAssessment(Boolean(formRef.current?.checkValidity()));
+    }, [formData]);
+
     const removeFile = (type: 'bank_statement' | 'mobile_money_statement' | 'payslip') => {
         setFiles(prev => ({ ...prev, [type]: null }));
     };
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        setSubmitting(true);
-
-        const payload = new FormData();
-        if (borrowerId) {
-            payload.append('borrower_id', borrowerId);
+        const isBatchUpload = Boolean(excelUpload && excelUpload.rows.length > 1);
+        if (isBatchUpload && !excelValidationPassed) {
+            toast.error('Fix validation issues before running the assessment.');
+            return;
         }
-        Object.entries(formData).forEach(([key, value]) => payload.append(key, value));
-        if (files.bank_statement) payload.append('bank_statement', files.bank_statement);
-        if (files.mobile_money_statement) payload.append('mobile_money_statement', files.mobile_money_statement);
-        if (files.payslip) payload.append('payslip', files.payslip);
+        setSubmitting(true);
+        if (isBatchUpload) {
+            setBatchProgress({ current: 0, total: excelUpload!.rows.length });
+        }
 
         try {
+            if (isBatchUpload && excelUpload) {
+                const successIds: string[] = [];
+                let skippedCount = 0;
+                let errorCount = 0;
+                for (let idx = 0; idx < excelUpload.rows.length; idx += 1) {
+                    setBatchProgress({ current: idx + 1, total: excelUpload.rows.length });
+                    const row = excelUpload.rows[idx];
+                    const issues = getRowValidationIssues(row, excelUpload.headers);
+                    if (issues.length > 0) {
+                        skippedCount += 1;
+                        continue;
+                    }
+
+                    const payload = new FormData();
+                    payload.append('full_name', `${getCellFromRow(row, excelUpload.headers, 'full_name')}`.trim());
+                    payload.append('phone', `${getCellFromRow(row, excelUpload.headers, 'phone')}`.trim());
+                    payload.append('employment_type', `${getCellFromRow(row, excelUpload.headers, 'employment_type')}`.trim());
+                    payload.append('monthly_income', `${parseNumber(getCellFromRow(row, excelUpload.headers, 'monthly_income'))}`);
+                    payload.append('monthly_expenses', `${parseNumber(getCellFromRow(row, excelUpload.headers, 'monthly_expenses'))}`);
+                    payload.append('requested_amount', `${parseNumber(getCellFromRow(row, excelUpload.headers, 'requested_amount'))}`);
+                    const duration = parseNumber(getCellFromRow(row, excelUpload.headers, 'requested_duration_days'));
+                    payload.append('requested_duration_days', `${duration || 30}`);
+                    const purpose = `${getCellFromRow(row, excelUpload.headers, 'loan_purpose')}`.trim();
+                    if (purpose) payload.append('loan_purpose', purpose);
+                    const nationalId = `${getCellFromRow(row, excelUpload.headers, 'national_id')}`.trim();
+                    if (nationalId) payload.append('national_id', nationalId);
+
+                    try {
+                        const res = await api.post('/assessment/manual', payload);
+                        const assessmentId =
+                            res?.data?.assessment?.assessment_id ||
+                            res?.data?.assessment_id ||
+                            res?.data?.assessment?.id ||
+                            res?.data?.id;
+                        if (assessmentId) {
+                            successIds.push(assessmentId);
+                        }
+                    } catch {
+                        errorCount += 1;
+                    }
+                }
+
+                if (successIds.length === 0) {
+                    toast.error('No assessments were created. Fix validation issues and try again.');
+                    return;
+                }
+
+                if (errorCount > 0 || skippedCount > 0) {
+                    toast.error(`Completed with ${successIds.length} created, ${skippedCount} skipped, ${errorCount} failed.`);
+                } else {
+                    toast.success(`Processed ${successIds.length} assessments successfully.`);
+                }
+
+                navigate(`/decisions?batch_ids=${encodeURIComponent(successIds.join(','))}`);
+                return;
+            }
+
+            const payload = new FormData();
+            if (borrowerId) {
+                payload.append('borrower_id', borrowerId);
+            }
+            Object.entries(formData).forEach(([key, value]) => payload.append(key, value));
+            if (files.bank_statement) payload.append('bank_statement', files.bank_statement);
+            if (files.mobile_money_statement) payload.append('mobile_money_statement', files.mobile_money_statement);
+            if (files.payslip) payload.append('payslip', files.payslip);
+
             const res = await api.post('/assessment/manual', payload);
             if (res.data.status === 'INCOMPLETE' || res.data.status === 'BLOCKED') {
                 setPendingDocs(res.data.missing_documents || res.data.blocking_reasons || []);
@@ -145,29 +308,90 @@ export default function ManualAssessments() {
             }
         } finally {
             setSubmitting(false);
+            setBatchProgress(null);
         }
     };
 
     return (
         <div className="max-w-4xl mx-auto pb-20">
-            <header className="mb-8">
-                <h1 className="text-2xl font-bold text-slate-900">Manual Credit Assessment</h1>
-                <p className="text-slate-500">Run a bank-grade credit assessment for a borrower without using the API.</p>
+            <header className="mb-8 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                <div>
+                    <h1 className="text-2xl font-bold text-slate-900">Manual Credit Assessment</h1>
+                    <p className="text-slate-500">
+                        Run a bank-grade credit assessment for a borrower without using the API. Excel upload is the
+                        recommended intake method.
+                    </p>
+                </div>
+                <div className="w-full md:w-auto">
+                    <div className="grid grid-cols-1 md:grid-cols-[auto_1fr_1fr] gap-3 items-stretch md:items-center">
+                        <span className="inline-flex items-center justify-center rounded-full border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] font-semibold text-slate-500 md:h-[56px]">
+                            Recommended for MFIs &amp; SACCOs
+                        </span>
+                        <div>
+                            <button
+                                type="button"
+                                onClick={() => navigate('/manual-assessments/upload')}
+                                className="w-full min-h-[56px] inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition"
+                            >
+                                <FileSpreadsheet size={18} />
+                                Upload Excel / Spreadsheet
+                            </button>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setShowManualForm(true)}
+                            className="w-full min-h-[56px] inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-slate-200 bg-white text-sm font-semibold text-slate-700 hover:border-primary hover:text-primary hover:bg-primary/5 transition"
+                        >
+                            <FileText size={18} />
+                            Enter Manually
+                        </button>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-2 max-w-md">
+                        Upload a borrower Excel or loan tracker. We'll validate the data and run the assessment automatically.
+                    </p>
+                    <a
+                        href="/borrower_intake_template.csv"
+                        title="Use this template for batch uploads and fastest validation."
+                        className="text-xs text-primary font-semibold hover:underline inline-flex items-center gap-1 mt-1"
+                    >
+                        Download Excel template
+                    </a>
+                </div>
             </header>
 
-            <form onSubmit={handleSubmit} className="space-y-8">
+            <form ref={formRef} onSubmit={handleSubmit} className="space-y-8">
                 {pendingDocs.length > 0 && (
                     <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-amber-900 text-sm font-semibold">
                         Missing documents: {pendingDocs.join(", ")}. Upload the missing items to continue.
                     </div>
                 )}
-                {/* SECTION 1: BORROWER & LOAN DETAILS */}
-                <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
-                    <div className="bg-slate-50 px-6 py-3 border-b border-slate-200 flex items-center gap-2">
-                        <User size={18} className="text-primary" />
-                        <h2 className="text-sm font-semibold text-slate-700 uppercase tracking-wider">Section 1: Borrower & Loan Details</h2>
-                    </div>
-                    <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="relative">
+                    {!showManualForm && (
+                        <div className="absolute inset-0 z-10 rounded-xl bg-white/70 backdrop-blur-sm border border-slate-200 flex items-center justify-center p-6 text-center">
+                            <div className="max-w-sm space-y-2">
+                                <p className="text-sm font-semibold text-slate-800">Prefer Excel? Upload a spreadsheet above.</p>
+                                <p className="text-xs text-slate-500">
+                                    Enter manually only if you need to edit or add a one-off borrower.
+                                </p>
+                                <button
+                                    type="button"
+                                    onClick={() => setShowManualForm(true)}
+                                    className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-700 hover:border-primary hover:text-primary hover:bg-primary/5 transition"
+                                >
+                                    <FileText size={14} />
+                                    Enter Manually
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                    <div className={showManualForm ? '' : 'opacity-40 pointer-events-none'}>
+                        {/* SECTION 1: BORROWER & LOAN DETAILS */}
+                        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+                            <div className="bg-slate-50 px-6 py-3 border-b border-slate-200 flex items-center gap-2">
+                                <User size={18} className="text-primary" />
+                                <h2 className="text-sm font-semibold text-slate-700 uppercase tracking-wider">Section 1: Borrower & Loan Details</h2>
+                            </div>
+                            <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-6">
                         <div className="space-y-1.5">
                             <label className="text-xs font-bold text-slate-500 uppercase">Full Name *</label>
                             <div className="relative">
@@ -407,6 +631,8 @@ export default function ManualAssessments() {
                     <p className="text-[10px] text-center text-slate-500 uppercase tracking-widest font-bold">
                         Regulatory Notice: This is a decision support tool. Final lending decision remains with the institution.
                     </p>
+                </div>
+                    </div>
                 </div>
             </form>
         </div>

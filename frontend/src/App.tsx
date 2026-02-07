@@ -12,6 +12,8 @@ import Documentation from './pages/Documentation';
 import UsageBilling from './pages/UsageBilling';
 import AdminDashboard from './pages/AdminDashboard';
 import ManualAssessments from './pages/ManualAssessments';
+import ManualAssessmentUpload from './pages/ManualAssessmentUpload';
+import ManualAssessmentDocuments from './pages/ManualAssessmentDocuments';
 import DecisionReview from './pages/DecisionReview';
 import PolicyStudio from './pages/PolicyStudio';
 import Team from './pages/Team';
@@ -42,6 +44,8 @@ export default function App() {
                         <Route index element={<Dashboard />} />
                         <Route path="keys" element={<APIKeys />} />
                         <Route path="manual-assessments" element={<ManualAssessments />} />
+                        <Route path="manual-assessments/upload" element={<ManualAssessmentUpload />} />
+                        <Route path="manual-assessments/upload-documents" element={<ManualAssessmentDocuments />} />
                         <Route path="decisions" element={<Decisions />} />
                         <Route path="decisions/:assessmentId" element={<DecisionReview />} />
                         <Route path="policy-studio" element={<PolicyStudio />} />

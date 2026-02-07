@@ -159,6 +159,33 @@ async def update_organization(
     AuditAgent.log_event("ORG_UPDATED", current_user.email, {"org_id": org_id, "updates": list(update_data.keys())})
     return org
 
+@admin_router.delete("/organizations/{org_id}", response_model=Dict)
+async def delete_organization(
+    org_id: str,
+    current_user: User = Depends(get_super_admin)
+):
+    """
+    Permanently delete an organization and all related records.
+    """
+    if org_id == "PLATFORM_OWNER":
+        raise HTTPException(status_code=400, detail="Platform owner organization cannot be deleted.")
+
+    org = Database.get_organization(org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    summary = Database.delete_organization_cascade(org_id)
+    AuditAgent.log_event(
+        "ORG_DELETED_PERMANENTLY",
+        current_user.email,
+        {"org_id": org_id, "org_name": org.name, "summary": summary},
+    )
+    return {
+        "status": "DELETED",
+        "organization_id": org_id,
+        "summary": summary,
+    }
+
 @admin_router.get("/organizations/{org_id}/details", response_model=Dict)
 async def get_organization_details(
     org_id: str,

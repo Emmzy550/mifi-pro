@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
+import React, { useEffect, useMemo, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../context/AuthContext';
 import {
     CheckCircle,
@@ -30,6 +30,14 @@ export default function Decisions() {
     const [loading, setLoading] = useState(true);
     const [filterSource, setFilterSource] = useState<string>('ALL');
     const [searchParams] = useSearchParams();
+    const batchIds = useMemo(() => {
+        const raw = searchParams.get('batch_ids');
+        if (!raw) return [];
+        return raw
+            .split(',')
+            .map((v) => v.trim())
+            .filter(Boolean);
+    }, [searchParams]);
 
     useEffect(() => {
         const fetchDecisions = async () => {
@@ -62,6 +70,9 @@ export default function Decisions() {
     };
 
     const filteredDecisions = decisions.filter(d => {
+        if (batchIds.length > 0 && !batchIds.includes(d.assessment_id)) {
+            return false;
+        }
         if (filterSource === 'ALL') return true;
         if (filterSource === 'MANUAL') return d.assessment_source === 'MANUAL_UI';
         if (filterSource === 'API') return d.assessment_source === 'API' || !d.assessment_source;
@@ -92,6 +103,11 @@ export default function Decisions() {
             </div>
 
             <div className="bg-white border border-slate-200 rounded-3xl shadow-sm overflow-hidden">
+                {batchIds.length > 0 && (
+                    <div className="px-6 py-3 border-b border-slate-100 bg-slate-50/60 text-xs font-medium text-slate-600">
+                        Showing {batchIds.length} records from your most recent Excel batch.
+                    </div>
+                )}
                 <table className="w-full text-left text-sm">
                     <thead className="bg-slate-50/50 border-b border-slate-100">
                         <tr>

@@ -1,5 +1,5 @@
 import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, auth as firebase_auth
 import os
 import sys
 from typing import Dict, List, Optional, Any
@@ -241,6 +241,13 @@ class Database:
         return cls._sort_assessments_by_time(results)
 
     @classmethod
+    def delete_assessment(cls, assessment_id: str):
+        db = cls.get_db()
+        db.collection("assessments").document(assessment_id).delete()
+        if hasattr(db, "save"):
+            db.save()
+
+    @classmethod
     def save_alternative_data(cls, data: AlternativeData):
         db = cls.get_db()
         db.collection("alternative_data").document(data.borrower_id).set(data.model_dump())
@@ -376,6 +383,21 @@ class Database:
         return [Loan(**doc.to_dict()) for doc in docs]
 
     @classmethod
+    def delete_loans_by_assessment(cls, assessment_id: str):
+        db = cls.get_db()
+        docs = db.collection("loans").where("assessment_id", "==", assessment_id).stream()
+        for doc in docs:
+            try:
+                if hasattr(doc, "reference"):
+                    doc.reference.delete()
+                else:
+                    db.collection("loans").document(doc.id).delete()
+            except Exception:
+                pass
+        if hasattr(db, "save"):
+            db.save()
+
+    @classmethod
     def save_organization(cls, org: Organization):
         db = cls.get_db()
         db.collection("organizations").document(org.id).set(org.model_dump(mode='json'))
@@ -393,6 +415,119 @@ class Database:
         db = cls.get_db()
         docs = db.collection("organizations").stream()
         return [Organization(**doc.to_dict()) for doc in docs]
+
+    @classmethod
+    def delete_organization_cascade(cls, org_id: str) -> Dict[str, int]:
+        """
+        Permanently removes an organization and all related records.
+        Returns counts of deleted records by area.
+        """
+        db = cls.get_db()
+        summary = {
+            "organizations": 0,
+            "assessments": 0,
+            "loans": 0,
+            "decision_exports": 0,
+            "decision_counterfactuals": 0,
+            "officer_actions": 0,
+            "sms_logs": 0,
+            "follow_up_tasks": 0,
+            "borrowers": 0,
+            "alternative_data": 0,
+            "users": 0,
+            "api_keys": 0,
+            "usage_logs": 0,
+            "usage_records": 0,
+            "payments": 0,
+        }
+
+        def _delete_doc(collection_name: str, doc_id: str) -> bool:
+            try:
+                db.collection(collection_name).document(doc_id).delete()
+                return True
+            except Exception:
+                return False
+
+        def _delete_query_docs(collection_name: str, field: str, value: str) -> int:
+            deleted = 0
+            docs = db.collection(collection_name).where(field, "==", value).stream()
+            for doc in docs:
+                try:
+                    if hasattr(doc, "reference"):
+                        doc.reference.delete()
+                    else:
+                        db.collection(collection_name).document(doc.id).delete()
+                    deleted += 1
+                except Exception:
+                    continue
+            return deleted
+
+        # 1) Assessments and dependent records
+        assessment_docs = db.collection("assessments").where("organization_id", "==", org_id).stream()
+        assessment_ids = [doc.id for doc in assessment_docs]
+        for assessment_id in assessment_ids:
+            summary["decision_exports"] += len(cls.list_decision_exports(assessment_id))
+            cls.delete_decision_exports(assessment_id)
+            summary["decision_counterfactuals"] += len(cls.list_decision_counterfactuals(assessment_id))
+            cls.delete_decision_counterfactuals(assessment_id)
+            if cls.get_officer_action(assessment_id):
+                cls.delete_officer_action(assessment_id)
+                summary["officer_actions"] += 1
+            sms_count = len(cls.list_sms_logs(assessment_id))
+            if sms_count:
+                cls.delete_sms_logs(assessment_id)
+                summary["sms_logs"] += sms_count
+            task_count = len(cls.list_follow_up_tasks(assessment_id=assessment_id))
+            if task_count:
+                cls.delete_follow_up_tasks(assessment_id)
+                summary["follow_up_tasks"] += task_count
+            loan_count = len([l for l in cls.list_loans(organization_id=org_id) if l.assessment_id == assessment_id])
+            if loan_count:
+                cls.delete_loans_by_assessment(assessment_id)
+                summary["loans"] += loan_count
+            cls.delete_assessment(assessment_id)
+            summary["assessments"] += 1
+
+        # 2) Borrowers and alt data
+        borrower_docs = db.collection("borrowers").where("organization_id", "==", org_id).stream()
+        borrower_ids = [doc.id for doc in borrower_docs]
+        for borrower_id in borrower_ids:
+            if _delete_doc("alternative_data", borrower_id):
+                summary["alternative_data"] += 1
+            if _delete_doc("borrowers", borrower_id):
+                summary["borrowers"] += 1
+
+        # 3) Follow-up tasks that may not be attached to an assessment
+        summary["follow_up_tasks"] += _delete_query_docs("follow_up_tasks", "organization_id", org_id)
+
+        # 4) Usage and billing data
+        summary["usage_logs"] += _delete_query_docs("usage_logs", "org_id", org_id)
+        summary["usage_records"] += _delete_query_docs("usage_records", "organization_id", org_id)
+        summary["payments"] += _delete_query_docs("payments", "org_id", org_id)
+
+        # 5) API keys
+        summary["api_keys"] += _delete_query_docs("api_keys", "organization_id", org_id)
+
+        # 6) Users (delete Firestore + best-effort Firebase Auth account)
+        user_docs = db.collection("users").where("organization_id", "==", org_id).stream()
+        user_ids = [doc.id for doc in user_docs]
+        for user_id in user_ids:
+            if _delete_doc("users", user_id):
+                summary["users"] += 1
+            try:
+                firebase_auth.delete_user(user_id)
+            except Exception:
+                # Firestore deletion is authoritative for app authorization.
+                pass
+
+        # 7) Organization record
+        if _delete_doc("organizations", org_id):
+            summary["organizations"] = 1
+
+        if hasattr(db, "save"):
+            db.save()
+
+        return summary
 
     @classmethod
     def list_all_users(cls) -> List[User]:
@@ -543,6 +678,21 @@ class Database:
         return [DecisionExport(**doc.to_dict()) for doc in docs]
 
     @classmethod
+    def delete_decision_exports(cls, decision_id: str):
+        db = cls.get_db()
+        docs = db.collection("decision_exports").where("decision_id", "==", decision_id).stream()
+        for doc in docs:
+            try:
+                if hasattr(doc, "reference"):
+                    doc.reference.delete()
+                else:
+                    db.collection("decision_exports").document(doc.id).delete()
+            except Exception:
+                pass
+        if hasattr(db, "save"):
+            db.save()
+
+    @classmethod
     def save_decision_counterfactual(cls, counterfactual: DecisionCounterfactual):
         db = cls.get_db()
         db.collection("decision_counterfactuals").document(counterfactual.id).set(counterfactual.model_dump(mode='json'))
@@ -577,6 +727,13 @@ class Database:
         return None
 
     @classmethod
+    def delete_officer_action(cls, assessment_id: str):
+        db = cls.get_db()
+        db.collection("officer_actions").document(assessment_id).delete()
+        if hasattr(db, "save"):
+            db.save()
+
+    @classmethod
     def save_sms_log(cls, log: SMSLog):
         db = cls.get_db()
         db.collection("sms_logs").document(log.id).set(log.model_dump(mode='json'))
@@ -588,6 +745,21 @@ class Database:
         query = db.collection("sms_logs").where("assessment_id", "==", assessment_id)
         docs = query.stream()
         return [SMSLog(**doc.to_dict()) for doc in docs]
+
+    @classmethod
+    def delete_sms_logs(cls, assessment_id: str):
+        db = cls.get_db()
+        docs = db.collection("sms_logs").where("assessment_id", "==", assessment_id).stream()
+        for doc in docs:
+            try:
+                if hasattr(doc, "reference"):
+                    doc.reference.delete()
+                else:
+                    db.collection("sms_logs").document(doc.id).delete()
+            except Exception:
+                pass
+        if hasattr(db, "save"):
+            db.save()
 
     # ------------------------------------------------------------------
     # Follow-up Tasks (Officer Workflow)
@@ -620,3 +792,18 @@ class Database:
                 logger.info(f"Skipping malformed follow-up task {doc.id}: {e}")
         tasks.sort(key=lambda t: t.created_at, reverse=True)
         return tasks
+
+    @classmethod
+    def delete_follow_up_tasks(cls, assessment_id: str):
+        db = cls.get_db()
+        docs = db.collection("follow_up_tasks").where("assessment_id", "==", assessment_id).stream()
+        for doc in docs:
+            try:
+                if hasattr(doc, "reference"):
+                    doc.reference.delete()
+                else:
+                    db.collection("follow_up_tasks").document(doc.id).delete()
+            except Exception:
+                pass
+        if hasattr(db, "save"):
+            db.save()

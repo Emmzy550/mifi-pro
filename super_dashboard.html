@@ -359,7 +359,10 @@
                         </div>
                     </td>
                     <td>
-                        <button onclick="openUpgradeModal('${org.id}', '${org.name}', '${org.plan_name}')" class="badge blue" style="border: none; cursor: pointer; padding: 4px 8px;">Upgrade</button>
+                        <div style="display: flex; gap: 8px; align-items: center;">
+                            <button onclick="openUpgradeModal('${org.id}', '${org.name}', '${org.plan_name}')" class="badge blue" style="border: none; cursor: pointer; padding: 4px 8px;">Upgrade</button>
+                            <button onclick="deleteOrganization('${org.id}', '${org.name}', this)" class="badge" style="border: none; cursor: pointer; padding: 4px 8px; background: rgba(239, 68, 68, 0.15); color: #ef4444;">Delete</button>
+                        </div>
                     </td>
                 `;
                 list.appendChild(tr);
@@ -375,6 +378,63 @@
 
         function closeUpgradeModal() {
             document.getElementById('upgrade-modal').classList.add('hidden');
+        }
+
+        async function deleteOrganization(id, name, buttonEl) {
+            if (id === 'PLATFORM_OWNER') {
+                alert('Platform owner organization cannot be deleted.');
+                return;
+            }
+
+            const confirmation = prompt(
+                `This will permanently delete ${name} (${id}) and all related data.\nType the Organization ID to confirm:`
+            );
+
+            if (confirmation === null) return;
+            if (confirmation !== id) {
+                alert('Confirmation did not match organization ID.');
+                return;
+            }
+
+            const originalLabel = buttonEl ? buttonEl.textContent : null;
+            if (buttonEl) {
+                buttonEl.disabled = true;
+                buttonEl.textContent = 'Deleting...';
+                buttonEl.style.opacity = '0.7';
+                buttonEl.style.cursor = 'not-allowed';
+            }
+
+            try {
+                const res = await fetch(`/admin/organizations/${id}`, {
+                    method: 'DELETE',
+                    headers: {
+                        'X-API-KEY': API_KEY
+                    }
+                });
+
+                if (res.ok) {
+                    fetchTenants();
+                    alert('Organization permanently deleted.');
+                } else {
+                    const payload = await res.json().catch(() => ({}));
+                    alert(payload.detail || 'Failed to delete organization');
+                    if (buttonEl) {
+                        buttonEl.disabled = false;
+                        buttonEl.textContent = originalLabel || 'Delete';
+                        buttonEl.style.opacity = '1';
+                        buttonEl.style.cursor = 'pointer';
+                    }
+                }
+            } catch (err) {
+                console.error('Delete error', err);
+                alert('Failed to delete organization');
+                if (buttonEl) {
+                    buttonEl.disabled = false;
+                    buttonEl.textContent = originalLabel || 'Delete';
+                    buttonEl.style.opacity = '1';
+                    buttonEl.style.cursor = 'pointer';
+                }
+            }
         }
 
         const confirmUpgradeBtn = document.getElementById('confirm-upgrade-btn');

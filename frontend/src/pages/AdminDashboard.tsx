@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth, api } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
-import { X, Activity, Shield, Key, BarChart, AlertTriangle, CheckCircle2, RefreshCw, Slash, Settings } from 'lucide-react';
+import { X, Activity, Shield, Key, BarChart, AlertTriangle, CheckCircle2, RefreshCw, Slash, Settings, Trash2 } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 export default function AdminDashboard() {
@@ -204,6 +204,35 @@ export default function AdminDashboard() {
         } catch (e) {
             console.error(e);
             toast.error("Failed to update usage limit.");
+        } finally {
+            setActionLoading(false);
+        }
+    };
+
+    const handleDeleteOrganization = async () => {
+        if (!orgDetails) return;
+        const orgId = orgDetails.organization.id;
+        const orgName = orgDetails.organization.name;
+        const confirmation = window.prompt(
+            `This will permanently delete ${orgName} (${orgId}) and all related data.\nType the Organization ID to confirm:`
+        );
+        if (confirmation !== orgId) {
+            if (confirmation !== null) {
+                toast.error("Confirmation did not match organization ID.");
+            }
+            return;
+        }
+
+        setActionLoading(true);
+        try {
+            await api.delete(`/admin/organizations/${orgId}`);
+            toast.success("Organization permanently deleted.");
+            setSelectedOrgId(null);
+            setOrgDetails(null);
+            fetchOrgs();
+        } catch (e: any) {
+            console.error(e);
+            toast.error(e?.response?.data?.detail || "Failed to delete organization.");
         } finally {
             setActionLoading(false);
         }
@@ -612,6 +641,19 @@ export default function AdminDashboard() {
                                                 Update
                                             </button>
                                         </div>
+                                    </div>
+
+                                    {/* Permanent Delete */}
+                                    <div className="p-4 border border-dashed rounded-lg bg-red-100/40">
+                                        <p className="text-xs font-medium text-slate-700 mb-2">Permanent Delete</p>
+                                        <button
+                                            onClick={handleDeleteOrganization}
+                                            disabled={actionLoading}
+                                            className="w-full py-2 bg-red-700 text-white rounded font-bold text-xs flex items-center justify-center gap-2 hover:bg-red-800 transition-colors disabled:opacity-60"
+                                        >
+                                            <Trash2 size={14} />
+                                            Delete Organization Permanently
+                                        </button>
                                     </div>
                                 </div>
                             </section>

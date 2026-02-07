@@ -71,7 +71,7 @@ class VertexClient:
         # Prepare the structured prompt
         prompt = (
             f"SYSTEM INSTRUCTION: {system_instruction}\n\n"
-            f"ENGINE PAYLOAD:\n{json.dumps(payload, indent=2)}\n\n"
+            f"ENGINE PAYLOAD:\n{json.dumps(payload, indent=2, default=str)}\n\n"
             "REPHRASED EXPLANATION:"
         )
 

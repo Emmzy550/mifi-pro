@@ -3,10 +3,14 @@ import time
 import uuid
 import hmac
 import hashlib
+import logging
 from typing import Dict, Any, Optional
 from urllib import request
+from urllib.parse import urlparse
 
 from models.organization import Organization
+
+logger = logging.getLogger(__name__)
 
 
 class WebhookService:
@@ -34,6 +38,15 @@ class WebhookService:
         if not org or not org.webhook_url:
             return None
 
+        parsed = urlparse(org.webhook_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            logger.warning(
+                "Skipping webhook send: invalid webhook_url for org %s: %r",
+                getattr(org, "id", "unknown"),
+                org.webhook_url,
+            )
+            return None
+
         webhook_id = f"wh_{uuid.uuid4().hex}"
         body = json.dumps({
             "id": webhook_id,
@@ -41,7 +54,7 @@ class WebhookService:
             "organization_id": org.id,
             "timestamp": int(time.time()),
             "data": payload
-        })
+        }, default=str)
 
         headers = {
             "Content-Type": "application/json",
@@ -52,7 +65,15 @@ class WebhookService:
         if org.webhook_secret:
             headers["X-Webhook-Signature"] = WebhookService._sign_payload(org.webhook_secret, body)
 
-        req = request.Request(org.webhook_url, data=body.encode("utf-8"), headers=headers, method="POST")
+        try:
+            req = request.Request(org.webhook_url, data=body.encode("utf-8"), headers=headers, method="POST")
+        except ValueError:
+            logger.warning(
+                "Skipping webhook send: malformed webhook_url for org %s: %r",
+                getattr(org, "id", "unknown"),
+                org.webhook_url,
+            )
+            return None
 
         for attempt in range(1, max_attempts + 1):
             try:

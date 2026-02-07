@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Key, Shield, Settings, LogOut, FileText, BookOpen, CreditCard, Lock, ClipboardList, SlidersHorizontal, Users } from 'lucide-react';
+import { LayoutDashboard, Key, Shield, Settings, LogOut, FileText, BookOpen, CreditCard, Lock, ClipboardList, SlidersHorizontal, Users, Moon, Sun } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
 const SidebarItem = ({ icon: Icon, label, path }: { icon: any, label: string, path: string }) => {
@@ -24,6 +24,19 @@ const SidebarItem = ({ icon: Icon, label, path }: { icon: any, label: string, pa
 export default function Layout() {
     const { user, logout } = useAuth();
     const navigate = useNavigate();
+    const [isDarkMode, setIsDarkMode] = useState(false);
+
+    useEffect(() => {
+        const savedTheme = localStorage.getItem('ui-theme');
+        const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        const shouldUseDark = savedTheme ? savedTheme === 'dark' : prefersDark;
+        setIsDarkMode(shouldUseDark);
+    }, []);
+
+    useEffect(() => {
+        document.documentElement.setAttribute('data-theme', isDarkMode ? 'dark' : 'light');
+        localStorage.setItem('ui-theme', isDarkMode ? 'dark' : 'light');
+    }, [isDarkMode]);
 
     const handleLogout = () => {
         logout();
@@ -31,7 +44,7 @@ export default function Layout() {
     };
 
     return (
-        <div className="flex min-h-screen app-shell">
+        <div className={`flex min-h-screen app-shell ${isDarkMode ? 'theme-dark' : ''}`}>
             {/* Sidebar */}
             <aside className="w-64 sidebar-shell flex flex-col">
                 <div className="p-6 border-b border-slate-100">
@@ -60,6 +73,13 @@ export default function Layout() {
                 </nav>
 
                 <div className="p-4 border-t border-slate-100">
+                    <button
+                        onClick={() => setIsDarkMode((prev) => !prev)}
+                        className="w-full mb-2 flex items-center gap-3 px-4 py-2 text-sm text-slate-700 hover:bg-slate-100 rounded-lg transition-colors"
+                    >
+                        {isDarkMode ? <Sun size={16} /> : <Moon size={16} />}
+                        <span>{isDarkMode ? 'Light Mode' : 'Dark Mode'}</span>
+                    </button>
                     <div className="flex items-center gap-3 px-4 py-3 mb-2">
                         <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-sm font-bold text-slate-600">
                             {user?.email?.[0].toUpperCase()}
