@@ -3202,11 +3202,12 @@ async def send_borrower_sms(
     Database.save_sms_log(log)
 
     # Audit
+    provider = os.getenv("SMS_PROVIDER", "AFRICASTALKING").upper()
     AuditAgent.log_event("BORROWER_SMS_SENT", user.email, {
         "assessment_id": assessment_id,
         "status": result["status"],
         "environment": result["environment"],
-        "provider": "AfricaTalking"
+        "provider": provider
     })
 
     return log

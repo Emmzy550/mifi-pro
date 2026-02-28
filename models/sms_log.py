@@ -13,7 +13,7 @@ class SMSLog(BaseModel):
     message: str = Field(..., description="Verbatim message content")
     sent_by: str = Field(..., description="User ID of the officer who sent it")
     sent_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    provider: str = Field("AfricaTalking", description="SMS service provider used")
+    provider: str = Field("Twilio", description="SMS service provider used")
     provider_id: Optional[str] = Field(None, description="External provider transaction ID")
     status: str = Field(..., description="SENT or FAILED")
     environment: str = Field("sandbox", description="sandbox or production")

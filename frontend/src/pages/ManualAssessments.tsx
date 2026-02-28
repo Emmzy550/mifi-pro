@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../context/AuthContext';
+import * as XLSX from 'xlsx';
 import {
     User,
     Phone,
@@ -25,18 +26,56 @@ type ParsedExcelUpload = {
     rows: any[][];
 };
 
+type UploadStatus = 'idle' | 'uploading' | 'success' | 'error';
+type IntakeMethod = 'upload' | 'single';
+
+type UploadSummary = {
+    rowsDetected: number;
+    validRows: number;
+    flaggedRows: number;
+    estimatedTime: string;
+    missingRequiredColumns: string[];
+};
+
+type SingleAssessmentSummary = {
+    assessmentId: string;
+    status: string;
+    decisionLabel: string;
+    borrowerName: string;
+    requestedAmount: string;
+};
+
+const REQUIRED_UPLOAD_COLUMNS = [
+    'full_name',
+    'phone',
+    'employment_type',
+    'monthly_income',
+    'monthly_expenses',
+    'requested_amount'
+];
+
+const ALLOWED_UPLOAD_EXTENSIONS = new Set(['xlsx', 'xls', 'csv']);
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+
 export default function ManualAssessments() {
     const navigate = useNavigate();
     const formRef = useRef<HTMLFormElement | null>(null);
     const manualSectionRef = useRef<HTMLDivElement | null>(null);
+    const uploadInputRef = useRef<HTMLInputElement | null>(null);
     const [submitting, setSubmitting] = useState(false);
     const [pendingDocs, setPendingDocs] = useState<string[]>([]);
     const [borrowerId, setBorrowerId] = useState<string | null>(null);
-    const [showManualForm, setShowManualForm] = useState(false);
+    const [intakeMethod, setIntakeMethod] = useState<IntakeMethod>('upload');
     const [excelUpload, setExcelUpload] = useState<ParsedExcelUpload | null>(null);
     const [excelValidationPassed, setExcelValidationPassed] = useState(false);
     const [canRunAssessment, setCanRunAssessment] = useState(false);
     const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(null);
+    const [isDragActive, setIsDragActive] = useState(false);
+    const [uploadStatus, setUploadStatus] = useState<UploadStatus>('idle');
+    const [uploadError, setUploadError] = useState<string | null>(null);
+    const [uploadedFileName, setUploadedFileName] = useState('');
+    const [uploadSummary, setUploadSummary] = useState<UploadSummary | null>(null);
+    const [singleSummary, setSingleSummary] = useState<SingleAssessmentSummary | null>(null);
 
     // Form State
     const [formData, setFormData] = useState({
@@ -64,6 +103,7 @@ export default function ManualAssessments() {
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
         const { name, value } = e.target;
+        if (singleSummary) setSingleSummary(null);
         setFormData(prev => ({ ...prev, [name]: value }));
     };
 
@@ -72,6 +112,7 @@ export default function ManualAssessments() {
         type: 'bank_statement' | 'mobile_money_statement' | 'payslip'
     ) => {
         if (e.target.files && e.target.files[0]) {
+            if (singleSummary) setSingleSummary(null);
             setFiles(prev => ({ ...prev, [type]: e.target.files![0] }));
         }
     };
@@ -110,6 +151,119 @@ export default function ManualAssessments() {
         return issues;
     };
 
+    const getUploadValidationError = (file: File) => {
+        const extension = file.name.split('.').pop()?.toLowerCase() || '';
+        if (!ALLOWED_UPLOAD_EXTENSIONS.has(extension)) {
+            return 'Unsupported file format. Upload .xlsx, .xls, or .csv.';
+        }
+        if (file.size > MAX_UPLOAD_BYTES) {
+            return 'File exceeds 10MB. Please upload a smaller spreadsheet.';
+        }
+        return null;
+    };
+
+    const applyParsedSpreadsheet = (fileName: string | undefined, headers: string[], rows: any[][]) => {
+        const missingRequiredColumns = REQUIRED_UPLOAD_COLUMNS.filter((column) => resolveColumnIndex(headers, column) === -1);
+        const flaggedRows = rows.filter((row) => getRowValidationIssues(row, headers).length > 0).length;
+        const validRows = Math.max(0, rows.length - flaggedRows);
+
+        setExcelUpload({ fileName, headers, rows });
+        setExcelValidationPassed(missingRequiredColumns.length === 0 && flaggedRows === 0);
+        setUploadedFileName(fileName || 'Spreadsheet upload');
+        setUploadSummary({
+            rowsDetected: rows.length,
+            validRows,
+            flaggedRows,
+            // TODO: Replace this client-side estimate with backend values from POST /manual-assessments/upload.
+            estimatedTime: `${Math.max(1, Math.ceil(rows.length / 12))} min`,
+            missingRequiredColumns
+        });
+        setUploadStatus('success');
+        setUploadError(null);
+
+        const firstRow = rows[0] || [];
+        const rawEmployment = `${getCellFromRow(firstRow, headers, 'employment_type')}`.trim().toLowerCase();
+        const normalizedEmployment = rawEmployment.replace(/[\s-]+/g, '_');
+        const allowedEmployment = new Set(['trader', 'salaried', 'farmer', 'gig']);
+        const employmentValue = allowedEmployment.has(normalizedEmployment) ? normalizedEmployment : 'trader';
+
+        setFormData((prev) => ({
+            ...prev,
+            full_name: `${getCellFromRow(firstRow, headers, 'full_name')}`.trim(),
+            phone: `${getCellFromRow(firstRow, headers, 'phone')}`.trim(),
+            employment_type: employmentValue,
+            monthly_income: `${parseNumber(getCellFromRow(firstRow, headers, 'monthly_income'))}`,
+            monthly_expenses: `${parseNumber(getCellFromRow(firstRow, headers, 'monthly_expenses'))}`,
+            requested_amount: `${parseNumber(getCellFromRow(firstRow, headers, 'requested_amount'))}`,
+            requested_duration_days: `${parseNumber(getCellFromRow(firstRow, headers, 'requested_duration_days')) || '30'}`,
+            loan_purpose: `${getCellFromRow(firstRow, headers, 'loan_purpose')}`.trim(),
+            national_id: `${getCellFromRow(firstRow, headers, 'national_id')}`.trim()
+        }));
+    };
+
+    const handleSpreadsheetUpload = async (candidate: File | null) => {
+        if (!candidate) return;
+
+        const validationError = getUploadValidationError(candidate);
+        if (validationError) {
+            setUploadStatus('error');
+            setUploadError(validationError);
+            setUploadSummary(null);
+            setUploadedFileName('');
+            setExcelUpload(null);
+            setExcelValidationPassed(false);
+            return;
+        }
+
+        setUploadStatus('uploading');
+        setUploadError(null);
+        setUploadSummary(null);
+        setUploadedFileName(candidate.name);
+
+        try {
+            // TODO: Send file to POST /manual-assessments/upload once the backend endpoint is ready.
+            const data = await candidate.arrayBuffer();
+            const workbook = XLSX.read(data, { type: 'array' });
+            const sheetName = workbook.SheetNames[0];
+            if (!sheetName) {
+                throw new Error('No worksheet found in the uploaded file.');
+            }
+
+            const worksheet = workbook.Sheets[sheetName];
+            const grid = XLSX.utils.sheet_to_json<any[]>(worksheet, { header: 1, blankrows: false }) as any[][];
+            const headers = (grid?.[0] || []).map((value: any) => `${value ?? ''}`);
+            const rows = grid.slice(1).filter((row) => row.some((cell) => `${cell ?? ''}`.trim() !== ''));
+
+            if (headers.length === 0 || rows.length === 0) {
+                throw new Error('No borrower rows detected. Please check the template and try again.');
+            }
+
+            applyParsedSpreadsheet(candidate.name, headers, rows);
+        } catch (err: any) {
+            console.error('Spreadsheet upload failed', err);
+            setUploadStatus('error');
+            setUploadError(err?.message || 'Unable to parse the spreadsheet. Please try another file.');
+            setUploadSummary(null);
+            setExcelUpload(null);
+            setExcelValidationPassed(false);
+        }
+    };
+
+    const handleSpreadsheetInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+        void handleSpreadsheetUpload(event.target.files?.[0] || null);
+        event.target.value = '';
+    };
+
+    const clearSpreadsheetUpload = () => {
+        setExcelUpload(null);
+        setExcelValidationPassed(false);
+        setUploadStatus('idle');
+        setUploadError(null);
+        setIsDragActive(false);
+        setUploadedFileName('');
+        setUploadSummary(null);
+    };
+
     useEffect(() => {
         if (!borrowerId || pendingDocs.length === 0 || submitting) return;
 
@@ -136,30 +290,7 @@ export default function ManualAssessments() {
                 sessionStorage.removeItem('manual_assessment_upload');
                 return;
             }
-            setExcelUpload({ fileName: parsed?.fileName, headers, rows });
-            const requiredColumns = ['full_name', 'phone', 'employment_type', 'monthly_income', 'monthly_expenses', 'requested_amount'];
-            const missingRequiredColumns = requiredColumns.filter((column) => resolveColumnIndex(headers, column) === -1);
-            const invalidRows = rows.filter((row) => getRowValidationIssues(row, headers).length > 0);
-            setExcelValidationPassed(missingRequiredColumns.length === 0 && invalidRows.length === 0);
-
-            const firstRow = rows[0] || [];
-            const rawEmployment = `${getCellFromRow(firstRow, headers, 'employment_type')}`.trim().toLowerCase();
-            const normalizedEmployment = rawEmployment.replace(/[\s-]+/g, '_');
-            const allowedEmployment = new Set(['trader', 'salaried', 'farmer', 'gig']);
-            const employmentValue = allowedEmployment.has(normalizedEmployment) ? normalizedEmployment : 'trader';
-
-            setFormData((prev) => ({
-                ...prev,
-                full_name: `${getCellFromRow(firstRow, headers, 'full_name')}`.trim(),
-                phone: `${getCellFromRow(firstRow, headers, 'phone')}`.trim(),
-                employment_type: employmentValue,
-                monthly_income: `${parseNumber(getCellFromRow(firstRow, headers, 'monthly_income'))}`,
-                monthly_expenses: `${parseNumber(getCellFromRow(firstRow, headers, 'monthly_expenses'))}`,
-                requested_amount: `${parseNumber(getCellFromRow(firstRow, headers, 'requested_amount'))}`,
-                requested_duration_days: `${parseNumber(getCellFromRow(firstRow, headers, 'requested_duration_days')) || '30'}`,
-                loan_purpose: `${getCellFromRow(firstRow, headers, 'loan_purpose')}`.trim(),
-                national_id: `${getCellFromRow(firstRow, headers, 'national_id')}`.trim()
-            }));
+            applyParsedSpreadsheet(parsed?.fileName, headers, rows);
 
             // Consume once to avoid showing stale "processed successfully" banners
             // when the user revisits this page without a fresh upload.
@@ -167,6 +298,10 @@ export default function ManualAssessments() {
         } catch {
             setExcelUpload(null);
             setExcelValidationPassed(false);
+            setUploadStatus('error');
+            setUploadError('Could not restore the last upload session.');
+            setUploadedFileName('');
+            setUploadSummary(null);
             sessionStorage.removeItem('manual_assessment_upload');
         }
     }, []);
@@ -355,129 +490,199 @@ export default function ManualAssessments() {
     };
 
     return (
-        <div className="max-w-4xl mx-auto pb-20">
-            <header className="mb-8 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-                <div>
-                    <h1 className="text-2xl font-bold text-slate-900">Manual Credit Assessment</h1>
-                    <p className="text-slate-500">
-                        Run a bank-grade credit assessment for a borrower without using the API. Excel upload is the
-                        recommended intake method.
-                    </p>
+        <div className="max-w-6xl mx-auto pb-20 space-y-8">
+            <header className="grid grid-cols-1 gap-7 lg:grid-cols-[1.35fr_1fr]">
+                <div className="space-y-4">
+                    <div>
+                        <h1 className="text-3xl font-bold text-slate-900">Manual Credit Assessment</h1>
+                        <p className="mt-2 max-w-2xl text-[15px] leading-6 text-slate-500/90">
+                            Run a structured, policy-driven assessment without using the API. Spreadsheet upload is
+                            recommended for MFIs &amp; SACCOs.
+                        </p>
+                    </div>
+                    <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
+                        {FLOW_STEPS.map((step, index) => (
+                            <div key={step} className="rounded-xl border border-slate-200/70 bg-white/70 px-3.5 py-2.5">
+                                <span className="text-[9px] font-medium uppercase tracking-[0.14em] text-slate-500">
+                                    Step {index + 1}
+                                </span>
+                                <div className="mt-1.5 flex items-center justify-between gap-2">
+                                    <p className="text-[13px] font-medium text-slate-700">{step}</p>
+                                    {index < FLOW_STEPS.length - 1 ? (
+                                        <ArrowRight size={14} className="text-slate-400" />
+                                    ) : (
+                                        <CheckCircle size={14} className="text-primary/90" />
+                                    )}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
                 </div>
-                <div className="w-full md:w-auto">
-                    <div className="grid grid-cols-1 md:grid-cols-[auto_1fr_1fr] gap-3 items-stretch md:items-center">
-                        <span className="inline-flex items-center justify-center rounded-full border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] font-semibold text-slate-500 md:h-[56px]">
+
+                <div className="rounded-2xl border border-slate-200/90 border-l-2 border-l-primary/25 border-t border-t-primary/20 bg-white/95 p-5 shadow-[0_14px_38px_rgba(15,23,42,0.12)] space-y-4">
+                    <div className="space-y-2">
+                        <p className="text-[11px] uppercase tracking-wider font-semibold text-slate-500">Intake Actions</p>
+                        <span className="inline-flex items-center rounded-full border border-primary/15 bg-primary/10 px-3 py-1 text-[10px] font-medium uppercase tracking-wider text-primary/90">
                             Recommended for MFIs &amp; SACCOs
                         </span>
-                        <div>
-                            <button
-                                type="button"
-                                onClick={() => navigate('/manual-assessments/upload')}
-                                className="w-full min-h-[56px] inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition"
-                            >
-                                <FileSpreadsheet size={18} />
-                                Upload Excel / Spreadsheet
-                            </button>
-                        </div>
+                    </div>
+
+                    <input
+                        ref={uploadInputRef}
+                        type="file"
+                        className="hidden"
+                        accept=".xlsx,.xls,.csv"
+                        onChange={handleSpreadsheetInputChange}
+                    />
+
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+                        <button
+                            type="button"
+                            onClick={() => uploadInputRef.current?.click()}
+                            className="w-full min-h-[58px] sm:flex-1 inline-flex items-center justify-center gap-2 rounded-xl bg-primary px-5 py-4 text-sm font-semibold text-white shadow-[0_8px_20px_rgba(15,118,110,0.24)] hover:bg-primary/90 hover:shadow-[0_10px_24px_rgba(15,118,110,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35 focus-visible:ring-offset-2 transition"
+                        >
+                            <FileSpreadsheet size={18} />
+                            Upload Spreadsheet (Recommended)
+                        </button>
                         <button
                             type="button"
                             onClick={() => setShowManualForm(true)}
-                            className="w-full min-h-[56px] inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-slate-200 bg-white text-sm font-semibold text-slate-700 hover:border-primary hover:text-primary hover:bg-primary/5 transition"
+                            className="w-full sm:w-auto min-h-[42px] inline-flex items-center justify-center gap-2 rounded-xl border border-slate-300/90 bg-transparent px-4 py-2 text-xs font-semibold text-slate-600 hover:border-slate-400 hover:bg-slate-50 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300/80 focus-visible:ring-offset-2 transition"
                         >
-                            <FileText size={18} />
-                            Enter Manually
+                            <FileText size={16} />
+                            Enter Single Borrower Manually
                         </button>
                     </div>
-                    <p className="text-xs text-slate-500 mt-2 max-w-md">
-                        Upload a borrower Excel or loan tracker. We'll validate the data and run the assessment automatically.
-                    </p>
+
                     <a
                         href="/borrower_intake_template.csv"
                         title="Use this template for batch uploads and fastest validation."
-                        className="text-xs text-primary font-semibold hover:underline inline-flex items-center gap-1 mt-1"
+                        className="inline-flex text-xs font-semibold text-primary hover:underline"
                     >
                         Download Excel template
                     </a>
+
+                    <div
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => uploadInputRef.current?.click()}
+                        onKeyDown={(event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault();
+                                uploadInputRef.current?.click();
+                            }
+                        }}
+                        onDragEnter={(event) => {
+                            event.preventDefault();
+                            setIsDragActive(true);
+                        }}
+                        onDragOver={(event) => {
+                            event.preventDefault();
+                            setIsDragActive(true);
+                        }}
+                        onDragLeave={(event) => {
+                            event.preventDefault();
+                            setIsDragActive(false);
+                        }}
+                        onDrop={(event) => {
+                            event.preventDefault();
+                            setIsDragActive(false);
+                            void handleSpreadsheetUpload(event.dataTransfer.files?.[0] || null);
+                        }}
+                        className={`rounded-xl border-2 border-dashed p-5 cursor-pointer transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 focus-visible:ring-offset-2 ${isDragActive
+                                ? 'border-primary/80 bg-primary/10'
+                                : 'border-slate-300/80 bg-slate-50/60 hover:border-primary/45 hover:bg-primary/5'
+                            }`}
+                    >
+                        <div className="flex items-center gap-3">
+                            <Upload size={18} className="text-primary/90" />
+                            <div>
+                                <p className="text-sm font-semibold text-slate-800">Drop spreadsheet here</p>
+                                <p className="text-xs text-slate-500">or click to browse .xlsx, .xls, .csv</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    {uploadStatus === 'uploading' && (
+                        <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600 flex items-center gap-2">
+                            <Loader2 size={16} className="animate-spin text-primary" />
+                            Uploading...
+                        </div>
+                    )}
+
+                    {uploadStatus === 'error' && uploadError && (
+                        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                            {uploadError}
+                        </div>
+                    )}
+
+                    {uploadStatus === 'success' && uploadSummary && (
+                        <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 px-4 py-4 space-y-3">
+                            <div className="flex items-center justify-between gap-3">
+                                <div>
+                                    <p className="text-[11px] uppercase tracking-wider text-emerald-700 font-semibold">Upload summary</p>
+                                    <p className="text-sm font-semibold text-slate-800 truncate max-w-[240px]">{uploadedFileName}</p>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={clearSpreadsheetUpload}
+                                    className="text-xs font-semibold text-slate-500 hover:text-slate-700"
+                                >
+                                    Clear
+                                </button>
+                            </div>
+                            <div className="grid grid-cols-2 gap-3">
+                                <div className="rounded-lg border border-emerald-200/70 bg-white/70 px-3 py-2">
+                                    <p className="text-[10px] uppercase tracking-wider text-slate-500">Rows detected</p>
+                                    <p className="text-sm font-semibold text-slate-900">{uploadSummary.rowsDetected}</p>
+                                </div>
+                                <div className="rounded-lg border border-emerald-200/70 bg-white/70 px-3 py-2">
+                                    <p className="text-[10px] uppercase tracking-wider text-slate-500">Valid rows</p>
+                                    <p className="text-sm font-semibold text-slate-900">{uploadSummary.validRows}</p>
+                                </div>
+                                <div className="rounded-lg border border-emerald-200/70 bg-white/70 px-3 py-2">
+                                    <p className="text-[10px] uppercase tracking-wider text-slate-500">Flagged rows</p>
+                                    <p className="text-sm font-semibold text-slate-900">{uploadSummary.flaggedRows}</p>
+                                </div>
+                                <div className="rounded-lg border border-emerald-200/70 bg-white/70 px-3 py-2">
+                                    <p className="text-[10px] uppercase tracking-wider text-slate-500">Estimated time</p>
+                                    <p className="text-sm font-semibold text-slate-900">{uploadSummary.estimatedTime}</p>
+                                </div>
+                            </div>
+                            {uploadSummary.missingRequiredColumns.length > 0 && (
+                                <p className="text-xs text-amber-700">
+                                    Missing required columns: {uploadSummary.missingRequiredColumns.join(', ')}.
+                                </p>
+                            )}
+                            <button
+                                type="button"
+                                onClick={() => navigate('/decisions')}
+                                className="inline-flex items-center gap-1 text-sm font-semibold text-primary hover:underline"
+                            >
+                                View outcomes in Decisions <ArrowRight size={14} />
+                            </button>
+                        </div>
+                    )}
+
+                    <p className="text-[11px] text-slate-500">Accepted: .xlsx, .xls, .csv up to 10MB.</p>
                 </div>
             </header>
 
-            <div className="card mb-8 bg-slate-50/80 border-slate-200">
-                <div className="space-y-6 text-sm text-slate-600">
-                    <div>
-                        <h2 className="text-lg font-semibold text-slate-900">How manual credit assessments work</h2>
-                    </div>
-                    <div className="space-y-2">
-                        <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Recommended intake</h3>
-                        <p>
-                            Upload a borrower Excel or spreadsheet for faster, more accurate assessments. Manual entry is supported for single borrowers.
-                        </p>
-                    </div>
-                    <div className="space-y-2">
-                        <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">What we validate automatically</h3>
-                        <ul className="list-disc pl-5 space-y-1">
-                            <li>Required borrower fields (income, expenses, loan details, national ID)</li>
-                            <li>Data consistency and missing values</li>
-                            <li>Policy thresholds and basic affordability checks</li>
-                        </ul>
-                    </div>
-                    <div className="space-y-2">
-                        <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">What happens after submission</h3>
-                        <p>
-                            Once submitted, the system runs the full credit assessment and stores the outcome in the Decisions page with a complete audit trail.
-                        </p>
-                    </div>
-                    <div className="space-y-2">
-                        <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Batch assessments</h3>
-                        <p>
-                            Spreadsheets may contain multiple borrowers. Each row is processed independently and results appear as separate decisions.
-                        </p>
-                    </div>
-                    <div className="space-y-2">
-                        <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Before you upload (checklist)</h3>
-                        <ul className="list-disc pl-5 space-y-1">
-                            <li>Borrower details completed</li>
-                            <li>Monthly income and expenses provided</li>
-                            <li>Loan amount and duration included</li>
-                            <li>National ID format valid</li>
-                        </ul>
-                    </div>
-                    <div>
-                        <a
-                            href="/decisions"
-                            className="text-xs font-semibold text-primary hover:underline"
-                        >
-                            View assessment outcomes in Decisions →
-                        </a>
-                    </div>
-                </div>
-            </div>
-
+            <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                {FEATURE_CARDS.map((card) => (
+                    <article key={card.title} className="h-full rounded-xl border border-slate-200/70 bg-white/70 p-4">
+                        <h2 className="text-sm font-medium text-slate-800">{card.title}</h2>
+                        <p className="mt-2 text-xs text-slate-500 leading-5">{card.body}</p>
+                    </article>
+                ))}
+            </section>
             <form ref={formRef} onSubmit={handleSubmit} className="space-y-8">
                 {pendingDocs.length > 0 && (
                     <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-amber-900 text-sm font-semibold">
                         Missing documents: {pendingDocs.join(", ")}. Upload the missing items to continue.
                     </div>
                 )}
-                <div className="relative">
-                    {!showManualForm && (
-                        <div className="absolute inset-0 z-10 rounded-xl bg-white/70 backdrop-blur-sm border border-slate-200 flex items-center justify-center p-6 text-center">
-                            <div className="max-w-sm space-y-2">
-                                <p className="text-sm font-semibold text-slate-800">Prefer Excel? Upload a spreadsheet above.</p>
-                                <p className="text-xs text-slate-500">
-                                    Enter manually only if you need to edit or add a one-off borrower.
-                                </p>
-                                <button
-                                    type="button"
-                                    onClick={() => setShowManualForm(true)}
-                                    className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-700 hover:border-primary hover:text-primary hover:bg-primary/5 transition"
-                                >
-                                    <FileText size={14} />
-                                    Enter Manually
-                                </button>
-                            </div>
-                        </div>
-                    )}
-                    <div className={showManualForm ? '' : 'opacity-40 pointer-events-none'}>
+                <div>
                         {/* SECTION 1: BORROWER & LOAN DETAILS */}
                         <div ref={manualSectionRef} className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
                             <div className="bg-slate-50 px-6 py-3 border-b border-slate-200 flex items-center gap-2">
@@ -725,9 +930,9 @@ export default function ManualAssessments() {
                         Regulatory Notice: This is a decision support tool. Final lending decision remains with the institution.
                     </p>
                 </div>
-                    </div>
                 </div>
             </form>
         </div>
     );
 }
+
