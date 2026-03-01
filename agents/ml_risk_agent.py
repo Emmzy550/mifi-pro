@@ -24,9 +24,13 @@ class MLRiskAgent:
             if os.path.exists(model_path):
                 cls._model = xgb.XGBClassifier()
                 cls._model.load_model(model_path)
-                
-                with open(feature_path, "r") as f:
-                    cls._features = f.read().split(",")
+
+                if os.path.exists(feature_path):
+                    with open(feature_path, "r") as f:
+                        cls._features = [name for name in f.read().split(",") if name]
+                else:
+                    booster = cls._model.get_booster()
+                    cls._features = booster.feature_names or []
                 logger.debug(f"DEBUG: ML Risk Model loaded from {model_path}")
             else:
                 logger.warning("WARNING: ML Risk Model not found. inference will be disabled.")
@@ -50,37 +54,55 @@ class MLRiskAgent:
             'saving_trend': 0.0 # Placeholder for now, could be derived from MM history
         }
 
-        # Ensure all required features are present
-        X = pd.DataFrame([input_dict])
+        feature_order = cls._features or list(input_dict.keys())
+        ordered_input = {name: float(input_dict.get(name, 0.0)) for name in feature_order}
+        X = pd.DataFrame([ordered_input], columns=feature_order)
         
-        # Inference
-        prob_default = float(model.predict_proba(X)[0][1])
+        # Inference: prefer sklearn wrapper, but fall back to Booster predict when
+        # model metadata (e.g. n_classes_) is unavailable after JSON load.
+        prob_default = None
+        try:
+            proba = model.predict_proba(X)
+            if isinstance(proba, np.ndarray) and proba.ndim == 2 and proba.shape[1] > 1:
+                prob_default = float(proba[0][1])
+            else:
+                prob_default = float(np.asarray(proba).reshape(-1)[0])
+        except Exception as e:
+            logger.warning(f"WARN: predict_proba unavailable ({e}). Falling back to booster.predict.")
+            booster = model.get_booster() if hasattr(model, "get_booster") else model
+            dmatrix = xgb.DMatrix(X, feature_names=feature_order)
+            raw_pred = booster.predict(dmatrix)
+            prob_default = float(np.asarray(raw_pred).reshape(-1)[0])
+
+        prob_default = max(0.0, min(prob_default, 1.0))
         repayment_score = 1 - prob_default
 
         # SHAP Explainability (XAI)
+        feature_importance = []
         try:
             import shap
-        except ImportError:
-            return {"error": "SHAP not installed. Install shap to enable ML explanations."}
+            shap_model = model.get_booster() if hasattr(model, "get_booster") else model
+            explainer = shap.TreeExplainer(shap_model)
+            shap_values = explainer.shap_values(X)
 
-        explainer = shap.TreeExplainer(model)
-        shap_values = explainer.shap_values(X)
-        
-        # Get top 3 contributing features
-        feature_importance = []
-        if isinstance(shap_values, list): # For multiclass/multioutput
-            sv = shap_values[1][0]
-        else:
-            sv = shap_values[0]
-            
-        for i, val in enumerate(sv):
-            feature_importance.append({
-                "feature": cls._features[i],
-                "impact": float(val)
-            })
-        
-        # Sort by absolute impact
-        feature_importance = sorted(feature_importance, key=lambda x: abs(x["impact"]), reverse=True)[:3]
+            if isinstance(shap_values, list):  # multiclass/multioutput
+                sv = shap_values[1][0]
+            else:
+                sv = np.asarray(shap_values)[0]
+
+            for i, val in enumerate(sv):
+                if i >= len(feature_order):
+                    break
+                feature_importance.append({
+                    "feature": feature_order[i],
+                    "impact": float(val)
+                })
+
+            feature_importance = sorted(feature_importance, key=lambda x: abs(x["impact"]), reverse=True)[:3]
+        except ImportError:
+            logger.info("INFO: SHAP not installed; returning ML score without feature importance.")
+        except Exception as e:
+            logger.warning(f"WARN: SHAP explainability failed: {e}")
 
         return {
             "prob_default": prob_default,

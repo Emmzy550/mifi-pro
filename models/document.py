@@ -145,6 +145,8 @@ class ExtractionResult(BaseModel):
     nrc_summary: Optional[NRCIdentitySummary] = None
     
     # Metadata
+    source_filename: Optional[str] = None
+    source_mime_type: Optional[str] = None
     warnings: List[str] = []
     raw_text_preview: Optional[str] = None
     quality_score: Optional[float] = None

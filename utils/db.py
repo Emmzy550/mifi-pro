@@ -21,6 +21,7 @@ from models.organization import OrgEnvironment
 from models.officer_action import OfficerAction
 from models.sms_log import SMSLog
 from models.follow_up_task import FollowUpTask
+from models.document_insight import DocumentInsightRecord
 import logging
 logger = logging.getLogger(__name__)
 
@@ -807,3 +808,22 @@ class Database:
                 pass
         if hasattr(db, "save"):
             db.save()
+
+    # ------------------------------------------------------------------
+    # Document Insights (Decision Chamber)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def save_document_insight(cls, insight: DocumentInsightRecord):
+        db = cls.get_db()
+        db.collection("document_insights").document(insight.docId).set(insight.model_dump(mode="json"))
+        if hasattr(db, "save"):
+            db.save()
+
+    @classmethod
+    def get_document_insight(cls, doc_id: str) -> Optional[DocumentInsightRecord]:
+        db = cls.get_db()
+        doc = db.collection("document_insights").document(doc_id).get()
+        if doc.exists:
+            return DocumentInsightRecord(**doc.to_dict())
+        return None

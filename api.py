@@ -1,12 +1,14 @@
 import uuid
 from fastapi import FastAPI, HTTPException, Body, Depends, Security, UploadFile, File, Form, Request, Header, BackgroundTasks
-from pydantic import ValidationError
+from pydantic import ValidationError, BaseModel, Field
 from fastapi.responses import FileResponse
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Literal, Tuple, Union
 import io
 import json
 import hashlib
 import secrets
+import time
+import re
 from datetime import datetime, timedelta, timezone
 import logging
 logger = logging.getLogger(__name__)
@@ -39,6 +41,14 @@ from utils.transaction_parser import TransactionParser
 from utils.document_readiness import DocumentReadinessEvaluator
 from utils.profile_builder import ProfileBuilder
 from models.document import DocumentType, Transaction as DocTransaction, SummaryProfile
+from models.document_insight import (
+    DecisionDocumentSummary,
+    DocumentInsight,
+    DocumentInsightFlag,
+    DocumentInsightRecord,
+    DocumentStatus,
+    DocumentFlagSeverity,
+)
 from models.unified_profile import UnifiedFinancialProfile, AssessmentReadiness
 from models.sms_log import SMSLog
 from models.follow_up_task import FollowUpTask, FollowUpStatus
@@ -603,6 +613,7 @@ def build_document_summaries(extraction_results: List[Any]) -> List[Dict[str, An
     for result in extraction_results:
         if result.bank_statement_summary:
             summaries.append({
+                "document_type": "bank_statement",
                 "summary_profile": result.bank_statement_summary.summary_profile,
                 "closing_balance": result.bank_statement_summary.closing_balance,
                 "statement_period": result.bank_statement_summary.statement_period.model_dump()
@@ -611,11 +622,16 @@ def build_document_summaries(extraction_results: List[Any]) -> List[Dict[str, An
                 "account_holder_name": result.bank_statement_summary.account_holder_name,
                 "currency": result.bank_statement_summary.currency,
                 "risk_flags": result.bank_statement_summary.risk_flags,
+                "confidence": result.confidence,
                 "quality_score": result.quality_score,
+                "extraction_warnings": result.warnings,
+                "source_filename": result.source_filename,
+                "source_mime_type": result.source_mime_type,
                 "raw_text_preview": result.raw_text_preview
             })
         if result.payslip_summary:
             summaries.append({
+                "document_type": "payslip",
                 "summary_profile": result.payslip_summary.summary_profile,
                 "net_pay": result.payslip_summary.net_pay,
                 "gross_pay": result.payslip_summary.gross_pay,
@@ -628,21 +644,378 @@ def build_document_summaries(extraction_results: List[Any]) -> List[Dict[str, An
                 "pay_frequency": result.payslip_summary.pay_frequency,
                 "currency": result.payslip_summary.currency,
                 "risk_flags": result.payslip_summary.risk_flags,
+                "confidence": result.confidence,
                 "quality_score": result.quality_score,
+                "extraction_warnings": result.warnings,
+                "source_filename": result.source_filename,
+                "source_mime_type": result.source_mime_type,
                 "raw_text_preview": result.raw_text_preview
             })
         if result.nrc_summary:
             summaries.append({
+                "document_type": "nrc_id",
                 "summary_profile": result.nrc_summary.summary_profile,
                 "full_name": result.nrc_summary.full_name,
                 "id_number": result.nrc_summary.id_number,
                 "date_of_birth": result.nrc_summary.date_of_birth,
                 "gender": result.nrc_summary.gender,
                 "risk_flags": result.nrc_summary.risk_flags,
+                "confidence": result.confidence,
                 "quality_score": result.quality_score,
+                "extraction_warnings": result.warnings,
+                "source_filename": result.source_filename,
+                "source_mime_type": result.source_mime_type,
                 "raw_text_preview": result.raw_text_preview
             })
     return summaries
+
+
+DOCUMENT_TYPE_FROM_PROFILE = {
+    "BANK_STATEMENT_SUMMARY": "bank_statement",
+    "PAYSLIP_SUMMARY": "payslip",
+    "NRC_IDENTITY_SUMMARY": "nrc_id",
+    "COMBINED_FINANCIAL_SNAPSHOT": "combined_snapshot",
+    "UNKNOWN": "unknown",
+}
+
+DOCUMENT_LABELS = {
+    "bank_statement": "Bank Statement",
+    "payslip": "Payslip",
+    "mobile_money": "Mobile Money Statement",
+    "generic_csv": "CSV Document",
+    "nrc_id": "National ID",
+    "combined_snapshot": "Combined Financial Snapshot",
+    "unknown": "Document",
+}
+
+DOC_ID_UPLOADED_PATTERN = re.compile(r"^(ASMT-[A-Z0-9]+)-DOC-(\d+)$")
+DOC_ID_MISSING_PATTERN = re.compile(r"^(ASMT-[A-Z0-9]+)-MISSING-([a-z0-9_]+)$")
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _safe_iso(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _slugify_token(value: str) -> str:
+    return re.sub(r"[^a-z0-9_]+", "_", value.lower()).strip("_")
+
+
+def _normalize_doc_type(doc_type_hint: Any, summary_profile: Any) -> str:
+    if isinstance(doc_type_hint, str) and doc_type_hint.strip():
+        normalized = doc_type_hint.strip().lower()
+        aliases = {
+            "bankstatement": "bank_statement",
+            "bank_statement": "bank_statement",
+            "payslip": "payslip",
+            "mobile_money": "mobile_money",
+            "generic_csv": "generic_csv",
+            "nrc_id": "nrc_id",
+        }
+        if normalized in aliases:
+            return aliases[normalized]
+    profile = str(summary_profile or "").upper()
+    return DOCUMENT_TYPE_FROM_PROFILE.get(profile, "unknown")
+
+
+def _doc_period(summary: Dict[str, Any]) -> Optional[Any]:
+    statement_period = summary.get("statement_period")
+    if isinstance(statement_period, dict):
+        start = statement_period.get("start")
+        end = statement_period.get("end")
+        if start or end:
+            return {"from": start, "to": end}
+    pay_start = summary.get("pay_period_start")
+    pay_end = summary.get("pay_period_end")
+    if pay_start or pay_end:
+        return {"from": pay_start, "to": pay_end}
+    pay_date = summary.get("pay_date")
+    if pay_date:
+        return str(pay_date)
+    return None
+
+
+def _doc_provider(summary: Dict[str, Any], doc_type: str) -> Optional[str]:
+    if doc_type == "bank_statement":
+        return summary.get("bank_name") or summary.get("account_holder_name")
+    if doc_type == "payslip":
+        return summary.get("employer_name") or summary.get("employee_name")
+    if doc_type == "nrc_id":
+        return summary.get("full_name")
+    return summary.get("provider") or summary.get("source_filename")
+
+
+def _has_primary_content(summary: Dict[str, Any], doc_type: str) -> bool:
+    if doc_type == "bank_statement":
+        return summary.get("closing_balance") is not None or bool(summary.get("statement_period"))
+    if doc_type == "payslip":
+        return summary.get("net_pay") is not None or summary.get("gross_pay") is not None
+    if doc_type == "nrc_id":
+        return bool(summary.get("full_name") or summary.get("id_number"))
+    if doc_type in {"mobile_money", "generic_csv"}:
+        return bool(summary.get("transaction_count") or summary.get("total_money_in") or summary.get("total_money_out"))
+    return bool(summary.get("raw_text_preview"))
+
+
+def _doc_status(summary: Dict[str, Any], doc_type: str) -> DocumentStatus:
+    warnings = summary.get("extraction_warnings") or summary.get("warnings") or []
+    has_warning = isinstance(warnings, list) and len(warnings) > 0
+    has_content = _has_primary_content(summary, doc_type)
+    if not has_content and has_warning:
+        return DocumentStatus.ERROR
+    if not has_content:
+        return DocumentStatus.PARTIAL
+    if has_warning:
+        return DocumentStatus.PARTIAL
+    return DocumentStatus.PARSED
+
+
+def _doc_one_liner(summary: Dict[str, Any], doc_type: str, status: DocumentStatus) -> str:
+    if status == DocumentStatus.MISSING:
+        return "Required document has not been uploaded."
+    if status == DocumentStatus.ERROR:
+        return "Extraction failed. Review source quality and retry."
+    if doc_type == "bank_statement":
+        balance = summary.get("closing_balance")
+        currency = summary.get("currency") or ""
+        if balance is not None:
+            return f"Closing balance parsed at {currency} {balance}."
+        return "Bank statement parsed with partial coverage."
+    if doc_type == "payslip":
+        net_pay = summary.get("net_pay")
+        currency = summary.get("currency") or ""
+        if net_pay is not None:
+            return f"Net pay extracted at {currency} {net_pay}."
+        return "Payslip parsed with partial income extraction."
+    if doc_type == "nrc_id":
+        if summary.get("full_name") or summary.get("id_number"):
+            return "Identity attributes extracted for verification."
+        return "Identity document parsed with partial fields."
+    return "Document parsed and indexed for officer review."
+
+
+def build_decision_document_rows(assessment: Assessment) -> List[DecisionDocumentSummary]:
+    metrics = assessment.metrics if isinstance(assessment.metrics, dict) else {}
+    raw_docs = metrics.get("document_summaries") if isinstance(metrics.get("document_summaries"), list) else []
+    rows: List[DecisionDocumentSummary] = []
+    created_at = _safe_iso(getattr(assessment, "created_at", None)) or datetime.now(timezone.utc).isoformat()
+
+    for idx, raw_item in enumerate(raw_docs):
+        if not isinstance(raw_item, dict):
+            continue
+        doc_type = _normalize_doc_type(raw_item.get("document_type"), raw_item.get("summary_profile"))
+        status = _doc_status(raw_item, doc_type)
+        confidence = _coerce_float(raw_item.get("confidence"))
+        if confidence is None:
+            confidence = _coerce_float(raw_item.get("quality_score"))
+        rows.append(
+            DecisionDocumentSummary(
+                docId=f"{assessment.assessment_id}-DOC-{idx + 1}",
+                type=doc_type,
+                provider=_doc_provider(raw_item, doc_type),
+                period=_doc_period(raw_item),
+                status=status,
+                oneLiner=_doc_one_liner(raw_item, doc_type, status),
+                confidence=confidence,
+                createdAt=created_at,
+            )
+        )
+
+    missing_docs = metrics.get("missing_documents") if isinstance(metrics.get("missing_documents"), list) else []
+    for missing in missing_docs:
+        if not isinstance(missing, str):
+            continue
+        missing_type = _normalize_doc_type(missing, None)
+        if missing_type == "unknown":
+            missing_type = _slugify_token(missing)
+        rows.append(
+            DecisionDocumentSummary(
+                docId=f"{assessment.assessment_id}-MISSING-{_slugify_token(missing)}",
+                type=missing_type,
+                provider=None,
+                period=None,
+                status=DocumentStatus.MISSING,
+                oneLiner="Required document has not been uploaded.",
+                confidence=None,
+                createdAt=created_at,
+            )
+        )
+
+    return rows
+
+
+def _parse_doc_id(doc_id: str) -> Optional[Tuple[str, Optional[int], Optional[str]]]:
+    uploaded_match = DOC_ID_UPLOADED_PATTERN.match(doc_id)
+    if uploaded_match:
+        assessment_id = uploaded_match.group(1)
+        doc_index = int(uploaded_match.group(2)) - 1
+        return assessment_id, doc_index, None
+    missing_match = DOC_ID_MISSING_PATTERN.match(doc_id)
+    if missing_match:
+        assessment_id = missing_match.group(1)
+        missing_key = missing_match.group(2)
+        return assessment_id, None, missing_key
+    return None
+
+
+def _risk_severity_from_label(text: str) -> DocumentFlagSeverity:
+    lowered = text.lower()
+    if any(token in lowered for token in ["critical", "high", "error", "missing", "failed"]):
+        return DocumentFlagSeverity.HIGH
+    if any(token in lowered for token in ["warn", "partial", "review", "low confidence"]):
+        return DocumentFlagSeverity.MED
+    return DocumentFlagSeverity.LOW
+
+
+def _build_extracted_metrics(summary: Dict[str, Any], doc_type: str) -> Dict[str, Union[str, float, int, bool]]:
+    metrics: Dict[str, Union[str, float, int, bool]] = {}
+
+    def _put(label: str, value: Any):
+        if value is None:
+            return
+        metrics[label] = value
+
+    if doc_type == "bank_statement":
+        _put("Bank Name", summary.get("bank_name"))
+        _put("Account Holder", summary.get("account_holder_name"))
+        _put("Currency", summary.get("currency"))
+        _put("Closing Balance", summary.get("closing_balance"))
+        _put("Opening Balance", summary.get("opening_balance"))
+        _put("Total Money In", summary.get("total_money_in"))
+        _put("Total Money Out", summary.get("total_money_out"))
+        _put("Deposit Count", summary.get("deposit_count"))
+    elif doc_type == "payslip":
+        _put("Employer", summary.get("employer_name"))
+        _put("Employee", summary.get("employee_name"))
+        _put("Currency", summary.get("currency"))
+        _put("Gross Pay", summary.get("gross_pay"))
+        _put("Net Pay", summary.get("net_pay"))
+        _put("Deductions", summary.get("deductions"))
+        _put("Pay Frequency", summary.get("pay_frequency"))
+    elif doc_type == "nrc_id":
+        _put("Full Name", summary.get("full_name"))
+        _put("ID Number", summary.get("id_number"))
+        _put("Date of Birth", summary.get("date_of_birth"))
+        _put("Gender", summary.get("gender"))
+    else:
+        _put("Document Type", DOCUMENT_LABELS.get(doc_type, doc_type.replace("_", " ").title()))
+        _put("Filename", summary.get("source_filename"))
+
+    return metrics
+
+
+def _build_document_insight_payload(
+    assessment: Assessment,
+    row: DecisionDocumentSummary,
+    summary: Dict[str, Any],
+    source_index: Optional[int] = None
+) -> DocumentInsightRecord:
+    summary_bullets: List[str] = []
+    flags: List[DocumentInsightFlag] = []
+
+    period = row.period
+    if isinstance(period, dict) and (period.get("from") or period.get("to")):
+        summary_bullets.append(f"Coverage period: {period.get('from') or 'N/A'} to {period.get('to') or 'N/A'}.")
+    elif isinstance(period, str):
+        summary_bullets.append(f"Document date: {period}.")
+
+    if row.provider:
+        summary_bullets.append(f"Provider/source: {row.provider}.")
+
+    if row.status == DocumentStatus.PARSED:
+        summary_bullets.append("Primary structured fields were extracted successfully.")
+    elif row.status == DocumentStatus.PARTIAL:
+        summary_bullets.append("Document parsed with partial extraction coverage; verify missing fields manually.")
+    elif row.status == DocumentStatus.ERROR:
+        summary_bullets.append("Extraction failed for core fields; re-upload or request a clearer copy.")
+    elif row.status == DocumentStatus.MISSING:
+        summary_bullets.append("Required document was not present at assessment time.")
+
+    risk_flags = summary.get("risk_flags") if isinstance(summary.get("risk_flags"), list) else []
+    for flag_label in risk_flags:
+        if not isinstance(flag_label, str):
+            continue
+        flags.append(
+            DocumentInsightFlag(
+                label=flag_label,
+                severity=_risk_severity_from_label(flag_label),
+                detail=None,
+            )
+        )
+
+    extraction_warnings = summary.get("extraction_warnings") if isinstance(summary.get("extraction_warnings"), list) else []
+    for warning_label in extraction_warnings:
+        if not isinstance(warning_label, str):
+            continue
+        flags.append(
+            DocumentInsightFlag(
+                label=warning_label,
+                severity=_risk_severity_from_label(warning_label),
+                detail="Extractor warning",
+            )
+        )
+
+    if row.status in {DocumentStatus.MISSING, DocumentStatus.ERROR, DocumentStatus.PARTIAL} and not flags:
+        flags.append(
+            DocumentInsightFlag(
+                label=row.status.value.upper(),
+                severity=DocumentFlagSeverity.HIGH if row.status in {DocumentStatus.MISSING, DocumentStatus.ERROR} else DocumentFlagSeverity.MED,
+                detail="Operational data-quality status",
+            )
+        )
+
+    provenance: Dict[str, Any] = {
+        "source": "assessment.metrics.document_summaries",
+        "assessmentId": assessment.assessment_id,
+    }
+    if source_index is not None:
+        provenance["documentIndex"] = source_index + 1
+    if summary.get("source_filename"):
+        provenance["sourceFilename"] = summary.get("source_filename")
+    if summary.get("raw_text_preview"):
+        provenance["rawTextPreview"] = str(summary.get("raw_text_preview"))[:300]
+
+    secure_file_url = summary.get("secure_file_url")
+    if not isinstance(secure_file_url, str):
+        secure_file_url = None
+    elif secure_file_url.startswith("http") and "signature=" not in secure_file_url.lower():
+        # Do not expose raw storage URLs.
+        secure_file_url = None
+
+    now = datetime.now(timezone.utc)
+    return DocumentInsightRecord(
+        docId=row.docId,
+        decisionId=assessment.assessment_id,
+        organizationId=assessment.organization_id,
+        sourceIndex=source_index,
+        type=row.type,
+        provider=row.provider,
+        period=row.period,
+        status=row.status,
+        confidence=row.confidence,
+        keyTakeaway=row.oneLiner,
+        summaryBullets=summary_bullets,
+        extractedMetrics=_build_extracted_metrics(summary, row.type),
+        flags=flags,
+        provenance=provenance,
+        secureFileUrl=secure_file_url,
+        createdAt=now,
+        updatedAt=now,
+    )
 
 
 def enforce_summary_profile_metrics(assessment: Assessment) -> Assessment:
@@ -658,6 +1031,1284 @@ def enforce_summary_profile_metrics(assessment: Assessment) -> Assessment:
         else:
             assessment.metrics["summary_profile"] = SummaryProfile.UNKNOWN.value
     return augment_assessment_payload(assessment.model_dump())
+
+
+# ============================================================================
+# DECISION COPILOT ASSISTANT
+# ============================================================================
+
+ASSISTANT_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("ASSISTANT_RATE_LIMIT_WINDOW_SECONDS", "60"))
+ASSISTANT_RATE_LIMIT_MAX_REQUESTS = int(os.getenv("ASSISTANT_RATE_LIMIT_MAX_REQUESTS", "20"))
+ASSISTANT_MAX_MESSAGES = int(os.getenv("ASSISTANT_MAX_MESSAGES", "40"))
+ASSISTANT_MAX_TURNS = int(os.getenv("ASSISTANT_MAX_TURNS", "20"))
+ASSISTANT_RATE_BUCKETS: Dict[str, List[float]] = {}
+ASSISTANT_RULE_REFERENCE: Dict[str, Dict[str, str]] = {
+    "HIGH_DTI": {
+        "name": "Debt Burden Too High",
+        "human_description": "Debt obligations are high relative to verified income, which can weaken repayment capacity.",
+        "officer_verify": "Confirm all outstanding debt obligations and recalculate debt-to-income with latest verified income."
+    },
+    "AFFORDABILITY_CAP": {
+        "name": "Affordability Cap Applied",
+        "human_description": "The requested amount exceeds what can be serviced under affordability policy.",
+        "officer_verify": "Review net disposable income, repayment schedule assumptions, and expense quality."
+    },
+    "DATA_QUALITY_LIMITED": {
+        "name": "Data Quality Limitation",
+        "human_description": "The record has incomplete or low-confidence data that reduced automation confidence.",
+        "officer_verify": "Request missing documents or clarify extracted values before sealing a final decision."
+    },
+    "INSUFFICIENT_OBSERVATION_WINDOW": {
+        "name": "Insufficient Observation Window",
+        "human_description": "Transaction history duration is below the policy minimum for confident assessment.",
+        "officer_verify": "Confirm account history period and request longer statement coverage."
+    },
+    "OBSERVATION_WINDOW": {
+        "name": "Observation Window Constraint",
+        "human_description": "Observed account history does not meet the minimum policy window.",
+        "officer_verify": "Verify statement period start/end dates and require additional history."
+    },
+    "POLICY_CAP": {
+        "name": "Policy Cap Applied",
+        "human_description": "A policy limit constrained the final recommendation below the requested amount.",
+        "officer_verify": "Confirm cap reason and whether policy exception process applies."
+    },
+    "STARTER_LOAN_APPROVED_LIMITED_HISTORY": {
+        "name": "Starter Loan Policy",
+        "human_description": "Borrower approved under starter policy due to limited historical evidence.",
+        "officer_verify": "Validate identity consistency and borrower onboarding evidence before disbursement."
+    },
+    "MISSING_DOCUMENTS": {
+        "name": "Missing Supporting Documents",
+        "human_description": "Required supporting evidence is missing, limiting verification quality.",
+        "officer_verify": "Request missing bank statement or payslip and rerun validation."
+    },
+    "HIGH_RISK": {
+        "name": "High Risk Classification",
+        "human_description": "Aggregated risk signals placed this borrower in a high-risk category.",
+        "officer_verify": "Review adverse signals and confirm whether further evidence can reduce uncertainty."
+    }
+}
+
+
+class AssistantChatMessage(BaseModel):
+    role: Literal["user", "assistant", "system"]
+    content: str = Field(..., min_length=1, max_length=6000)
+
+
+class AssistantChatContext(BaseModel):
+    route: str = Field(..., min_length=1, max_length=300)
+    decisionId: Optional[str] = Field(default=None, max_length=120)
+    policyVersion: Optional[str] = Field(default=None, max_length=120)
+    status: Optional[str] = Field(default=None, max_length=120)
+    orgId: Optional[str] = Field(default=None, max_length=120)
+    userRole: Optional[str] = Field(default=None, max_length=120)
+
+
+class AssistantChatRequest(BaseModel):
+    messages: List[AssistantChatMessage] = Field(..., min_length=1, max_length=40)
+    context: AssistantChatContext
+
+
+class AssistantChatMeta(BaseModel):
+    provider: Literal["vertex", "openai", "stub", "error"]
+    model: str
+    requestId: str
+    # Backward-compatible default so response validation does not fail
+    # if any legacy return path omits mode.
+    mode: str = "console_mode"
+
+
+class AssistantChatResponse(BaseModel):
+    reply: str
+    meta: AssistantChatMeta
+
+
+def _assistant_user_role(user: User) -> str:
+    role_value = getattr(user, "role", "")
+    if hasattr(role_value, "value"):
+        return str(role_value.value).upper()
+    return str(role_value).upper()
+
+
+def _enforce_assistant_rate_limit(user: User) -> None:
+    now = time.time()
+    key = f"{user.organization_id}:{user.id}"
+    bucket = ASSISTANT_RATE_BUCKETS.get(key, [])
+    recent = [ts for ts in bucket if now - ts <= ASSISTANT_RATE_LIMIT_WINDOW_SECONDS]
+    if len(recent) >= ASSISTANT_RATE_LIMIT_MAX_REQUESTS:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. Try again in {ASSISTANT_RATE_LIMIT_WINDOW_SECONDS} seconds."
+        )
+    recent.append(now)
+    ASSISTANT_RATE_BUCKETS[key] = recent
+
+
+def _latest_user_message(messages: List[AssistantChatMessage]) -> str:
+    for msg in reversed(messages):
+        if msg.role == "user" and msg.content.strip():
+            return msg.content.strip()
+    return ""
+
+
+def _format_currency(value: Optional[float]) -> str:
+    if value is None:
+        return "Unavailable"
+    try:
+        return f"{float(value):,.2f}"
+    except Exception:
+        return "Unavailable"
+
+
+def _build_assistant_decision_bundle(assessment: Assessment) -> Dict[str, Any]:
+    metrics = assessment.metrics if isinstance(assessment.metrics, dict) else {}
+    data_used = assessment.data_used if isinstance(assessment.data_used, dict) else {}
+    raw_doc_summaries = metrics.get("document_summaries") if isinstance(metrics, dict) else []
+    compact_docs: List[Dict[str, Any]] = []
+
+    if isinstance(raw_doc_summaries, list):
+        for item in raw_doc_summaries[:5]:
+            if not isinstance(item, dict):
+                continue
+            compact_docs.append({
+                "summary_profile": item.get("summary_profile"),
+                "bank_name": item.get("bank_name"),
+                "employer_name": item.get("employer_name"),
+                "full_name": item.get("full_name"),
+                "quality_score": item.get("quality_score"),
+            })
+
+    policy_triggers: List[str] = []
+    for code in assessment.decision_reason_codes or []:
+        value = str(code).strip()
+        if value and value not in policy_triggers:
+            policy_triggers.append(value)
+    for factor in assessment.blocking_factors or []:
+        value = str(factor).strip()
+        if value and value not in policy_triggers:
+            policy_triggers.append(value)
+    if assessment.policy_cap_reason:
+        trigger = f"POLICY_CAP:{assessment.policy_cap_reason}"
+        if trigger not in policy_triggers:
+            policy_triggers.append(trigger)
+
+    delta: Optional[float] = None
+    try:
+        if assessment.recommended_amount is not None:
+            delta = float(assessment.recommended_amount) - float(assessment.requested_amount)
+    except Exception:
+        delta = None
+
+    decision_value = assessment.decision.value if hasattr(assessment.decision, "value") else assessment.decision
+    risk_level_value = assessment.risk_level.value if hasattr(assessment.risk_level, "value") else assessment.risk_level
+    final_decision = None
+    if isinstance(assessment.final_decision_metadata, dict):
+        final_decision = assessment.final_decision_metadata.get("officer_decision") or assessment.final_decision_metadata.get("decision")
+
+    return {
+        "decision_id": assessment.assessment_id,
+        "system_recommendation": str(decision_value) if decision_value is not None else None,
+        "risk_score": assessment.risk_score,
+        "risk_level": str(risk_level_value) if risk_level_value is not None else None,
+        "policy_version": assessment.policy_version,
+        "policy_triggers": policy_triggers,
+        "requested_amount": assessment.requested_amount,
+        "recommended_amount": assessment.recommended_amount,
+        "recommended_duration_days": assessment.recommended_duration_days,
+        "recommended_interest_rate": assessment.recommended_interest_rate,
+        "loan_adjustment_delta": delta,
+        "document_summaries": compact_docs,
+        "data_sources": data_used.get("data_sources") if isinstance(data_used.get("data_sources"), list) else [],
+        "status": "SEALED" if assessment.final_decision_metadata else "PENDING_OFFICER",
+        "final_decision": final_decision,
+    }
+
+
+def _assistant_mode_from_route(route: str) -> str:
+    path = (route or "/").split("?")[0].strip().lower()
+    if path.startswith("/decisions"):
+        return "decision_mode"
+    if path.startswith("/manual-assessments"):
+        return "intake_mode"
+    if path.startswith("/policy-studio"):
+        return "policy_mode"
+    if path.startswith("/audit-logs"):
+        return "audit_mode"
+    if path.startswith("/settings"):
+        return "settings_mode"
+    return "console_mode"
+
+
+def _classify_assistant_intent(question: str) -> str:
+    q = (question or "").strip().lower()
+    if not q:
+        return "capability"
+
+    greeting_word_tokens = ["hi", "hello", "hey", "thanks"]
+    greeting_phrase_tokens = ["good morning", "good afternoon", "good evening", "how are you", "thank you"]
+    has_greeting_word = any(re.search(rf"\b{re.escape(token)}\b", q) for token in greeting_word_tokens)
+    has_greeting_phrase = any(token in q for token in greeting_phrase_tokens)
+    if has_greeting_word or has_greeting_phrase:
+        if len(q.split()) <= 8 or "how are you" in q or "thank" in q:
+            return "greeting"
+
+    capability_tokens = ["what can you do", "what can you help", "help me", "capabilities", "what do you help with", "what can i ask"]
+    if any(token in q for token in capability_tokens):
+        return "capability"
+
+    decision_tokens = ["explain recommendation", "why approve", "why reject", "why was", "decision", "approved", "rejected", "borderline", "risk score"]
+    if any(token in q for token in decision_tokens):
+        return "decision_explain"
+
+    workflow_tokens = ["upload", "batch", "spreadsheet", "file format", "validation", "template", "row", "csv", "xlsx", "error"]
+    if any(token in q for token in workflow_tokens):
+        return "workflow_help"
+
+    policy_tokens = ["policy", "rule", "trigger", "threshold", "version", "override"]
+    if any(token in q for token in policy_tokens):
+        return "policy_help"
+
+    return "general"
+
+
+def _extract_decision_id_from_route(route: str) -> Optional[str]:
+    path = (route or "/").split("?")[0].strip()
+    prefix = "/decisions/"
+    if not path.startswith(prefix):
+        return None
+    remainder = path[len(prefix):]
+    candidate = remainder.split("/")[0].strip()
+    return candidate or None
+
+
+def _is_capability_request(question: str) -> bool:
+    q = question.lower()
+    capability_phrases = [
+        "what can you help me with",
+        "what can you do",
+        "how can you help",
+        "capabilities",
+        "help me with"
+    ]
+    return any(phrase in q for phrase in capability_phrases)
+
+
+def _assistant_mode_summary(mode: str, has_decision_context: bool) -> str:
+    if mode == "decision_mode":
+        if has_decision_context:
+            return "I can explain this decision record, the policy reasoning, and risk interpretation."
+        return (
+            "You are in the Decision workflow. I can guide decision interpretation now, and provide "
+            "record-level explanations when a specific decision is open."
+        )
+    if mode == "intake_mode":
+        return "You are in Manual Assessments. I can guide spreadsheet intake, validation, and batch readiness."
+    if mode == "policy_mode":
+        return "You are in Policy Studio. I can explain rule design, threshold impacts, and governance checks."
+    return "You are in Partner Console. I can guide workflows, risk interpretation, and operational navigation."
+
+
+def _assistant_mode_capabilities(mode: str) -> List[str]:
+    if mode == "decision_mode":
+        return [
+            "Explain system recommendation, risk score interpretation, and loan adjustment delta.",
+            "Summarize key policy triggers and stored rule references for the active decision.",
+            "Suggest officer next actions before sealing the final decision."
+        ]
+    if mode == "intake_mode":
+        return [
+            "Guide batch spreadsheet uploads, required file formats, and validation behavior.",
+            "Explain row-level processing outcomes and where to review decisions.",
+            "Clarify document completeness expectations before final submission."
+        ]
+    if mode == "policy_mode":
+        return [
+            "Explain how policy thresholds and rule ordering influence outcomes.",
+            "Clarify governance controls, overrides, and operational implications.",
+            "Guide where to verify policy versions used by decision records."
+        ]
+    return [
+        "Guide Partner Console workflows across assessments, decisions, and governance.",
+        "Explain where to find risk, policy, and audit context in the current product surface.",
+        "Provide practical operational next steps based on your page context."
+    ]
+
+
+def _assistant_mode_examples(mode: str) -> List[str]:
+    if mode == "decision_mode":
+        return [
+            "Explain this recommendation",
+            "Which policy rules fired?",
+            "What would change if amount increases?"
+        ]
+    if mode == "intake_mode":
+        return [
+            "How do batch uploads work?",
+            "What file format is required?",
+            "Which validation checks run first?"
+        ]
+    if mode == "policy_mode":
+        return [
+            "Which rules most affect approval rate?",
+            "How do I tighten affordability thresholds?",
+            "How should overrides be documented?"
+        ]
+    return [
+        "What can you help me with?",
+        "How do I review audit history?",
+        "Where should I start a manual assessment?"
+    ]
+
+
+def _assistant_mode_next_steps(mode: str, has_decision_context: bool) -> List[str]:
+    if mode == "decision_mode":
+        if has_decision_context:
+            return [
+                "Review recommendation drivers, then verify document quality before sealing.",
+                "Record officer rationale if you override the system recommendation."
+            ]
+        return [
+            "Open a Decision record to unlock record-level policy trigger and risk details.",
+            "Use this page to frame the question, then ask again from the selected record."
+        ]
+
+    if mode == "intake_mode":
+        return [
+            "Upload the spreadsheet template and resolve row-level validation flags.",
+            "For decision-specific explanations, open a Decision record."
+        ]
+
+    if mode == "policy_mode":
+        return [
+            "Review threshold and trigger configuration before publishing policy updates.",
+            "For decision-specific explanations, open a Decision record."
+        ]
+
+    return [
+        "Open the relevant workflow area (Manual Assessments, Decisions, or Policy Studio) for targeted guidance.",
+        "For decision-specific explanations, open a Decision record."
+    ]
+
+
+def _compose_standard_mode_response(summary: str, help_items: List[str], next_steps: List[str]) -> str:
+    lines: List[str] = [
+        "Summary",
+        f"- {summary}",
+        "",
+        "What I can help with",
+    ]
+    lines.extend([f"- {item}" for item in help_items])
+    lines.append("")
+    lines.append("Next Steps")
+    lines.extend([f"- {step}" for step in next_steps])
+    lines.append("")
+    lines.append("Final credit approval remains the officer's responsibility.")
+    return "\n".join(lines)
+
+
+def _compose_mode_help_reply(mode: str, has_decision_context: bool) -> str:
+    capabilities = _assistant_mode_capabilities(mode)
+    examples = _assistant_mode_examples(mode)
+    help_items = list(capabilities)
+    help_items.append(f"Example questions: {'; '.join(examples)}.")
+    return _compose_standard_mode_response(
+        summary=_assistant_mode_summary(mode, has_decision_context),
+        help_items=help_items,
+        next_steps=_assistant_mode_next_steps(mode, has_decision_context)
+    )
+
+
+def _assistant_mode_specific_answer(question: str, mode: str, has_decision_context: bool) -> Optional[str]:
+    q = question.lower()
+
+    if mode == "intake_mode":
+        if "file format" in q or "format" in q or "xlsx" in q or "xls" in q or "csv" in q:
+            return _compose_standard_mode_response(
+                summary="Spreadsheet intake accepts .xlsx, .xls, and .csv formats for borrower rows.",
+                help_items=[
+                    "Validate template column names and required fields before upload.",
+                    "Use row-level validation feedback to fix missing values or invalid formats.",
+                    "Run assessments after validation succeeds."
+                ],
+                next_steps=[
+                    "Download and populate the template, then re-upload.",
+                    "For decision-specific explanations, open a Decision record."
+                ]
+            )
+        if "batch" in q or "upload" in q or "validation" in q:
+            return _compose_standard_mode_response(
+                summary="Batch intake validates each row first, then processes borrower decisions independently.",
+                help_items=[
+                    "Explain validation errors and how they block row processing.",
+                    "Clarify how borrower-level outcomes are generated from one upload.",
+                    "Guide where to review results after processing."
+                ],
+                next_steps=[
+                    "Resolve flagged rows and rerun the upload.",
+                    "Open Decisions to review borrower-level outcomes."
+                ]
+            )
+
+    if mode == "policy_mode" and ("policy" in q or "rule" in q or "trigger" in q):
+        return _compose_standard_mode_response(
+            summary="Policy Studio guidance is available for rule behavior and threshold impacts.",
+            help_items=[
+                "Explain how affordability and DTI thresholds influence outcomes.",
+                "Guide governance controls and override expectations.",
+                "Identify where policy versioning is reviewed."
+            ],
+            next_steps=[
+                "Review rule configuration and version metadata in Policy Studio.",
+                "For decision-specific trigger IDs, open a Decision record."
+            ]
+        )
+
+    if mode == "console_mode" and ("risk" in q or "score" in q or "recommendation" in q):
+        return _compose_standard_mode_response(
+            summary="Risk interpretation guidance is available in Partner Console context.",
+            help_items=[
+                "Clarify risk levels and where they appear in workflows.",
+                "Guide where policy references and audit records are reviewed.",
+                "Suggest operational follow-up actions before final approval."
+            ],
+            next_steps=[
+                "Open a Decision record for exact recommendation drivers and policy references.",
+                "Use Audit Logs to confirm historical decision activity."
+            ]
+        )
+
+    if mode == "decision_mode" and not has_decision_context and ("policy" in q or "rule" in q or "risk" in q):
+        return _compose_standard_mode_response(
+            summary=(
+                "A specific Decision record is not attached to this chat yet, so record-level "
+                "policy and risk values are not available in this view."
+            ),
+            help_items=[
+                "Guide which decision fields to inspect once the record is open.",
+                "Explain how recommendation, risk score, and policy triggers relate.",
+                "Prepare officer-oriented follow-up questions for the selected record."
+            ],
+            next_steps=[
+                "Open a Decision record and ask the same question again for exact values.",
+                "Use the decision context pills to confirm policy version and status."
+            ]
+        )
+
+    return None
+
+
+def _assistant_next_steps(question: str, decision_bundle: Dict[str, Any]) -> List[str]:
+    q = question.lower()
+    steps: List[str] = []
+
+    if "increase" in q and "amount" in q:
+        steps.append("Re-check affordability and DTI limits against current income and expense evidence.")
+        steps.append("Request stronger income continuity evidence before approving a higher amount.")
+    elif "risk" in q:
+        steps.append("Address missing or low-confidence evidence that is increasing uncertainty.")
+    else:
+        steps.append("Validate document completeness and resolve any blocking policy trigger.")
+
+    if not decision_bundle.get("document_summaries"):
+        steps.append("Upload supporting documents to improve confidence and reduce manual uncertainty.")
+
+    steps.append("Record officer rationale before sealing any override decision.")
+    return steps
+
+
+def _compose_assistant_reply(
+    question: str,
+    route: str,
+    mode: str,
+    decision_bundle: Optional[Dict[str, Any]]
+) -> str:
+    has_decision_context = decision_bundle is not None
+
+    if _is_capability_request(question):
+        return _compose_mode_help_reply(mode, has_decision_context)
+
+    specific_reply = _assistant_mode_specific_answer(question, mode, has_decision_context)
+    if specific_reply:
+        return specific_reply
+
+    if mode != "decision_mode" and not decision_bundle:
+        return _compose_mode_help_reply(mode, has_decision_context)
+
+    if not decision_bundle:
+        return _compose_mode_help_reply("decision_mode", has_decision_context=False)
+
+    summary_lines: List[str] = []
+    recommendation = decision_bundle.get("system_recommendation") or "Unavailable"
+    risk_level = decision_bundle.get("risk_level") or "Unavailable"
+    risk_score = decision_bundle.get("risk_score")
+    status = decision_bundle.get("status") or "PENDING_OFFICER"
+    policy_version = decision_bundle.get("policy_version") or "Unavailable"
+    final_decision = decision_bundle.get("final_decision")
+
+    if risk_score is None:
+        summary_lines.append(f"System recommendation: {recommendation}. Risk level: {risk_level}.")
+    else:
+        try:
+            summary_lines.append(
+                f"System recommendation: {recommendation}. Risk score: {float(risk_score):.2f} ({risk_level})."
+            )
+        except Exception:
+            summary_lines.append(f"System recommendation: {recommendation}. Risk level: {risk_level}.")
+
+    summary_lines.append(f"Decision record status: {status}.")
+    if final_decision:
+        summary_lines.append(f"Sealed officer decision: {final_decision}.")
+
+    drivers: List[str] = []
+    triggers = decision_bundle.get("policy_triggers") or []
+    if triggers:
+        drivers.extend([f"Policy trigger: {t}" for t in triggers[:5]])
+    else:
+        drivers.append("Policy trigger data is not available in this view.")
+
+    delta = decision_bundle.get("loan_adjustment_delta")
+    if delta is None:
+        drivers.append("Loan adjustment delta is not available in this view.")
+    else:
+        try:
+            drivers.append(f"Loan adjustment delta vs requested amount: {float(delta):+.2f}.")
+        except Exception:
+            drivers.append("Loan adjustment delta is not available in this view.")
+
+    docs = decision_bundle.get("document_summaries") or []
+    if docs:
+        profiles = [str(doc.get("summary_profile")) for doc in docs if doc.get("summary_profile")]
+        if profiles:
+            drivers.append(f"Document summaries available: {', '.join(profiles[:4])}.")
+        else:
+            drivers.append("Documents are present but summary profiles are not fully populated.")
+    else:
+        drivers.append("Document summary metadata is not available in this view.")
+
+    policy_version_line = "not available in this view" if policy_version == "Unavailable" else policy_version
+    policy_refs = [f"Policy version: {policy_version_line}."]
+    reason_codes = [t for t in triggers if isinstance(t, str) and t]
+    if reason_codes:
+        policy_refs.append(f"Rule IDs / reason codes: {', '.join(reason_codes[:6])}.")
+    else:
+        policy_refs.append("Rule IDs / reason codes are not available in this view.")
+
+    next_steps = _assistant_next_steps(question, decision_bundle)
+
+    sections: List[str] = ["Summary"]
+    sections.extend([f"- {line}" for line in summary_lines])
+    sections.append("")
+    sections.append("Key Drivers")
+    sections.extend([f"- {line}" for line in drivers])
+    sections.append("")
+    sections.append("Policy References")
+    sections.extend([f"- {line}" for line in policy_refs])
+    sections.append("")
+    sections.append("Next Steps")
+    sections.extend([f"- {line}" for line in next_steps])
+    sections.append("")
+    sections.append("Final credit approval remains the officer's responsibility.")
+    return "\n".join(sections)
+
+
+def _truncate_messages(messages: List[AssistantChatMessage]) -> List[AssistantChatMessage]:
+    max_messages = max(1, min(ASSISTANT_MAX_MESSAGES, ASSISTANT_MAX_TURNS * 2))
+    return messages[-max_messages:]
+
+
+def _assistant_capabilities_for_mode(mode: str) -> List[str]:
+    if mode == "decision_mode":
+        return [
+            "Explain recommendation rationale in plain language.",
+            "Break down risk score, risk level, and adjustment delta.",
+            "Translate fired policy rules into officer-friendly meaning.",
+            "Highlight evidence gaps and what to verify before sealing.",
+            "Suggest controlled ways to improve the likely outcome.",
+            "Summarize decision context for audit-ready officer notes."
+        ]
+    if mode == "intake_mode":
+        return [
+            "Guide spreadsheet intake for batch assessments.",
+            "Explain accepted file formats and validation expectations.",
+            "Help interpret flagged rows and upload-readiness checks.",
+            "Clarify where to review generated outcomes.",
+            "Advise what evidence improves downstream decision quality."
+        ]
+    if mode == "policy_mode":
+        return [
+            "Explain policy threshold intent and operational impact.",
+            "Clarify rule interactions and likely downstream effects.",
+            "Recommend governance checks before policy activation.",
+            "Identify what evidence officers should verify for exceptions.",
+            "Map policy controls to audit and review workflows."
+        ]
+    if mode == "audit_mode":
+        return [
+            "Explain what each audit event means in operational terms.",
+            "Map events to user actions and workflow stages.",
+            "Help trace who did what and when across assessment lifecycle.",
+            "Highlight what to investigate when an audit trail looks unusual.",
+            "Suggest compliant follow-up documentation for investigations."
+        ]
+    if mode == "settings_mode":
+        return [
+            "Explain environment and configuration options in practical terms.",
+            "Guide safe changes to roles, preferences, and platform settings.",
+            "Clarify downstream impact of configuration updates.",
+            "Recommend governance checks before applying production changes.",
+            "Help identify where to verify a change was applied."
+        ]
+    return [
+        "Guide navigation and workflows across Partner Console.",
+        "Explain where risk, policy, and audit evidence is surfaced.",
+        "Suggest next operational steps by current page context.",
+        "Clarify when to use manual assessments vs decision chamber.",
+        "Help frame better questions for decision-level analysis."
+    ]
+
+
+def _assistant_examples_for_mode(mode: str) -> List[str]:
+    if mode == "decision_mode":
+        return [
+            "Explain recommendation",
+            "Which policy rules fired?",
+            "What would change if amount increases?"
+        ]
+    if mode == "intake_mode":
+        return [
+            "How do batch uploads work?",
+            "What file format is required?",
+            "What validation checks run first?"
+        ]
+    if mode == "policy_mode":
+        return [
+            "How do affordability thresholds affect approvals?",
+            "Which controls should we review before activation?",
+            "How should exceptions be documented?"
+        ]
+    if mode == "audit_mode":
+        return [
+            "What does FINAL_HUMAN_DECISION_SEALED mean?",
+            "Which user initiated this action?",
+            "How should I investigate this audit sequence?"
+        ]
+    if mode == "settings_mode":
+        return [
+            "Which settings are safe to change in production?",
+            "How do role updates affect approval workflow?",
+            "Where can I verify a setting change was applied?"
+        ]
+    return [
+        "What can you help me with?",
+        "Where do I review audit history?",
+        "How do I start a manual assessment?"
+    ]
+
+
+def _build_capability_response(mode: str) -> str:
+    opening = (
+        "I can support you as a decision and workflow copilot in this page context. "
+        "If you share what you are trying to decide, I will keep the guidance practical and policy-aware."
+    )
+    lines: List[str] = [opening, "", "What I can help with:"]
+    lines.extend([f"- {item}" for item in _assistant_capabilities_for_mode(mode)])
+    examples = _assistant_examples_for_mode(mode)
+    lines.append("")
+    lines.append("What to do next:")
+    lines.append(f"- Ask one of these to get started: {examples[0]}; {examples[1]}; {examples[2]}.")
+    lines.append("- Final credit approval remains the officer's responsibility.")
+    return "\n".join(lines)
+
+
+def _build_greeting_response(mode: str) -> str:
+    mode_prompts = {
+        "decision_mode": "I can explain this decision in analyst terms, including triggers, risk posture, and next checks.",
+        "intake_mode": "I can guide uploads, validation issues, and batch processing readiness.",
+        "policy_mode": "I can walk through rules, thresholds, and safe policy changes.",
+        "audit_mode": "I can help interpret audit events and trace workflow actions.",
+        "settings_mode": "I can clarify configuration impact and safe rollout checks.",
+        "console_mode": "I can help with navigation, workflows, and where to find key risk or policy context."
+    }
+    redirect = mode_prompts.get(mode, mode_prompts["console_mode"])
+    return (
+        "I’m doing well, thanks. "
+        f"{redirect} "
+        "What are you working on right now?"
+    )
+
+
+def _build_decision_without_record_response(mode: str) -> str:
+    if mode == "decision_mode":
+        return (
+            "I can still help frame the recommendation logic from this page, even before record-level values are loaded. "
+            "What I’m seeing: you’re asking for a decision explanation, which is strongest when a specific decision record is attached.\n\n"
+            "What to do next:\n"
+            "- Open the target decision record and ask the same question.\n"
+            "- If helpful, I can also explain what each trigger means before you open it."
+        )
+    return (
+        "I can help with the current workflow, and I can also explain decision outcomes in detail once a specific decision record is open. "
+        "What I’m seeing: this question is decision-specific, so record-level analysis is limited in this view.\n\n"
+        "What to do next:\n"
+        "- Open a decision record under Decisions and ask this again.\n"
+        "- If you want, I can first outline the key checks officers usually apply."
+    )
+
+
+def _compose_intent_fallback_response(intent: str, mode: str, decision_context: Optional[Dict[str, Any]]) -> Optional[str]:
+    if intent == "greeting":
+        return _build_greeting_response(mode)
+    if intent == "capability":
+        return _build_capability_response(mode)
+    if intent == "decision_explain" and decision_context is None:
+        return _build_decision_without_record_response(mode)
+    return None
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _normalize_rule_id(raw_rule: str) -> str:
+    value = str(raw_rule or "").strip().upper().replace("-", "_")
+    if value.startswith("POLICY_CAP:"):
+        return "POLICY_CAP"
+    return value
+
+
+def _threshold_values_for_rule(rule_id: str, assessment: Assessment, metrics: Dict[str, Any]) -> Dict[str, Any]:
+    import config
+
+    dti = metrics.get("dti_ratio")
+    affordability = metrics.get("affordability_ratio")
+    policy_cap = assessment.policy_cap_amount
+    values: Dict[str, Any] = {}
+
+    if rule_id == "HIGH_DTI":
+        values = {"observed_dti": dti, "max_dti": config.MAX_DEBT_TO_INCOME_RATIO}
+    elif rule_id == "AFFORDABILITY_CAP":
+        values = {"observed_affordability_ratio": affordability, "target_affordability_ratio": config.AFFORDABILITY_RATIO_TARGET}
+    elif rule_id in {"OBSERVATION_WINDOW", "INSUFFICIENT_OBSERVATION_WINDOW"}:
+        values = {"history_days": assessment.history_days, "minimum_days": 30}
+    elif rule_id == "POLICY_CAP":
+        values = {"policy_cap_amount": policy_cap, "requested_amount": assessment.requested_amount}
+    elif rule_id == "DATA_QUALITY_LIMITED":
+        values = {"data_quality_score": assessment.data_quality_score, "minimum_quality_score": config.DATA_QUALITY_REFER_THRESHOLD}
+
+    return values
+
+
+def _why_rule_fired(rule_id: str, assessment: Assessment, metrics: Dict[str, Any]) -> str:
+    if rule_id == "HIGH_DTI":
+        dti = _safe_float(metrics.get("dti_ratio"))
+        if dti is not None:
+            return f"DTI was measured at {dti:.2f}, above permitted policy tolerance."
+        return "Debt-to-income exceeded policy tolerance based on available debt and income evidence."
+    if rule_id == "AFFORDABILITY_CAP":
+        return "Requested repayment burden exceeded affordability target for the verified income profile."
+    if rule_id in {"OBSERVATION_WINDOW", "INSUFFICIENT_OBSERVATION_WINDOW"}:
+        return f"Only {assessment.history_days or 0} days of usable history were available, below policy minimum."
+    if rule_id == "POLICY_CAP":
+        if assessment.policy_cap_reason:
+            return f"Policy cap was applied due to: {assessment.policy_cap_reason}."
+        return "A configured policy ceiling restricted recommendation size."
+    if rule_id == "DATA_QUALITY_LIMITED":
+        if assessment.data_quality_score is not None:
+            return f"Data quality score {assessment.data_quality_score:.2f} triggered manual caution thresholds."
+        return "Data quality checks found missing or low-confidence inputs."
+    if rule_id == "STARTER_LOAN_APPROVED_LIMITED_HISTORY":
+        return "Limited profile history triggered starter-loan controls."
+    if rule_id == "MISSING_DOCUMENTS":
+        missing_docs = metrics.get("missing_documents") or []
+        if isinstance(missing_docs, list) and missing_docs:
+            return f"Missing required evidence: {', '.join(str(item) for item in missing_docs[:3])}."
+        return "Required supporting evidence was not complete."
+    return "Rule was recorded on the decision trace and influenced the recommendation."
+
+
+def _lookup_rule_reference(rule_id: str) -> Dict[str, str]:
+    if rule_id in ASSISTANT_RULE_REFERENCE:
+        return ASSISTANT_RULE_REFERENCE[rule_id]
+    return {
+        "name": rule_id.replace("_", " ").title() or "Policy Rule",
+        "human_description": "This rule appears in the decision trace but does not have expanded metadata in this view.",
+        "officer_verify": "Review policy configuration and decision trace before sealing."
+    }
+
+
+def _build_fired_rules(assessment: Assessment, metrics: Dict[str, Any]) -> List[Dict[str, Any]]:
+    raw_rules: List[str] = []
+    for code in assessment.decision_reason_codes or []:
+        value = str(code).strip()
+        if value:
+            raw_rules.append(value)
+    for factor in assessment.blocking_factors or []:
+        value = str(factor).strip()
+        if value:
+            raw_rules.append(value)
+    if assessment.policy_cap_reason:
+        raw_rules.append(f"POLICY_CAP:{assessment.policy_cap_reason}")
+    missing_docs = metrics.get("missing_documents")
+    if isinstance(missing_docs, list) and missing_docs:
+        raw_rules.append("MISSING_DOCUMENTS")
+
+    deduped: List[str] = []
+    for raw_rule in raw_rules:
+        if raw_rule not in deduped:
+            deduped.append(raw_rule)
+
+    fired_rules: List[Dict[str, Any]] = []
+    for raw_rule in deduped[:10]:
+        rule_id = _normalize_rule_id(raw_rule)
+        reference = _lookup_rule_reference(rule_id)
+        fired_rules.append({
+            "id": rule_id,
+            "name": reference["name"],
+            "human_description": reference["human_description"],
+            "threshold_values": _threshold_values_for_rule(rule_id, assessment, metrics),
+            "why_it_fired": _why_rule_fired(rule_id, assessment, metrics),
+            "officer_verify": reference["officer_verify"]
+        })
+    return fired_rules
+
+
+def _build_top_reasons_plain(assessment: Assessment, fired_rules: List[Dict[str, Any]]) -> List[str]:
+    reasons: List[str] = []
+
+    for rule in fired_rules:
+        why = str(rule.get("why_it_fired") or "").strip()
+        if why:
+            reasons.append(why)
+        if len(reasons) >= 3:
+            break
+
+    if len(reasons) < 3:
+        recommendation = assessment.decision.value if hasattr(assessment.decision, "value") else str(assessment.decision)
+        reasons.append(f"System recommendation is {recommendation} under policy version {assessment.policy_version}.")
+    if len(reasons) < 3 and assessment.recommended_amount is not None:
+        delta = _safe_float(assessment.recommended_amount) - _safe_float(assessment.requested_amount)  # type: ignore
+        if delta is not None:
+            reasons.append(f"Recommended amount differs from request by {delta:+.2f}.")
+    if len(reasons) < 3:
+        reasons.append("Available evidence quality and policy controls together determined recommendation confidence.")
+
+    return reasons[:3]
+
+
+def _build_assistant_decision_context_v2(assessment: Assessment) -> Dict[str, Any]:
+    import config
+
+    metrics = assessment.metrics if isinstance(assessment.metrics, dict) else {}
+    data_used = assessment.data_used if isinstance(assessment.data_used, dict) else {}
+    data_provenance = assessment.data_provenance if isinstance(assessment.data_provenance, dict) else {}
+    raw_doc_summaries = metrics.get("document_summaries") if isinstance(metrics, dict) else []
+    compact_docs: List[Dict[str, Any]] = []
+    available_doc_types: List[str] = []
+
+    if isinstance(raw_doc_summaries, list):
+        for item in raw_doc_summaries[:6]:
+            if not isinstance(item, dict):
+                continue
+            profile = item.get("summary_profile")
+            compact_docs.append({
+                "summary_profile": profile,
+                "bank_name": item.get("bank_name"),
+                "employer_name": item.get("employer_name"),
+                "full_name": item.get("full_name"),
+                "quality_score": item.get("quality_score"),
+            })
+            if profile:
+                profile_str = str(profile)
+                if profile_str not in available_doc_types:
+                    available_doc_types.append(profile_str)
+
+    delta: Optional[float] = None
+    try:
+        if assessment.recommended_amount is not None:
+            delta = float(assessment.recommended_amount) - float(assessment.requested_amount)
+    except Exception:
+        delta = None
+
+    decision_value = assessment.decision.value if hasattr(assessment.decision, "value") else assessment.decision
+    risk_level_value = assessment.risk_level.value if hasattr(assessment.risk_level, "value") else assessment.risk_level
+    final_decision = None
+    if isinstance(assessment.final_decision_metadata, dict):
+        final_decision = assessment.final_decision_metadata.get("officer_decision") or assessment.final_decision_metadata.get("decision")
+
+    fired_rules = _build_fired_rules(assessment, metrics)
+    missing_documents = metrics.get("missing_documents") if isinstance(metrics.get("missing_documents"), list) else []
+    top_reasons = _build_top_reasons_plain(assessment, fired_rules)
+    dti_ratio = _safe_float(metrics.get("dti_ratio"))
+    affordability_ratio = _safe_float(metrics.get("affordability_ratio"))
+    haircut_percent: Optional[float] = None
+    affordability_margin: Optional[float] = None
+
+    if assessment.requested_amount and assessment.requested_amount > 0 and assessment.recommended_amount is not None:
+        try:
+            haircut_percent = ((float(assessment.requested_amount) - float(assessment.recommended_amount)) / float(assessment.requested_amount)) * 100.0
+        except Exception:
+            haircut_percent = None
+
+    if affordability_ratio is not None:
+        try:
+            affordability_margin = float(config.AFFORDABILITY_RATIO_TARGET) - affordability_ratio
+        except Exception:
+            affordability_margin = None
+
+    risk_level_str = str(risk_level_value) if risk_level_value is not None else "UNKNOWN"
+    confidence_band = "strong"
+    if risk_level_str == "MEDIUM" or (assessment.data_quality_score is not None and assessment.data_quality_score < 0.7):
+        confidence_band = "borderline"
+    if risk_level_str == "HIGH":
+        confidence_band = "elevated-risk"
+
+    return {
+        "decision_id": assessment.assessment_id,
+        "system_recommendation": str(decision_value) if decision_value is not None else None,
+        "risk_score": assessment.risk_score,
+        "risk_level": str(risk_level_value) if risk_level_value is not None else None,
+        "policy_version": assessment.policy_version,
+        "requested_amount": assessment.requested_amount,
+        "recommended_amount": assessment.recommended_amount,
+        "delta": delta,
+        "recommended_duration_days": assessment.recommended_duration_days,
+        "recommended_interest_rate": assessment.recommended_interest_rate,
+        "fired_rules": fired_rules,
+        "affordability_summary": {
+            "dti_ratio": dti_ratio,
+            "dti_threshold": config.MAX_DEBT_TO_INCOME_RATIO,
+            "affordability_ratio": affordability_ratio,
+            "affordability_target": config.AFFORDABILITY_RATIO_TARGET,
+            "affordability_margin": affordability_margin,
+            "capacity_based_max": assessment.capacity_based_max,
+            "policy_cap_amount": assessment.policy_cap_amount,
+            "policy_cap_reason": assessment.policy_cap_reason,
+            "haircut_percent": haircut_percent,
+        },
+        "data_provenance": {
+            "data_sources": data_used.get("data_sources") if isinstance(data_used.get("data_sources"), list) else [],
+            "transaction_count": assessment.transaction_count,
+            "history_days": assessment.history_days,
+            "data_quality_score": assessment.data_quality_score,
+            "data_recency_days": data_used.get("data_recency_days"),
+            "consent_scope": data_provenance.get("consent_scope"),
+        },
+        "document_summary": {
+            "documents": compact_docs,
+            "available_document_types": available_doc_types,
+            "missing_documents": missing_documents,
+        },
+        "top_reasons": top_reasons,
+        "analyst_signal": {
+            "confidence_band": confidence_band,
+            "notes": "Use confidence band as directional context, not a replacement for officer judgment."
+        },
+        "status": "SEALED" if assessment.final_decision_metadata else "PENDING_OFFICER",
+        "final_decision": final_decision,
+    }
+
+
+def _derive_last_topic(messages: List[AssistantChatMessage], question: str) -> str:
+    user_messages = [m.content.strip() for m in messages if m.role == "user" and m.content.strip()]
+    if len(user_messages) >= 2:
+        raw_topic = user_messages[-2]
+    elif user_messages:
+        raw_topic = user_messages[-1]
+    else:
+        raw_topic = question
+
+    topic = " ".join(raw_topic.split())
+    if len(topic) > 160:
+        topic = f"{topic[:157]}..."
+    return topic
+
+
+def _format_history_for_prompt(messages: List[AssistantChatMessage]) -> str:
+    transcript_lines: List[str] = []
+    for msg in messages:
+        role = "User" if msg.role == "user" else ("Assistant" if msg.role == "assistant" else "System")
+        content = " ".join(msg.content.strip().split())
+        if len(content) > 800:
+            content = f"{content[:797]}..."
+        transcript_lines.append(f"{role}: {content}")
+    return "\n".join(transcript_lines)
+
+
+def _build_system_prompt(mode: str, question: str, has_decision_context: bool) -> str:
+    mode_map = {
+        "decision_mode": "Decision Chamber",
+        "intake_mode": "Manual Assessments",
+        "policy_mode": "Policy Studio",
+        "audit_mode": "Audit Logs",
+        "settings_mode": "Settings",
+        "console_mode": "Partner Console"
+    }
+    mode_label = mode_map.get(mode, "Partner Console")
+    mode_behavior = {
+        "decision_mode": "Give analyst-grade reasoning: explain why approve/reject, whether signal strength is strong or borderline, and what officers should verify.",
+        "intake_mode": "Provide step-by-step guidance for spreadsheet uploads, formats, validation behavior, and batch outcomes.",
+        "policy_mode": "Explain rules, thresholds, versioning, and safe policy adjustments.",
+        "audit_mode": "Interpret audit events clearly, map them to actions, and suggest investigation flow.",
+        "settings_mode": "Explain configuration impact and safe operational checks before applying changes.",
+        "console_mode": "Provide practical navigation and workflow help across Partner Console."
+    }.get(mode, "Provide practical workflow help.")
+    return (
+        "You are Decision Copilot for an enterprise lending platform. "
+        "Tone: warm, professional, and concise. Sound like a risk analyst, not a generic chatbot.\n"
+        f"Current mode: {mode} ({mode_label}).\n"
+        f"Mode behavior: {mode_behavior}\n"
+        f"Current question: {question}\n"
+        f"Decision context attached: {'yes' if has_decision_context else 'no'}.\n"
+        "Hard requirements:\n"
+        "- Use only provided context and conversation history.\n"
+        "- If data is missing, say 'not available in this view' and suggest where to find it.\n"
+        "- Do not fabricate policy IDs, thresholds, or scores.\n"
+        "- Never start with 'I do not have a decision record in context'.\n"
+        "- Never use 'I’m functioning as expected'.\n"
+        "- Avoid markdown-heavy formatting, no numbered section scaffolding unless user asks for it.\n"
+        "- Default format: short direct answer (2-4 sentences), optional 'What I’m seeing:' line, compact bullets only if useful, then 'What to do next:' with 1-3 steps.\n"
+        "- Capability question response must include 5-7 bullets and 3 example questions tailored to mode.\n"
+        "- Greeting/smalltalk should be friendly and then redirect to helpful work guidance.\n"
+        "- In decision explanations, translate trigger IDs to plain language and include practical improvement suggestions.\n"
+        "- Final credit approval remains the officer's responsibility.\n"
+        "Conversation memory: respect the user's recent topic and continue naturally."
+    )
+
+
+def _build_user_prompt(
+    route: str,
+    mode: str,
+    intent: str,
+    question: str,
+    history: List[AssistantChatMessage],
+    last_topic: str,
+    decision_context: Optional[Dict[str, Any]]
+) -> str:
+    context_blob = json.dumps(decision_context or {"note": "Decision context not available in this view."}, default=str, indent=2)
+    history_blob = _format_history_for_prompt(history)
+    return (
+        f"Route: {route}\n"
+        f"Mode: {mode}\n"
+        f"Intent: {intent}\n"
+        f"Remembered last topic: {last_topic}\n\n"
+        "DecisionContext:\n"
+        f"{context_blob}\n\n"
+        "ConversationHistory:\n"
+        f"{history_blob}\n\n"
+        "UserQuestion:\n"
+        f"{question}\n"
+    )
+
+
+def _resolve_assistant_provider() -> Tuple[str, str]:
+    import config
+
+    raw_provider = (os.getenv("ASSISTANT_PROVIDER") or config.LLM_PROVIDER or "vertex_ai").strip().lower()
+    if raw_provider in {"vertex", "vertex_ai", "google_vertex"}:
+        model = (os.getenv("ASSISTANT_MODEL") or os.getenv("VERTEX_MODEL_NAME") or config.VERTEX_MODEL_NAME or "gemini-2.0-flash-001").strip()
+        return "vertex", model
+    if raw_provider == "openai":
+        model = (os.getenv("ASSISTANT_MODEL") or os.getenv("OPENAI_MODEL") or config.LLM_MODEL or "gpt-4o-mini").strip()
+        return "openai", model
+    if raw_provider == "stub":
+        model = (os.getenv("ASSISTANT_MODEL") or "deterministic-stub-v1").strip()
+        return "stub", model
+    raise ValueError(f"Unsupported ASSISTANT_PROVIDER/LLM_PROVIDER value: {raw_provider}")
+
+
+def _provider_error_hint(provider: str, error: Exception) -> str:
+    msg = str(error)
+    msg_lower = msg.lower()
+    if provider == "vertex":
+        if "publisher model" in msg_lower and "not found" in msg_lower:
+            return "Configured Vertex model is unavailable in this project/region. Set VERTEX_MODEL_NAME=gemini-2.0-flash-001 and retry."
+        if "service_disabled" in msg_lower or "aiplatform.googleapis.com" in msg_lower:
+            return "Vertex AI API is disabled for this project. Run: gcloud services enable aiplatform.googleapis.com --project mfi--pro"
+        if "reauthentication is needed" in msg_lower or "application-default login" in msg_lower:
+            return "Google ADC token expired. Run: gcloud auth application-default login"
+        if "credential" in msg_lower or "google_application_credentials" in msg_lower:
+            return "Vertex credentials are not available. Set GOOGLE_APPLICATION_CREDENTIALS or run gcloud ADC login."
+        if "permission" in msg_lower or "403" in msg_lower:
+            return "Vertex access was denied. Verify IAM roles and project permissions."
+        return "Vertex request failed. Verify VERTEX_PROJECT_ID, VERTEX_REGION, and model access."
+    if provider == "openai":
+        if "api key" in msg_lower or "authentication" in msg_lower or "unauthorized" in msg_lower:
+            return "OpenAI credentials are missing or invalid. Set OPENAI_API_KEY."
+        return "OpenAI request failed. Verify OPENAI_API_KEY and model availability."
+    if provider == "stub":
+        return "Stub provider failed unexpectedly. Check assistant prompt/context assembly."
+    return "Unknown assistant provider error."
+
+
+def _call_vertex_assistant(system_prompt: str, user_prompt: str, model: str) -> str:
+    import config
+    import vertexai
+    try:
+        from vertexai.generative_models import GenerativeModel, GenerationConfig
+    except Exception:
+        # Compatibility path for older vertex-ai SDKs where GenerativeModel is in preview.
+        from vertexai.preview.generative_models import GenerativeModel, GenerationConfig
+
+    project_id = os.getenv("VERTEX_PROJECT_ID") or config.VERTEX_PROJECT_ID
+    region = os.getenv("VERTEX_REGION") or config.VERTEX_REGION
+    if not project_id:
+        raise RuntimeError("VERTEX_PROJECT_ID is not configured.")
+    if not region:
+        raise RuntimeError("VERTEX_REGION is not configured.")
+
+    vertexai.init(project=project_id, location=region)
+    model_client = GenerativeModel(model)
+    prompt = f"{system_prompt}\n\n{user_prompt}"
+    generation_config = GenerationConfig(
+        temperature=float(os.getenv("ASSISTANT_LLM_TEMPERATURE", "0.2")),
+        max_output_tokens=int(os.getenv("ASSISTANT_LLM_MAX_TOKENS", "900"))
+    )
+    response = model_client.generate_content(prompt, generation_config=generation_config)
+    text = getattr(response, "text", None)
+    if text and text.strip():
+        return text.strip()
+
+    candidates = getattr(response, "candidates", None)
+    if candidates:
+        parts: List[str] = []
+        for candidate in candidates:
+            content = getattr(candidate, "content", None)
+            if not content:
+                continue
+            for part in getattr(content, "parts", []) or []:
+                part_text = getattr(part, "text", None)
+                if part_text:
+                    parts.append(part_text)
+        merged = "\n".join(parts).strip()
+        if merged:
+            return merged
+
+    raise RuntimeError("Vertex returned an empty response.")
+
+
+def _call_openai_assistant(system_prompt: str, user_prompt: str, model: str) -> str:
+    import config
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY") or config.OPENAI_API_KEY
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not configured.")
+
+    client = OpenAI(api_key=api_key)
+    completion = client.chat.completions.create(
+        model=model,
+        temperature=float(os.getenv("ASSISTANT_LLM_TEMPERATURE", "0.2")),
+        max_tokens=int(os.getenv("ASSISTANT_LLM_MAX_TOKENS", "900")),
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+    )
+    if not completion.choices:
+        raise RuntimeError("OpenAI returned no choices.")
+    content = completion.choices[0].message.content
+    if not content:
+        raise RuntimeError("OpenAI returned an empty response.")
+    return content.strip()
+
+
+def _call_stub_assistant(mode: str, question: str, decision_context: Optional[Dict[str, Any]]) -> str:
+    if _is_capability_request(question):
+        return _build_capability_response(mode)
+
+    if mode == "decision_mode" and decision_context:
+        requested = decision_context.get("requested_amount")
+        recommended = decision_context.get("recommended_amount")
+        delta = decision_context.get("delta")
+        top_reasons = decision_context.get("top_reasons") or []
+        fired_rules = decision_context.get("fired_rules") or []
+        lines = [
+            "Summary",
+            "- The recommendation reflects policy checks, risk classification, and available document quality.",
+            "",
+            "Key Drivers",
+            f"- Requested amount: {requested}. Recommended amount: {recommended}. Delta: {delta}.",
+        ]
+        for reason in top_reasons[:3]:
+            lines.append(f"- {reason}")
+        lines.append("")
+        lines.append("Policy References")
+        if fired_rules:
+            for rule in fired_rules[:4]:
+                lines.append(f"- {rule.get('name')}: {rule.get('human_description')}")
+        else:
+            lines.append("- Rule details are not available in this view.")
+        lines.append("")
+        lines.append("Next Steps")
+        lines.append("- Verify missing evidence and policy threshold assumptions before sealing.")
+        lines.append("- If you want to improve outcome, reduce amount or add stronger income evidence.")
+        lines.append("")
+        lines.append("Final credit approval remains the officer's responsibility.")
+        return "\n".join(lines)
+
+    return _build_capability_response(mode)
+
+
+def _run_assistant_provider(
+    provider: str,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    mode: str,
+    question: str,
+    decision_context: Optional[Dict[str, Any]]
+) -> str:
+    if provider == "vertex":
+        return _call_vertex_assistant(system_prompt, user_prompt, model)
+    if provider == "openai":
+        return _call_openai_assistant(system_prompt, user_prompt, model)
+    if provider == "stub":
+        return _call_stub_assistant(mode, question, decision_context)
+    raise RuntimeError(f"Unsupported provider: {provider}")
+
+
+def _clean_assistant_reply(reply: str) -> str:
+    text = (reply or "").replace("**", "").replace("__", "").replace("```", "").strip()
+    replacements = {
+        "I’m functioning as expected.": "I’m doing well, thanks.",
+        "I'm functioning as expected.": "I’m doing well, thanks.",
+    }
+    for source, target in replacements.items():
+        text = text.replace(source, target)
+
+    lines = [line.rstrip() for line in text.splitlines()]
+    cleaned_lines: List[str] = []
+    heading_lines = {"summary", "key drivers", "policy references", "next steps", "what i can help with"}
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            cleaned_lines.append("")
+            continue
+        normalized = line.lower().strip(":")
+        if normalized in heading_lines:
+            continue
+        if line.startswith(("* ", "• ")):
+            line = f"- {line[2:].strip()}"
+        if line.startswith(("#", "##", "###")):
+            line = line.lstrip("# ").strip()
+        cleaned_lines.append(line)
+
+    while cleaned_lines and not cleaned_lines[-1]:
+        cleaned_lines.pop()
+    cleaned = "\n".join(cleaned_lines).strip()
+
+    if cleaned.lower().startswith("i do not have a decision record in context"):
+        cleaned = (
+            "I can still help with this workflow now, and I can provide deeper decision-level analysis once a specific record is open.\n\n"
+            "What to do next:\n- Open the relevant decision and ask again for a full recommendation breakdown."
+        )
+    return cleaned
 
 # ============================================================================
 # PARTNER DASHBOARD METRICS (Portfolio Analytics)
@@ -1438,6 +3089,166 @@ async def assessment_ask(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/assistant/chat", response_model=AssistantChatResponse, tags=["Assistant"])
+async def assistant_chat(
+    payload: AssistantChatRequest = Body(...),
+    user: User = Depends(AuthAgent.get_current_user)
+):
+    """
+    Decision Copilot endpoint.
+    Answers strictly from known record context. Does not fabricate missing values.
+    """
+    _enforce_assistant_rate_limit(user)
+    request_id = f"cop-{uuid.uuid4().hex[:12]}"
+    messages = _truncate_messages(payload.messages)
+    question = _latest_user_message(messages)
+    if not question:
+        raise HTTPException(status_code=400, detail="A user message is required.")
+
+    route = payload.context.route or "/"
+    mode = _assistant_mode_from_route(route)
+    intent = _classify_assistant_intent(question)
+    decision_context: Optional[Dict[str, Any]] = None
+    decision_id = payload.context.decisionId or _extract_decision_id_from_route(route)
+
+    if decision_id:
+        assessment = Database.get_assessment(decision_id)
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Decision context not found.")
+
+        role_value = _assistant_user_role(user)
+        user_org = (user.organization_id or "").upper()
+        assessment_org = (assessment.organization_id or "").upper()
+        if assessment_org != user_org and role_value != "SUPER_ADMIN":
+            raise HTTPException(status_code=403, detail="Unauthorized decision context access.")
+
+        decision_context = _build_assistant_decision_context_v2(assessment)
+        AuditAgent.log_event("ASSISTANT_EXPLANATION_REQUESTED", user.email, {
+            "decisionId": assessment.assessment_id,
+            "userId": user.id,
+            "route": route,
+            "org": user.organization_id
+        })
+
+    try:
+        provider, model = _resolve_assistant_provider()
+    except Exception as provider_error:
+        logger.error(
+            "[ASSISTANT] request_id=%s provider=error model=unknown org=%s user=%s mode=%s route=%s setup_error=%s",
+            request_id,
+            user.organization_id,
+            user.id,
+            mode,
+            route,
+            str(provider_error)
+        )
+        hint = _provider_error_hint("error", provider_error)
+        return {
+            "reply": f"I could not initialize the assistant provider. {hint}",
+            "meta": {
+                "provider": "error",
+                "model": "unknown",
+                "requestId": request_id,
+                "mode": mode
+            }
+        }
+
+    fallback_reply = _compose_intent_fallback_response(intent=intent, mode=mode, decision_context=decision_context)
+    if provider == "stub" and fallback_reply is not None:
+        logger.info(
+            "[ASSISTANT] request_id=%s provider=stub model=%s route=%s mode=%s intent=%s org=%s user=%s",
+            request_id,
+            model,
+            route,
+            mode,
+            intent,
+            user.organization_id,
+            user.id
+        )
+        return {
+            "reply": _clean_assistant_reply(fallback_reply),
+            "meta": {
+                "provider": "stub",
+                "model": model,
+                "requestId": request_id,
+                "mode": mode
+            }
+        }
+
+    last_topic = _derive_last_topic(messages, question)
+    system_prompt = _build_system_prompt(mode=mode, question=question, has_decision_context=decision_context is not None)
+    user_prompt = _build_user_prompt(
+        route=route,
+        mode=mode,
+        intent=intent,
+        question=question,
+        history=messages,
+        last_topic=last_topic,
+        decision_context=decision_context
+    )
+
+    logger.info(
+        "[ASSISTANT] request_id=%s provider=%s model=%s route=%s mode=%s intent=%s org=%s user=%s decision_id=%s message_count=%d",
+        request_id,
+        provider,
+        model,
+        route,
+        mode,
+        intent,
+        user.organization_id,
+        user.id,
+        decision_id or "none",
+        len(messages)
+    )
+
+    try:
+        reply = _run_assistant_provider(
+            provider=provider,
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            mode=mode,
+            question=question,
+            decision_context=decision_context
+        )
+    except Exception as provider_error:
+        hint = _provider_error_hint(provider, provider_error)
+        logger.error(
+            "[ASSISTANT] request_id=%s provider=error model=%s route=%s mode=%s org=%s user=%s provider_error=%s",
+            request_id,
+            model,
+            route,
+            mode,
+            user.organization_id,
+            user.id,
+            str(provider_error)
+        )
+        return {
+            "reply": f"I could not complete this assistant request because the {provider} provider failed. {hint}",
+            "meta": {
+                "provider": "error",
+                "model": model,
+                "requestId": request_id,
+                "mode": mode
+            }
+        }
+
+    logger.info(
+        "[ASSISTANT] request_id=%s provider=%s model=%s status=ok",
+        request_id,
+        provider,
+        model
+    )
+    return {
+        "reply": _clean_assistant_reply(reply),
+        "meta": {
+            "provider": provider,
+            "model": model,
+            "requestId": request_id,
+            "mode": mode
+        }
+    }
+
 @app.get("/assessment/result/{assessment_id}", response_model=Dict[str, Any])
 async def get_assessment(assessment_id: str, user: AuthUser = Depends(AuthAgent.get_api_key)):
     """
@@ -1617,6 +3428,8 @@ async def assessment_manual(
         content = await file_obj.read()
         try:
             result = tx_parser.parse(content, file_obj.filename)
+            result.source_filename = file_obj.filename
+            result.source_mime_type = file_obj.content_type
             summary_profile = None
             summary_snapshot = {}
             if result.bank_statement_summary:
@@ -3226,6 +5039,65 @@ async def get_assessment_details(
         raise HTTPException(status_code=403, detail="Unauthorized access to this assessment")
         
     return enforce_summary_profile_metrics(assessment)
+
+
+@app.get("/decisions/{decision_id}/documents", response_model=List[DecisionDocumentSummary])
+async def list_decision_documents(
+    decision_id: str,
+    user: AuthUser = Depends(AuthAgent.get_current_user)
+):
+    assessment = Database.get_assessment(decision_id)
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Decision not found")
+    if assessment.organization_id != user.organization_id and user.role != "SUPER_ADMIN":
+        raise HTTPException(status_code=403, detail="Unauthorized access to decision")
+
+    return build_decision_document_rows(assessment)
+
+
+@app.get("/documents/{doc_id}/insight", response_model=DocumentInsight)
+async def get_document_insight(
+    doc_id: str,
+    user: AuthUser = Depends(AuthAgent.get_current_user)
+):
+    cached = Database.get_document_insight(doc_id)
+    if cached:
+        if cached.organizationId != user.organization_id and user.role != "SUPER_ADMIN":
+            raise HTTPException(status_code=403, detail="Unauthorized access to document insight")
+        return cached
+
+    locator = _parse_doc_id(doc_id)
+    if not locator:
+        raise HTTPException(status_code=404, detail="Document insight not found")
+
+    decision_id, source_index, _missing_key = locator
+    assessment = Database.get_assessment(decision_id)
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Decision not found")
+    if assessment.organization_id != user.organization_id and user.role != "SUPER_ADMIN":
+        raise HTTPException(status_code=403, detail="Unauthorized access to decision")
+
+    rows = build_decision_document_rows(assessment)
+    row = next((candidate for candidate in rows if candidate.docId == doc_id), None)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Document insight not found")
+
+    metrics = assessment.metrics if isinstance(assessment.metrics, dict) else {}
+    raw_summaries = metrics.get("document_summaries") if isinstance(metrics.get("document_summaries"), list) else []
+    raw_summary: Dict[str, Any] = {}
+    if source_index is not None and 0 <= source_index < len(raw_summaries):
+        candidate_summary = raw_summaries[source_index]
+        if isinstance(candidate_summary, dict):
+            raw_summary = candidate_summary
+
+    insight = _build_document_insight_payload(
+        assessment=assessment,
+        row=row,
+        summary=raw_summary,
+        source_index=source_index,
+    )
+    Database.save_document_insight(insight)
+    return insight
 
 
 @app.get("/assessment/{assessment_id}/exports", response_model=List[DecisionExport])

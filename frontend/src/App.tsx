@@ -30,7 +30,7 @@ function PrivateRoute({ children }: { children: React.ReactNode }) {
 
 export default function App() {
     return (
-        <BrowserRouter>
+        <BrowserRouter future={{ v7_relativeSplatPath: true }}>
             <Toaster position="top-right" />
             <AuthProvider>
                 <Routes>

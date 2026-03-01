@@ -184,7 +184,7 @@ LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "vertex_ai")
 # Google Vertex AI Configuration
 VERTEX_PROJECT_ID: str = os.getenv("VERTEX_PROJECT_ID", "mfi--pro")
 VERTEX_REGION: str = os.getenv("VERTEX_REGION", "us-central1")
-VERTEX_MODEL_NAME: str = os.getenv("VERTEX_MODEL_NAME", "gemini-1.5-flash")
+VERTEX_MODEL_NAME: str = os.getenv("VERTEX_MODEL_NAME", "gemini-2.0-flash-001")
 
 # API keys (loaded from environment for security)
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")

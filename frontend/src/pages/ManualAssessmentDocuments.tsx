@@ -1,6 +1,6 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Upload, FileText, X, ArrowLeft, CheckCircle2, Pencil } from 'lucide-react';
+import { Upload, FileText, X, ArrowLeft, CheckCircle2, ChevronDown, ChevronUp } from 'lucide-react';
 import { api } from '../context/AuthContext';
 import { requiredColumns, resolveColumnIndex } from '../utils/borrowerUpload';
 
@@ -23,9 +23,20 @@ type RowStatus = {
     assessmentId?: string;
 };
 
+const REQUIRED_DOCUMENT_FIELDS: Array<{
+    field: keyof RowDocs;
+    label: string;
+    accept: string;
+}> = [
+    { field: 'mobile_money_statement', label: 'Mobile Money Statement', accept: '.pdf,.csv' },
+    { field: 'payslip', label: 'Payslip', accept: '.pdf,.jpg,.jpeg,.png' },
+    { field: 'bank_statement', label: 'Bank Statement', accept: '.pdf' }
+];
+const MANDATORY_DOCUMENT_FIELDS: Array<keyof RowDocs> = ['payslip', 'bank_statement'];
+
 export default function ManualAssessmentDocuments() {
     const navigate = useNavigate();
-    const [expandedRow, setExpandedRow] = useState<number | null>(0);
+    const [expandedRow, setExpandedRow] = useState<number | null>(null);
     const [documents, setDocuments] = useState<Record<string, RowDocs>>({});
     const [rowStatus, setRowStatus] = useState<Record<string, RowStatus>>({});
     const [isSubmitting, setIsSubmitting] = useState(false);
@@ -41,8 +52,7 @@ export default function ManualAssessmentDocuments() {
     }, []);
 
     const headers = uploadData?.headers || [];
-    const [editableRows, setEditableRows] = useState<any[][]>(() => (uploadData?.rows || []).map((row) => [...row]));
-    const rows = editableRows;
+    const rows = useMemo(() => (uploadData?.rows || []).map((row) => [...row]), [uploadData]);
     const nameIndex = resolveColumnIndex(headers, 'full_name');
     const phoneIndex = resolveColumnIndex(headers, 'phone');
     const amountIndex = resolveColumnIndex(headers, 'requested_amount');
@@ -63,18 +73,6 @@ export default function ManualAssessmentDocuments() {
 
     const removeDoc = (rowKey: string, field: keyof RowDocs) => {
         handleDocChange(rowKey, field, null);
-    };
-
-    const handleRowFieldChange = (rowIndex: number, key: string, value: string) => {
-        const idx = resolveColumnIndex(headers, key);
-        if (idx === -1) return;
-        setEditableRows((prev) => {
-            const next = [...prev];
-            const nextRow = [...(next[rowIndex] || [])];
-            nextRow[idx] = value;
-            next[rowIndex] = nextRow;
-            return next;
-        });
     };
 
     const getCell = (row: any[], key: string) => {
@@ -111,18 +109,25 @@ export default function ManualAssessmentDocuments() {
         return issues;
     };
 
-    useEffect(() => {
-        if (!uploadData) return;
-        sessionStorage.setItem(
-            'manual_assessment_upload',
-            JSON.stringify({
-                ...uploadData,
-                headers,
-                rows: editableRows,
-                createdAt: new Date().toISOString()
-            })
-        );
-    }, [editableRows, headers, uploadData]);
+    const borrowerProgress = useMemo(() => {
+        return rows.map((_, idx) => {
+            const rowKey = `${idx}`;
+            const rowDocs = documents[rowKey] || {};
+            const uploadedCount = MANDATORY_DOCUMENT_FIELDS.filter((field) => Boolean(rowDocs[field])).length;
+            const requiredCount = MANDATORY_DOCUMENT_FIELDS.length;
+            const hasRequiredDocs = uploadedCount === requiredCount;
+            const hasSubmittedSuccess = rowStatus[rowKey]?.state === 'success';
+            return {
+                uploadedCount,
+                requiredCount,
+                isComplete: hasRequiredDocs || hasSubmittedSuccess
+            };
+        });
+    }, [rows, documents, rowStatus]);
+
+    const completeBorrowers = borrowerProgress.filter((item) => item.isComplete).length;
+    const pendingBorrowers = Math.max(0, rows.length - completeBorrowers);
+    const allBorrowersReady = rows.length > 0 && completeBorrowers === rows.length;
 
     const handleSubmit = async () => {
         if (rows.length === 0 || isSubmitting) return;
@@ -238,209 +243,194 @@ export default function ManualAssessmentDocuments() {
     }
 
     return (
-        <div className="max-w-5xl mx-auto pb-20 space-y-6">
-            <header className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-                <div>
-                    <h1 className="text-2xl font-bold text-slate-900">Attach Supporting Documents</h1>
-                    <p className="text-slate-500">
-                        Excel file: <span className="font-semibold text-slate-700">{uploadData.fileName || 'Unnamed file'}</span>
-                    </p>
+        <div className="max-w-5xl mx-auto pb-20 space-y-7">
+            <header className="space-y-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-primary">
+                    Step 3 of 4 &mdash; Attach Supporting Documents
+                </p>
+                <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                    <div>
+                        <h1 className="text-2xl font-bold text-slate-900">Attach Supporting Documents</h1>
+                        <p className="text-sm text-slate-500">Upload borrower evidence before final submission.</p>
+                    </div>
+                    <button
+                        onClick={() => navigate('/manual-assessments/upload')}
+                        className="text-sm font-semibold text-primary hover:text-primary/80 transition"
+                    >
+                        Back to upload
+                    </button>
                 </div>
-                <button
-                    onClick={() => navigate('/manual-assessments/upload')}
-                    className="text-sm font-semibold text-primary hover:text-primary/80 transition"
-                >
-                    Back to upload
-                </button>
             </header>
 
-            <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
-                <div className="flex flex-wrap items-center gap-3 text-xs text-slate-600">
-                    <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-primary/10 text-primary font-semibold">
-                        <CheckCircle2 size={14} /> {rows.length} borrowers detected
-                    </span>
-                    <span>Attach documents for each borrower below.</span>
+            <section className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm space-y-3">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div className="rounded-xl border border-slate-200 bg-slate-50/60 px-4 py-3">
+                        <p className="text-[11px] uppercase tracking-wider text-slate-500">Borrowers detected</p>
+                        <p className="text-lg font-semibold text-slate-900">{rows.length}</p>
+                    </div>
+                    <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 px-4 py-3">
+                        <p className="text-[11px] uppercase tracking-wider text-emerald-700">Complete</p>
+                        <p className="text-lg font-semibold text-emerald-800">{completeBorrowers}</p>
+                    </div>
+                    <div className="rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-3">
+                        <p className="text-[11px] uppercase tracking-wider text-amber-700">Pending documents</p>
+                        <p className="text-lg font-semibold text-amber-800">{pendingBorrowers}</p>
+                    </div>
                 </div>
                 {missingColumns.length > 0 && (
-                    <div className="mt-3 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
-                        Missing columns detected: {missingColumns.join(', ')}. Those rows will be skipped.
+                    <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+                        Missing columns detected: {missingColumns.join(', ')}. Those rows will be skipped at submission.
                     </div>
                 )}
-            </div>
+            </section>
 
             <div className="space-y-4">
                 {rows.map((row, idx) => {
                     const rowKey = `${idx}`;
-                    const borrowerName = nameIndex >= 0 ? `${row?.[nameIndex] ?? ''}` : `Row ${idx + 2}`;
-                    const phone = phoneIndex >= 0 ? `${row?.[phoneIndex] ?? ''}` : '';
-                    const amount = amountIndex >= 0 ? `${row?.[amountIndex] ?? ''}` : '';
+                    const borrowerName = nameIndex >= 0 ? `${row?.[nameIndex] ?? ''}`.trim() : `Row ${idx + 2}`;
+                    const phone = phoneIndex >= 0 ? `${row?.[phoneIndex] ?? ''}`.trim() : '';
+                    const amount = amountIndex >= 0 ? `${row?.[amountIndex] ?? ''}`.trim() : '';
                     const isOpen = expandedRow === idx;
                     const rowDocs = documents[rowKey] || {};
-                    const attachedFiles = Object.values(rowDocs).filter(Boolean) as File[];
-                    const attachmentCount = attachedFiles.length;
                     const status = rowStatus[rowKey];
+                    const progress = borrowerProgress[idx];
+                    const uploadedCount = progress?.uploadedCount || 0;
+                    const requiredCount = progress?.requiredCount || REQUIRED_DOCUMENT_FIELDS.length;
+                    const documentsComplete = progress?.isComplete || false;
 
                     return (
-                        <div key={rowKey} className="bg-white border border-slate-200 rounded-2xl shadow-sm">
-                            <div className="p-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                        <article key={rowKey} className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
+                            <div className="p-4 md:p-5 border-b border-slate-200 flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                                 <div>
-                                    <div className="text-sm font-semibold text-slate-900">{borrowerName || `Row ${idx + 2}`}</div>
-                                    <div className="text-xs text-slate-500">
-                                        {phone && <span>Phone: {phone}</span>}
-                                        {phone && amount && <span className="mx-2">•</span>}
-                                        {amount && <span>Requested: {amount}</span>}
-                                    </div>
-                                    {status && (
-                                        <div
-                                            className={`mt-1 text-[11px] font-semibold ${status.state === 'success'
+                                    <h2 className="text-sm font-semibold text-slate-900">{borrowerName || `Row ${idx + 2}`}</h2>
+                                    <p className="text-xs text-slate-500 mt-1">
+                                        {phone ? `Phone: ${phone}` : 'Phone: -'} {' • '}
+                                        {amount ? `Requested amount: ${amount}` : 'Requested amount: -'}
+                                    </p>
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <span
+                                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold border ${
+                                            documentsComplete
+                                                ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                                                : 'border-amber-200 bg-amber-50 text-amber-700'
+                                        }`}
+                                    >
+                                        {documentsComplete ? 'Documents complete' : 'Documents incomplete'}
+                                    </span>
+                                    <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-semibold border border-slate-200 bg-slate-50 text-slate-600">
+                                        {uploadedCount}/{requiredCount} required documents uploaded
+                                    </span>
+                                </div>
+                            </div>
+
+                            <div className="p-4 md:p-5 space-y-4">
+                                <div className="flex items-center justify-between gap-2">
+                                    <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">
+                                        Document attachments
+                                    </p>
+                                    {status?.state === 'success' && status.assessmentId && (
+                                        <button
+                                            type="button"
+                                            onClick={() => navigate(`/decisions/${status.assessmentId}`)}
+                                            className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border border-emerald-200 bg-emerald-50 text-xs font-semibold text-emerald-700 hover:border-emerald-300 hover:bg-emerald-100 transition"
+                                        >
+                                            View decision
+                                        </button>
+                                    )}
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                    {REQUIRED_DOCUMENT_FIELDS.map(({ field, label, accept }) => {
+                                        const file = rowDocs[field];
+
+                                        return (
+                                            <div key={field} className="rounded-xl border border-slate-200 bg-white p-3 space-y-2">
+                                                <p className="text-xs font-semibold text-slate-700">{label}</p>
+                                                {!file ? (
+                                                    <label className="flex flex-col items-center justify-center h-24 border-2 border-dashed border-slate-200 rounded-lg hover:border-primary hover:bg-primary/5 cursor-pointer transition-all text-xs text-slate-500">
+                                                        <Upload size={18} className="text-slate-400 mb-1" />
+                                                        Click to upload
+                                                        <input
+                                                            type="file"
+                                                            className="hidden"
+                                                            accept={accept}
+                                                            onChange={(event) =>
+                                                                handleDocChange(rowKey, field, event.target.files?.[0] || null)
+                                                            }
+                                                        />
+                                                    </label>
+                                                ) : (
+                                                    <div className="flex items-center justify-between gap-2 p-2 bg-primary/5 border border-primary/20 rounded-lg">
+                                                        <div className="min-w-0 flex items-center gap-2">
+                                                            <FileText size={16} className="text-primary shrink-0" />
+                                                            <div className="text-[11px] text-slate-700 truncate">{file.name}</div>
+                                                        </div>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => removeDoc(rowKey, field)}
+                                                            className="text-slate-400 hover:text-red-500 transition"
+                                                            aria-label={`Remove ${label}`}
+                                                        >
+                                                            <X size={14} />
+                                                        </button>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+
+                                {status && (
+                                    <div
+                                        className={`text-xs font-semibold ${
+                                            status.state === 'success'
                                                 ? 'text-emerald-600'
                                                 : status.state === 'error'
                                                     ? 'text-red-600'
                                                     : status.state === 'skipped'
                                                         ? 'text-amber-600'
                                                         : 'text-slate-500'
-                                                }`}
-                                        >
-                                            {status.state.toUpperCase()}{status.message ? `: ${status.message}` : ''}
-                                        </div>
-                                    )}
-                                </div>
-                                <div className="flex items-center gap-2">
-                                    <span
-                                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold border ${
-                                            attachmentCount > 0
-                                                ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                                                : 'border-slate-200 bg-slate-50 text-slate-500'
                                         }`}
                                     >
-                                        {attachmentCount > 0 ? `${attachmentCount} attachment${attachmentCount === 1 ? '' : 's'}` : 'No attachments'}
-                                    </span>
-                                    {status?.state === 'success' && status.assessmentId && (
-                                        <button
-                                            onClick={() => navigate(`/decisions/${status.assessmentId}`)}
-                                            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-emerald-200 bg-emerald-50 text-xs font-semibold text-emerald-700 hover:border-emerald-300 hover:bg-emerald-100 transition"
-                                        >
-                                            View decision
-                                        </button>
-                                    )}
-                                    <button
-                                        onClick={() => setExpandedRow(isOpen ? null : idx)}
-                                        className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-700 hover:border-primary hover:text-primary hover:bg-primary/5 transition"
-                                    >
-                                        <Pencil size={14} />
-                                        {isOpen ? 'Hide details' : 'Edit details'}
-                                    </button>
-                                </div>
-                            </div>
-
-                            {isOpen && (
-                                <div className="border-t border-slate-200 p-4 space-y-4">
-                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                                        <div>
-                                            <label className="text-[11px] font-semibold text-slate-600">Full Name</label>
-                                            <input
-                                                value={`${getCell(rows[idx], 'full_name')}`}
-                                                onChange={(event) => handleRowFieldChange(idx, 'full_name', event.target.value)}
-                                                className="mt-1 w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="text-[11px] font-semibold text-slate-600">Phone</label>
-                                            <input
-                                                value={`${getCell(rows[idx], 'phone')}`}
-                                                onChange={(event) => handleRowFieldChange(idx, 'phone', event.target.value)}
-                                                className="mt-1 w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="text-[11px] font-semibold text-slate-600">Employment Type</label>
-                                            <input
-                                                value={`${getCell(rows[idx], 'employment_type')}`}
-                                                onChange={(event) => handleRowFieldChange(idx, 'employment_type', event.target.value)}
-                                                className="mt-1 w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="text-[11px] font-semibold text-slate-600">Monthly Income</label>
-                                            <input
-                                                value={`${getCell(rows[idx], 'monthly_income')}`}
-                                                onChange={(event) => handleRowFieldChange(idx, 'monthly_income', event.target.value)}
-                                                className="mt-1 w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="text-[11px] font-semibold text-slate-600">Monthly Expenses</label>
-                                            <input
-                                                value={`${getCell(rows[idx], 'monthly_expenses')}`}
-                                                onChange={(event) => handleRowFieldChange(idx, 'monthly_expenses', event.target.value)}
-                                                className="mt-1 w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="text-[11px] font-semibold text-slate-600">Requested Amount</label>
-                                            <input
-                                                value={`${getCell(rows[idx], 'requested_amount')}`}
-                                                onChange={(event) => handleRowFieldChange(idx, 'requested_amount', event.target.value)}
-                                                className="mt-1 w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
-                                            />
-                                        </div>
+                                        {status.state.toUpperCase()}
+                                        {status.message ? `: ${status.message}` : ''}
                                     </div>
+                                )}
 
-                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                        {(['mobile_money_statement', 'payslip', 'bank_statement'] as const).map((field) => {
-                                            const label =
-                                                field === 'mobile_money_statement'
-                                                    ? 'Mobile Money Statement'
-                                                    : field === 'payslip'
-                                                        ? 'Payslip'
-                                                        : 'Bank Statement';
-                                            const file = rowDocs[field];
+                                <button
+                                    type="button"
+                                    onClick={() => setExpandedRow(isOpen ? null : idx)}
+                                    className="inline-flex items-center gap-2 text-xs font-semibold text-slate-600 hover:text-primary transition"
+                                >
+                                    {isOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                                    {isOpen ? 'Hide borrower details' : 'View borrower details'}
+                                </button>
 
-                                            return (
-                                                <div key={field} className="space-y-2">
-                                                    <div className="text-xs font-semibold text-slate-700">{label}</div>
-                                                    {!file ? (
-                                                        <label className="flex flex-col items-center justify-center h-24 border-2 border-dashed border-slate-200 rounded-xl hover:border-primary hover:bg-primary/5 cursor-pointer transition-all text-xs text-slate-500">
-                                                            <Upload size={18} className="text-slate-400 mb-1" />
-                                                            Click to upload
-                                                            <input
-                                                                type="file"
-                                                                className="hidden"
-                                                                accept={
-                                                                    field === 'payslip'
-                                                                        ? '.pdf,.jpg,.jpeg,.png'
-                                                                        : field === 'mobile_money_statement'
-                                                                            ? '.pdf,.csv'
-                                                                            : '.pdf'
-                                                                }
-                                                                onChange={(event) =>
-                                                                    handleDocChange(rowKey, field, event.target.files?.[0] || null)
-                                                                }
-                                                            />
-                                                        </label>
-                                                    ) : (
-                                                        <div className="flex items-center justify-between p-2 bg-primary/5 border border-primary/20 rounded-lg">
-                                                            <div className="flex items-center gap-2">
-                                                                <FileText size={16} className="text-primary" />
-                                                                <div className="text-[11px] text-slate-700 truncate max-w-[140px]">
-                                                                    {file.name}
-                                                                </div>
-                                                            </div>
-                                                            <button
-                                                                onClick={() => removeDoc(rowKey, field)}
-                                                                className="text-slate-400 hover:text-red-500"
-                                                            >
-                                                                <X size={14} />
-                                                            </button>
-                                                        </div>
-                                                    )}
+                                {isOpen && (
+                                    <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                                            {[
+                                                ['Full Name', getCell(row, 'full_name')],
+                                                ['Phone', getCell(row, 'phone')],
+                                                ['Employment Type', getCell(row, 'employment_type')],
+                                                ['Monthly Income', getCell(row, 'monthly_income')],
+                                                ['Monthly Expenses', getCell(row, 'monthly_expenses')],
+                                                ['Requested Amount', getCell(row, 'requested_amount')],
+                                                ['Duration (Days)', getCell(row, 'requested_duration_days')],
+                                                ['Loan Purpose', getCell(row, 'loan_purpose')],
+                                                ['National ID', getCell(row, 'national_id')]
+                                            ].map(([label, value]) => (
+                                                <div key={label} className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+                                                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</p>
+                                                    <p className="text-xs text-slate-700 mt-1 break-words">{`${value || '-'}`}</p>
                                                 </div>
-                                            );
-                                        })}
+                                            ))}
+                                        </div>
                                     </div>
-                                </div>
-                            )}
-                        </div>
+                                )}
+                            </div>
+                        </article>
                     );
                 })}
             </div>
@@ -449,17 +439,32 @@ export default function ManualAssessmentDocuments() {
                 <div>
                     <h2 className="text-lg font-semibold">Ready to submit?</h2>
                     <p className="text-xs text-slate-300">
-                        Submit the assessments with any attached documents.
+                        {allBorrowersReady
+                            ? 'All borrowers ready for submission'
+                            : `${pendingBorrowers} borrower${pendingBorrowers === 1 ? '' : 's'} still missing required documents`}
                     </p>
                 </div>
-                <button
-                    onClick={handleSubmit}
-                    disabled={isSubmitting || rows.length === 0}
-                    className="bg-white/15 text-white px-4 py-2 rounded-xl text-sm font-semibold transition hover:bg-white/25 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                    {isSubmitting ? 'Submitting...' : 'Submit assessments'}
-                </button>
+                <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
+                    <span
+                        className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-semibold border ${
+                            allBorrowersReady
+                                ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                                : 'border-amber-200 bg-amber-50 text-amber-700'
+                        }`}
+                    >
+                        <CheckCircle2 size={14} />
+                        {allBorrowersReady ? 'All borrowers ready for submission' : 'Documents still pending'}
+                    </span>
+                    <button
+                        onClick={handleSubmit}
+                        disabled={isSubmitting || rows.length === 0}
+                        className="bg-white/15 text-white px-4 py-2 rounded-xl text-sm font-semibold transition hover:bg-white/25 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                        {isSubmitting ? 'Submitting...' : 'Submit assessments'}
+                    </button>
+                </div>
             </div>
         </div>
     );
 }
+

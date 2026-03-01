@@ -196,6 +196,44 @@ Returns current feature flag configuration
 #### `POST /config/flags/update` (SUPER_ADMIN only)
 Dynamically update feature flags at runtime
 
+### Decision Copilot API (Partner Console)
+
+#### `POST /api/assistant/chat`
+> Internally implemented as `/assistant/chat`; `/api` prefix is supported by middleware.
+
+Request body:
+```json
+{
+  "messages": [
+    { "role": "user", "content": "Explain this recommendation" }
+  ],
+  "context": {
+    "route": "/decisions/ASMT-12345",
+    "decisionId": "ASMT-12345",
+    "policyVersion": "v1.2.0-human-first",
+    "orgId": "DEFAULT_ORG",
+    "userRole": "OFFICER"
+  }
+}
+```
+
+Response:
+```json
+{
+  "reply": "Summary\n- ...\n\nKey Drivers\n- ..."
+}
+```
+
+Implementation notes:
+- Decision context assembly is in `api.py` via `_build_assistant_decision_bundle(...)`.
+- The endpoint enforces auth (`AuthAgent.get_current_user`), org scoping, and per-user/org rate limiting.
+- Assistant answers are constrained to known persisted context and explicitly state when data is unavailable.
+
+Streaming extension path:
+- Add `POST /assistant/chat/stream` using Server-Sent Events.
+- Reuse the same request contract and emit incremental `reply_delta` chunks.
+- Keep the same context assembly and scoping guards before opening the stream.
+
 ---
 
 ## Deployment Strategy

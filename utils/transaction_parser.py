@@ -8,7 +8,11 @@ logger = logging.getLogger(__name__)
 try:
     import PyPDF2
 except ImportError:
-    PyPDF2 = None
+    try:
+        # Support newer package naming where pypdf is installed instead of PyPDF2.
+        import pypdf as PyPDF2
+    except ImportError:
+        PyPDF2 = None
 try:
     from PIL import Image
     import pytesseract
@@ -128,8 +132,8 @@ class TransactionParser:
         lower_name = filename.lower()
         if lower_name.endswith('.pdf'):
             if not PyPDF2:
-                 logger.warning("WARNING: PyPDF2 not installed. Cannot parse PDF.")
-                 return None
+                 logger.warning("WARNING: PDF parser dependency missing (PyPDF2/pypdf). Attempting OCR fallback.")
+                 return self._extract_text_from_pdf_ocr(content)
             try:
                 reader = PyPDF2.PdfReader(io.BytesIO(content))
                 extracted = "".join(page.extract_text() or "" for page in reader.pages)
