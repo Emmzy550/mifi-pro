@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
 import {
     LayoutDashboard,
@@ -13,12 +13,22 @@ import {
     ClipboardList,
     SlidersHorizontal,
     Users,
+    Bell,
     Moon,
     Sun,
     type LucideIcon
 } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
+import { api, useAuth } from '../context/AuthContext';
 import DecisionCopilot from './DecisionCopilot';
+
+/*
+Design rule:
+No decorative background effects.
+No particles.
+No animated noise.
+This system serves regulated financial institutions.
+Maintain conservative visual discipline.
+*/
 
 type NavItem = {
     label: string;
@@ -38,9 +48,10 @@ const NAV_SECTIONS: NavSection[] = [
     {
         title: 'Core',
         items: [
-            { label: 'Overview', href: '/', icon: LayoutDashboard },
+            { label: 'Overview', href: '/dashboard', icon: LayoutDashboard },
             { label: 'Manual Assessments', href: '/manual-assessments', icon: ClipboardList },
-            { label: 'Decisions', href: '/decisions', icon: FileText }
+            { label: 'Decisions', href: '/decisions', icon: FileText },
+            { label: 'Notifications', href: '/notifications', icon: Bell }
         ]
     },
     {
@@ -83,9 +94,19 @@ const formatRoleLabel = (role?: string) => {
     return normalized.replace(/\b\w/g, (char) => char.toUpperCase());
 };
 
-function SidebarNavItem({ item, pathname }: { item: NavItem; pathname: string }) {
+function SidebarNavItem({
+    item,
+    pathname,
+    unreadNotificationCount
+}: {
+    item: NavItem;
+    pathname: string;
+    unreadNotificationCount: number;
+}) {
     const Icon = item.icon;
     const active = isRouteActive(pathname, item.href);
+    const showBadge = item.href === '/notifications' && unreadNotificationCount > 0;
+    const displayCount = unreadNotificationCount > 99 ? '99+' : String(unreadNotificationCount);
 
     return (
         <Link
@@ -98,6 +119,11 @@ function SidebarNavItem({ item, pathname }: { item: NavItem; pathname: string })
             <span aria-hidden className={`sidebar-item-accent ${active ? 'sidebar-item-accent-active' : ''}`} />
             <Icon size={18} className="sidebar-item-icon" />
             <span className="truncate">{item.label}</span>
+            {showBadge && (
+                <span className="ml-auto inline-flex min-w-[20px] items-center justify-center rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                    {displayCount}
+                </span>
+            )}
         </Link>
     );
 }
@@ -105,11 +131,13 @@ function SidebarNavItem({ item, pathname }: { item: NavItem; pathname: string })
 function SidebarSectionBlock({
     section,
     pathname,
-    role
+    role,
+    unreadNotificationCount
 }: {
     section: NavSection;
     pathname: string;
     role: string;
+    unreadNotificationCount: number;
 }) {
     const items = section.items.filter((item) => (item.visible ? item.visible(role) : true));
     if (items.length === 0) return null;
@@ -119,7 +147,12 @@ function SidebarSectionBlock({
             <h2 className="sidebar-section-title">{section.title}</h2>
             <div className="mt-2 space-y-1">
                 {items.map((item) => (
-                    <SidebarNavItem key={item.href} item={item} pathname={pathname} />
+                    <SidebarNavItem
+                        key={item.href}
+                        item={item}
+                        pathname={pathname}
+                        unreadNotificationCount={unreadNotificationCount}
+                    />
                 ))}
             </div>
         </section>
@@ -132,6 +165,7 @@ export default function Layout() {
     const navigate = useNavigate();
     const [isDarkMode, setIsDarkMode] = useState(false);
     const [isCopilotDockedOpen, setIsCopilotDockedOpen] = useState(false);
+    const [unreadNotificationCount, setUnreadNotificationCount] = useState(0);
 
     const role = (user?.role || '').toUpperCase();
     const visibleSections = useMemo(
@@ -154,6 +188,38 @@ export default function Layout() {
         document.documentElement.classList.toggle('dark', isDarkMode);
         localStorage.setItem('ui-theme', isDarkMode ? 'dark' : 'light');
     }, [isDarkMode]);
+
+    const fetchUnreadCount = useCallback(async () => {
+        if (!user?.id) return;
+        try {
+            const res = await api.get('/org/notifications/unread-count');
+            const nextCount = Number(res.data?.count || 0);
+            setUnreadNotificationCount(Number.isFinite(nextCount) ? nextCount : 0);
+        } catch (err) {
+            console.error('Failed to fetch unread notifications', err);
+        }
+    }, [user?.id]);
+
+    useEffect(() => {
+        let intervalHandle: ReturnType<typeof setInterval> | null = null;
+
+        const handleVisibilityChange = () => {
+            if (!document.hidden) fetchUnreadCount();
+        };
+
+        fetchUnreadCount();
+        intervalHandle = setInterval(fetchUnreadCount, 5000);
+        window.addEventListener('focus', fetchUnreadCount);
+        window.addEventListener('notifications:refresh', fetchUnreadCount as EventListener);
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+
+        return () => {
+            if (intervalHandle) clearInterval(intervalHandle);
+            window.removeEventListener('focus', fetchUnreadCount);
+            window.removeEventListener('notifications:refresh', fetchUnreadCount as EventListener);
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
+        };
+    }, [fetchUnreadCount, location.pathname]);
 
     const handleLogout = () => {
         logout();
@@ -181,6 +247,7 @@ export default function Layout() {
                                 section={section}
                                 pathname={location.pathname}
                                 role={role}
+                                unreadNotificationCount={unreadNotificationCount}
                             />
                         ))}
                     </div>

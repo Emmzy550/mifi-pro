@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { api } from '../context/AuthContext';
+import { api, useAuth } from '../context/AuthContext';
 import {
     ArrowLeft,
     ShieldCheck,
@@ -56,6 +56,14 @@ interface DocumentInsightPayload {
     secureFileUrl?: string | null;
 }
 
+interface ReferralTarget {
+    id: string;
+    full_name: string;
+    email: string;
+    role: string;
+    is_self?: boolean;
+}
+
 const ELEVATION_ONE = 'shadow-elevation-1';
 const ELEVATION_TWO = 'shadow-elevation-2';
 const TRANSITION_150 = 'transition-[background-color,border-color,color,box-shadow] duration-150 ease-in-out';
@@ -98,6 +106,7 @@ const docTypeIcon = (type: string) => {
 export default function DecisionReview() {
     const { assessmentId } = useParams();
     const navigate = useNavigate();
+    const { user } = useAuth();
 
     const [assessment, setAssessment] = useState<any>(null);
     const [loading, setLoading] = useState(true);
@@ -137,6 +146,11 @@ export default function DecisionReview() {
     const [documentInsights, setDocumentInsights] = useState<Record<string, DocumentInsightPayload>>({});
     const [insightLoading, setInsightLoading] = useState(false);
     const [insightError, setInsightError] = useState<string | null>(null);
+    const [referralTargets, setReferralTargets] = useState<ReferralTarget[]>([]);
+    const [referralLoading, setReferralLoading] = useState(false);
+    const [referredToUserId, setReferredToUserId] = useState('');
+    const [referralRetried, setReferralRetried] = useState(false);
+    const [referralError, setReferralError] = useState<string | null>(null);
 
     const normalizeDecision = (value?: string) => {
         if (!value) return undefined;
@@ -149,31 +163,53 @@ export default function DecisionReview() {
     const getAiBorrowerMessage = (data?: any) =>
         data?.customer_message?.summary || data?.customer_view || '';
 
+    const hydrateAssessmentState = (data: any) => {
+        setAssessment(data);
+        const aiMessage = getAiBorrowerMessage(data);
+
+        if (data.final_decision_metadata) {
+            const fd = data.final_decision_metadata;
+            const normalized = normalizeDecision(fd.officer_decision || fd.decision);
+            setVerdict(normalized === 'APPROVE' ? 'APPROVE' : 'REFER');
+            setAmount(fd.final_amount ?? 0);
+            setDuration(fd.final_duration_days ?? 30);
+            setRate(fd.final_interest_rate ?? 15.0);
+            setNotes(fd.officer_notes || '');
+            setOverrideReason(fd.override_reason_code || '');
+            setReferredToUserId(fd.referred_to_user_id || '');
+            setMessage(aiMessage);
+            return;
+        }
+
+        const pendingReferral = data.pending_referral_metadata;
+        if (pendingReferral) {
+            setVerdict('REFER');
+            setAmount(data.recommended_amount || 0);
+            setDuration(data.recommended_duration_days || 30);
+            setRate(data.recommended_interest_rate || 15.0);
+            setNotes(pendingReferral.officer_notes || '');
+            setOverrideReason(pendingReferral.override_reason_code || '');
+            setReferredToUserId(pendingReferral.referred_to_user_id || '');
+            setMessage(aiMessage);
+            return;
+        }
+
+        const normalized = normalizeDecision(data.decision);
+        setVerdict(normalized === 'APPROVE' ? 'APPROVE' : 'REFER');
+        setAmount(data.recommended_amount || 0);
+        setDuration(data.recommended_duration_days || 30);
+        setRate(data.recommended_interest_rate || 15.0);
+        setNotes('');
+        setOverrideReason('');
+        setReferredToUserId('');
+        setMessage(aiMessage);
+    };
+
     useEffect(() => {
         const fetchAssessment = async () => {
             try {
                 const res = await api.get(`/assessment/${assessmentId}`);
-                const data = res.data;
-                setAssessment(data);
-
-                if (data.final_decision_metadata) {
-                    const fd = data.final_decision_metadata;
-                    const normalized = normalizeDecision(fd.officer_decision || fd.decision);
-                    setVerdict(normalized === 'APPROVE' ? 'APPROVE' : 'REFER');
-                    setAmount(fd.final_amount ?? 0);
-                    setDuration(fd.final_duration_days ?? 30);
-                    setRate(fd.final_interest_rate ?? 15.0);
-                    setNotes(fd.officer_notes || '');
-                    setOverrideReason(fd.override_reason_code || '');
-                    setMessage(getAiBorrowerMessage(data));
-                } else {
-                    const normalized = normalizeDecision(data.decision);
-                    setVerdict(normalized === 'APPROVE' ? 'APPROVE' : 'REFER');
-                    setAmount(data.recommended_amount || 0);
-                    setDuration(data.recommended_duration_days || 30);
-                    setRate(data.recommended_interest_rate || 15.0);
-                    setMessage(getAiBorrowerMessage(data));
-                }
+                hydrateAssessmentState(res.data);
             } catch (err) {
                 toast.error('Failed to load assessment details');
                 console.error(err);
@@ -206,10 +242,46 @@ export default function DecisionReview() {
             }
         };
 
+        const fetchReferralTargets = async () => {
+            setReferralLoading(true);
+            setReferralError(null);
+            try {
+                const res = await api.get('/org/referral-targets');
+                setReferralTargets(Array.isArray(res.data?.targets) ? res.data.targets : []);
+            } catch (err) {
+                console.error('Failed to fetch referral targets', err);
+                setReferralTargets([]);
+                setReferralError('Failed to load team members. Check API connection and refresh.');
+            } finally {
+                setReferralLoading(false);
+            }
+        };
+
+        setReferralRetried(false);
         fetchAssessment();
         fetchDecisionDocuments();
         fetchSmsLogs();
+        fetchReferralTargets();
     }, [assessmentId]);
+
+    useEffect(() => {
+        if (verdict !== 'REFER' || referralLoading || referralTargets.length > 0 || referralRetried) return;
+        const retryFetchReferralTargets = async () => {
+            setReferralLoading(true);
+            setReferralError(null);
+            try {
+                const res = await api.get('/org/referral-targets');
+                setReferralTargets(Array.isArray(res.data?.targets) ? res.data.targets : []);
+            } catch (err) {
+                console.error('Failed to re-fetch referral targets', err);
+                setReferralError('Failed to load team members. Check API connection and refresh.');
+            } finally {
+                setReferralLoading(false);
+                setReferralRetried(true);
+            }
+        };
+        retryFetchReferralTargets();
+    }, [verdict, referralLoading, referralTargets.length, referralRetried]);
 
     useEffect(() => {
         const fetchFollowUps = async () => {
@@ -231,6 +303,33 @@ export default function DecisionReview() {
         () => (selectedDocId ? documentInsights[selectedDocId] : undefined),
         [selectedDocId, documentInsights]
     );
+    const effectiveReferralTargets = useMemo(() => {
+        if (referralTargets.length > 0) return referralTargets;
+
+        const fallbacks: ReferralTarget[] = [];
+        if (user?.id && user?.email) {
+            fallbacks.push({
+                id: user.id,
+                full_name: user.full_name || user.email,
+                email: user.email,
+                role: String(user.role || 'OFFICER').toUpperCase(),
+                is_self: true
+            });
+        }
+        if ((user?.organization_id || '').toUpperCase() === 'PLATFORM_OWNER') {
+            fallbacks.push({
+                id: 'platform_admin_fallback',
+                full_name: 'Platform Super Admin',
+                email: 'admin@platform.com',
+                role: 'SUPER_ADMIN',
+                is_self: false
+            });
+        }
+
+        return fallbacks.filter((target, index, arr) =>
+            arr.findIndex((item) => item.id === target.id || item.email === target.email) === index
+        );
+    }, [referralTargets, user]);
     const selectedDocument = useMemo(
         () => decisionDocuments.find((doc) => doc.docId === selectedDocId),
         [decisionDocuments, selectedDocId]
@@ -244,6 +343,22 @@ export default function DecisionReview() {
     const readiness = assessment?.metrics?.readiness ?? true;
     const missingDocuments = assessment?.metrics?.missing_documents ?? [];
     const isSealed = !!assessment?.final_decision_metadata;
+    const pendingReferral = !isSealed && assessment?.pending_referral_metadata ? assessment.pending_referral_metadata : null;
+    const pendingReferralAssigneeId = pendingReferral?.referred_to_user_id || '';
+    const pendingReferralAssigneeName =
+        pendingReferral?.referred_to_user_name ||
+        pendingReferral?.referred_to_user_email ||
+        'Assigned team member';
+    const canResolvePendingReferral =
+        !pendingReferral ||
+        !pendingReferralAssigneeId ||
+        pendingReferralAssigneeId === user?.id ||
+        String(user?.role || '').toUpperCase() === 'SUPER_ADMIN';
+    const decisionLocked = isSealed || !canResolvePendingReferral;
+    const isReferralPending = !!pendingReferral;
+    const isReferAction = verdict === 'REFER' && !isSealed;
+    const primaryActionLabel = isReferAction ? 'Send Referral' : 'Seal Final Decision';
+    const primaryActionBusyLabel = isReferAction ? 'Sending Referral...' : 'Archiving...';
 
     const isOverride = !isSealed
         ? verdict !== normalizeDecision(assessment?.decision) ||
@@ -282,6 +397,10 @@ export default function DecisionReview() {
     };
     const handleSealDecision = async () => {
         if (!assessmentId || !assessment) return;
+        if (decisionLocked) {
+            toast.error('Only the assigned referral officer can edit and finalize this decision.');
+            return;
+        }
 
         if (!confirmed && !isSealed) {
             toast.error('Please confirm compliance before sealing.');
@@ -295,22 +414,35 @@ export default function DecisionReview() {
             toast.error('Additional instructions are required when referring a case.');
             return;
         }
+        if (verdict === 'REFER' && !referredToUserId) {
+            toast.error('Please select a team member to refer this case to.');
+            return;
+        }
 
         setSubmitting(true);
         try {
-            const res = await api.post(`/assessment/${assessmentId}/officer-action`, {
+            const selectedReferralTarget = effectiveReferralTargets.find((target) => target.id === referredToUserId);
+            await api.post(`/assessment/${assessmentId}/officer-action`, {
                 officer_decision: verdict,
                 final_amount: amount,
                 final_duration: duration,
                 final_interest_rate: rate,
                 officer_notes: notes,
                 override_reason_code: isOverride ? overrideReason : undefined,
+                referred_to_user_id: verdict === 'REFER' ? referredToUserId : undefined,
+                referred_to_user_name: verdict === 'REFER' ? selectedReferralTarget?.full_name : undefined,
+                referred_to_user_email: verdict === 'REFER' ? selectedReferralTarget?.email : undefined,
                 borrower_message: message,
                 communication_channel: sendSms ? 'SMS' : 'NONE',
                 confirmed_compliance: true
             });
-            setAssessment({ ...assessment, final_decision_metadata: res.data });
-            toast.success('Decision successfully sealed and archived.');
+            const latest = await api.get(`/assessment/${assessmentId}`);
+            hydrateAssessmentState(latest.data);
+            toast.success(
+                verdict === 'REFER'
+                    ? 'Referral sent. Assigned officer can now review and finalize.'
+                    : 'Decision successfully sealed and archived.'
+            );
         } catch (err: any) {
             toast.error(err.response?.data?.detail || 'Failed to seal decision');
         } finally {
@@ -446,8 +578,16 @@ export default function DecisionReview() {
                     </div>
                     <div>
                         <p className="text-[10px] uppercase tracking-wider text-ui-meta">Current status</p>
-                        <p className={`${BADGE_BASE} mt-0.5 ${isSealed ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
-                            {isSealed ? 'SEALED' : 'PENDING_OFFICER'}
+                        <p
+                            className={`${BADGE_BASE} mt-0.5 ${
+                                isSealed
+                                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                                    : isReferralPending
+                                      ? 'border-amber-200 bg-amber-50 text-amber-700'
+                                      : 'border-slate-200 bg-slate-50 text-slate-600'
+                            }`}
+                        >
+                            {isSealed ? 'SEALED' : isReferralPending ? 'REFERRED_PENDING' : 'PENDING_OFFICER'}
                         </p>
                     </div>
                     <div>
@@ -473,6 +613,21 @@ export default function DecisionReview() {
                 <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900 text-sm">
                     Assessment readiness is incomplete.
                     {missingDocuments.length > 0 ? ` Missing: ${missingDocuments.join(', ')}.` : ''}
+                </div>
+            )}
+
+            {isReferralPending && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                    <p className="font-semibold">Referral in progress</p>
+                    <p className="mt-1">
+                        Assigned to: <span className="font-medium">{pendingReferralAssigneeName}</span>
+                        {pendingReferral?.referred_at ? ` - ${new Date(pendingReferral.referred_at).toLocaleString()}` : ''}
+                    </p>
+                    {!canResolvePendingReferral && (
+                        <p className="mt-1">
+                            You can review this case, but only the assigned officer can edit and seal the final decision.
+                        </p>
+                    )}
                 </div>
             )}
 
@@ -631,22 +786,24 @@ export default function DecisionReview() {
                             <button
                                 type="button"
                                 onClick={() => setVerdict('APPROVE')}
+                                disabled={decisionLocked}
                                 className={`sm:flex-1 rounded-xl px-5 py-3 text-sm font-semibold ${TRANSITION_150} ${FOCUS_RING} ${
                                     verdict === 'APPROVE'
                                         ? 'bg-primary text-white hover:bg-primary/90'
                                         : 'bg-primary/10 text-primary hover:bg-primary/20'
-                                }`}
+                                } disabled:opacity-50 disabled:cursor-not-allowed`}
                             >
                                 Approve
                             </button>
                             <button
                                 type="button"
                                 onClick={() => setVerdict('REFER')}
+                                disabled={decisionLocked}
                                 className={`sm:flex-1 rounded-xl border px-5 py-3 text-sm font-semibold ${TRANSITION_150} ${FOCUS_RING} ${
                                     verdict === 'REFER'
                                         ? 'border-primary/40 bg-primary/5 text-primary'
                                         : 'border-subtle text-ui-secondary hover:border-primary/40 hover:text-primary hover:bg-primary/5'
-                                }`}
+                                } disabled:opacity-50 disabled:cursor-not-allowed`}
                             >
                                 Refer
                             </button>
@@ -662,6 +819,7 @@ export default function DecisionReview() {
                                         type="number"
                                         value={amount}
                                         onChange={(e) => setAmount(Number(e.target.value))}
+                                        disabled={decisionLocked}
                                         className={`mt-1 w-full rounded-xl border border-subtle bg-surface-2 px-3 py-2 text-sm text-ui-primary ${TRANSITION_150} ${FOCUS_RING}`}
                                     />
                                 </div>
@@ -671,6 +829,7 @@ export default function DecisionReview() {
                                         type="number"
                                         value={duration}
                                         onChange={(e) => setDuration(Number(e.target.value))}
+                                        disabled={decisionLocked}
                                         className={`mt-1 w-full rounded-xl border border-subtle bg-surface-2 px-3 py-2 text-sm text-ui-primary ${TRANSITION_150} ${FOCUS_RING}`}
                                     />
                                 </div>
@@ -681,6 +840,7 @@ export default function DecisionReview() {
                                         step="0.1"
                                         value={rate}
                                         onChange={(e) => setRate(Number(e.target.value))}
+                                        disabled={decisionLocked}
                                         className={`mt-1 w-full rounded-xl border border-subtle bg-surface-2 px-3 py-2 text-sm text-ui-primary ${TRANSITION_150} ${FOCUS_RING}`}
                                     />
                                 </div>
@@ -691,6 +851,7 @@ export default function DecisionReview() {
                                     rows={3}
                                     value={notes}
                                     onChange={(e) => setNotes(e.target.value)}
+                                    disabled={decisionLocked}
                                     className={`mt-1 w-full rounded-xl border border-subtle bg-surface-2 px-3 py-2 text-sm text-ui-primary ${TRANSITION_150} ${FOCUS_RING}`}
                                     placeholder="Add internal rationale (optional unless override/referral)."
                                 />
@@ -700,10 +861,42 @@ export default function DecisionReview() {
                     {verdict === 'REFER' && (
                         <div className="space-y-4 rounded-2xl border border-subtle bg-surface-1 p-6">
                             <div>
+                                <label className="text-[11px] font-semibold uppercase tracking-wider text-ui-meta">Refer to team member</label>
+                                <select
+                                    value={referredToUserId}
+                                    onChange={(e) => setReferredToUserId(e.target.value)}
+                                    disabled={decisionLocked}
+                                    className={`mt-1 w-full rounded-xl border border-subtle bg-surface-2 px-3 py-2 text-sm text-ui-primary ${TRANSITION_150} ${FOCUS_RING}`}
+                                >
+                                    <option value="">
+                                        {referralLoading ? 'Loading team members...' : 'Select team member'}
+                                    </option>
+                                    {referredToUserId && !effectiveReferralTargets.some((member) => member.id === referredToUserId) && (
+                                        <option value={referredToUserId}>Previously selected team member</option>
+                                    )}
+                                    {effectiveReferralTargets.map((member) => (
+                                        <option key={member.id} value={member.id}>
+                                            {member.full_name} ({member.role}){member.is_self ? ' - You' : ''} - {member.email}
+                                        </option>
+                                    ))}
+                                </select>
+                                {referralError && (
+                                    <p className="mt-1 text-xs text-rose-600">
+                                        {referralError}
+                                    </p>
+                                )}
+                                {!referralLoading && effectiveReferralTargets.length === 0 && (
+                                    <p className="mt-1 text-xs text-ui-meta">
+                                        No eligible team members found for referral in your organization.
+                                    </p>
+                                )}
+                            </div>
+                            <div>
                                 <label className="text-[11px] font-semibold uppercase tracking-wider text-ui-meta">Refer reason</label>
                                 <input
                                     value={overrideReason}
                                     onChange={(e) => setOverrideReason(e.target.value)}
+                                    disabled={decisionLocked}
                                     className={`mt-1 w-full rounded-xl border border-subtle bg-surface-2 px-3 py-2 text-sm text-ui-primary ${TRANSITION_150} ${FOCUS_RING}`}
                                     placeholder="e.g. DOCUMENT_GAP, MANUAL_REVIEW_REQUIRED"
                                 />
@@ -714,6 +907,7 @@ export default function DecisionReview() {
                                     rows={4}
                                     value={notes}
                                     onChange={(e) => setNotes(e.target.value)}
+                                    disabled={decisionLocked}
                                     className={`mt-1 w-full rounded-xl border border-subtle bg-surface-2 px-3 py-2 text-sm text-ui-primary ${TRANSITION_150} ${FOCUS_RING}`}
                                     placeholder="Specify what additional checks or documents are needed."
                                 />
@@ -725,6 +919,7 @@ export default function DecisionReview() {
                         <button
                             type="button"
                             onClick={() => setShowMoreActions((prev) => !prev)}
+                            disabled={decisionLocked}
                             className={`inline-flex items-center gap-2 rounded-xl border border-subtle bg-surface-1 px-3 py-2 text-xs font-semibold text-ui-secondary hover:border-primary/40 hover:text-primary hover:bg-primary/5 ${TRANSITION_150} ${FOCUS_RING}`}
                         >
                             More actions
@@ -777,13 +972,14 @@ export default function DecisionReview() {
                                 rows={3}
                                 value={message}
                                 onChange={(e) => setMessage(e.target.value)}
+                                disabled={decisionLocked}
                                 className={`w-full rounded-xl border border-subtle bg-surface-2 px-3 py-2 text-sm text-ui-primary ${TRANSITION_150} ${FOCUS_RING}`}
                                 placeholder="Borrower-facing message"
                             />
                             <button
                                 type="button"
                                 onClick={handleSendSms}
-                                disabled={smsSending}
+                                disabled={smsSending || decisionLocked}
                                 className={`inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-60 ${TRANSITION_150} ${FOCUS_RING}`}
                             >
                                 {smsSending ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
@@ -793,9 +989,11 @@ export default function DecisionReview() {
                     )}
 
                     <div className="rounded-2xl border border-subtle bg-surface-1 px-6 py-6 text-center space-y-4">
-                        <h3 className="text-lg font-semibold text-ui-primary">Seal Final Decision</h3>
+                        <h3 className="text-lg font-semibold text-ui-primary">{isReferAction ? 'Send Referral' : 'Seal Final Decision'}</h3>
                         <p className="text-sm text-ui-secondary max-w-xl mx-auto">
-                            This action will archive the assessment and generate an audit record.
+                            {isReferAction
+                                ? 'This will notify the assigned officer and keep the case open for final adjudication.'
+                                : 'This action will archive the assessment and generate an audit record.'}
                         </p>
 
                         {!isSealed && (
@@ -804,6 +1002,7 @@ export default function DecisionReview() {
                                     type="checkbox"
                                     checked={confirmed}
                                     onChange={(e) => setConfirmed(e.target.checked)}
+                                    disabled={decisionLocked}
                                     className={`mt-0.5 rounded border-slate-200 ${FOCUS_RING}`}
                                 />
                                 I confirm this decision complies with institutional policy and audit controls.
@@ -813,11 +1012,11 @@ export default function DecisionReview() {
                         <button
                             type="button"
                             onClick={handleSealDecision}
-                            disabled={submitting}
+                            disabled={submitting || decisionLocked}
                             className={`mx-auto inline-flex items-center justify-center gap-2 rounded-xl bg-primary px-8 py-4 text-base font-semibold text-white hover:bg-primary/90 disabled:opacity-60 ${TRANSITION_150} ${FOCUS_RING}`}
                         >
                             {submitting ? <Loader2 className="animate-spin" size={18} /> : <ShieldCheck size={18} />}
-                            {submitting ? 'Archiving...' : 'Seal Final Decision'}
+                            {submitting ? primaryActionBusyLabel : primaryActionLabel}
                         </button>
 
                         <div className="flex flex-wrap justify-center gap-2 pt-2 text-[11px] text-ui-meta">

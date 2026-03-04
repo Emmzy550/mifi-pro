@@ -113,6 +113,7 @@ class Assessment(BaseModel):
     
     # Authoritative Human Decision (Sealing)
     final_decision_metadata: Optional[dict] = Field(default=None, description="The authoritative verdict recorded by a human officer.")
+    pending_referral_metadata: Optional[dict] = Field(default=None, description="Open referral handoff metadata while awaiting assigned officer review.")
     
     # Creation Timestamp
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="When the assessment object was created")

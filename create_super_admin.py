@@ -20,14 +20,19 @@ if not plat_org:
     plat_org = Organization(
         id="PLATFORM_OWNER",
         name="Loan Officer AI Platform",
-        plan_name=BillingPlan.ENTERPRISE,
-        monthly_limit=1000000,
+        plan=BillingPlan.ENTERPRISE,
+        monthly_limit=100000,
         status=OrgStatus.ACTIVE
     )
     Database.save_organization(plat_org)
     print("Created PLATFORM_OWNER org.")
 else:
-    print("PLATFORM_OWNER org exists.")
+    print("PLATFORM_OWNER org exists. Ensuring enterprise plan and expected limit...")
+    plat_org.plan = BillingPlan.ENTERPRISE
+    plat_org.monthly_limit = 100000
+    plat_org.status = OrgStatus.ACTIVE
+    Database.save_organization(plat_org)
+    print("PLATFORM_OWNER org updated.")
 
 print(f"Checking for existing user: {email}...")
 existing = Database.get_user_by_email(email)

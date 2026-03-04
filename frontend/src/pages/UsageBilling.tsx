@@ -233,7 +233,7 @@ export default function UsageBilling() {
                         color="blue"
                     />
                     {usage.payment_status !== 'PAID' && (
-                        <div className="absolute inset-0 bg-white/60 backdrop-blur-[2px] rounded-lg flex flex-col items-center justify-center text-center p-6 border-2 border-dashed border-slate-200">
+                        <div className="absolute inset-0 bg-white/60 rounded-lg flex flex-col items-center justify-center text-center p-6 border-2 border-dashed border-slate-200">
                             <div className="w-12 h-12 bg-slate-100 rounded-full flex items-center justify-center mb-3 text-slate-400">
                                 <Shield size={24} />
                             </div>
@@ -369,7 +369,7 @@ export default function UsageBilling() {
 
             {/* Payment Gateway Modal */}
             {showPaymentModal && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60">
                     <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-200">
                         {/* Modal Header */}
                         <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">

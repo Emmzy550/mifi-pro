@@ -37,7 +37,7 @@ export default function AdminDashboard() {
 
     useEffect(() => {
         if (user && user.role !== 'SUPER_ADMIN') {
-            navigate('/');
+            navigate('/dashboard');
             return;
         }
 
@@ -669,7 +669,7 @@ export default function AdminDashboard() {
             {/* Click-away backdrop */}
             {selectedOrgId && (
                 <div
-                    className="fixed inset-0 bg-slate-900/20 backdrop-blur-[1px] z-40 transition-opacity"
+                    className="fixed inset-0 bg-slate-900/20 z-40 transition-opacity"
                     onClick={() => setSelectedOrgId(null)}
                 />
             )}

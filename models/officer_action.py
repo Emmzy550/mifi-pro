@@ -28,6 +28,9 @@ class OfficerAction(BaseModel):
     final_interest_rate: float = Field(..., description="The final interest rate approved by the officer")
     is_override: bool = Field(False, description="Whether this decision overrode the AI recommendation")
     override_reason_code: Optional[str] = Field(None, description="Reason code for override decisions")
+    referred_to_user_id: Optional[str] = Field(None, description="Team member ID the case was referred to")
+    referred_to_user_name: Optional[str] = Field(None, description="Team member name the case was referred to")
+    referred_to_user_email: Optional[str] = Field(None, description="Team member email the case was referred to")
     ai_recommendation_snapshot: Optional[dict] = Field(None, description="Snapshot of the AI recommendation at the time of decision")
     sealed_at: Optional[str] = Field(None, description="ISO timestamp for legacy frontend support")
     

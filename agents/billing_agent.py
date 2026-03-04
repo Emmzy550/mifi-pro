@@ -10,6 +10,8 @@ from agents.audit_agent import AuditAgent
 import logging
 logger = logging.getLogger(__name__)
 
+PLATFORM_OWNER_ASSESSMENT_LIMIT = 100000
+
 class BillingAgent:
     """
     Handles environment-isolated billing and usage tracking.
@@ -98,8 +100,12 @@ class BillingAgent:
         
         limit = 0
         if environment == OrgEnvironment.SANDBOX:
-             # Use org.monthly_limit if set (Super Admin override), else default to Sandbox config (10)
-             limit = org.monthly_limit if org.monthly_limit is not None else PLAN_CONFIG["SANDBOX"]["monthly_limit"]
+             # Platform owner gets a higher sandbox ceiling.
+             if org.id == "PLATFORM_OWNER":
+                 limit = PLATFORM_OWNER_ASSESSMENT_LIMIT
+             else:
+                 # Use org.monthly_limit if set (Super Admin override), else default sandbox config.
+                 limit = org.monthly_limit if org.monthly_limit is not None else PLAN_CONFIG["SANDBOX"]["monthly_limit"]
         else:
              limit = BillingAgent.get_plan_limit(org)
         
@@ -179,9 +185,13 @@ class BillingAgent:
         # If a custom limit is set on the org, it applies to Sandbox too (for now)
         logger.debug(f"DEBUG: BillingAgent loaded org {fresh_org.id} with monthly_limit: {fresh_org.monthly_limit}")
         sandbox_limit = (
-            fresh_org.monthly_limit
-            if fresh_org.monthly_limit is not None
-            else PLAN_CONFIG["SANDBOX"]["monthly_limit"]
+            PLATFORM_OWNER_ASSESSMENT_LIMIT
+            if fresh_org.id == "PLATFORM_OWNER"
+            else (
+                fresh_org.monthly_limit
+                if fresh_org.monthly_limit is not None
+                else PLAN_CONFIG["SANDBOX"]["monthly_limit"]
+            )
         )
         
         return {

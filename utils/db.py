@@ -3,7 +3,7 @@ from firebase_admin import credentials, firestore, auth as firebase_auth
 import os
 import sys
 from typing import Dict, List, Optional, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from models.borrower import Borrower
 from models.assessment import Assessment
 from models.loan import Loan
@@ -21,6 +21,7 @@ from models.organization import OrgEnvironment
 from models.officer_action import OfficerAction
 from models.sms_log import SMSLog
 from models.follow_up_task import FollowUpTask
+from models.notification import Notification
 from models.document_insight import DocumentInsightRecord
 import logging
 logger = logging.getLogger(__name__)
@@ -433,6 +434,7 @@ class Database:
             "officer_actions": 0,
             "sms_logs": 0,
             "follow_up_tasks": 0,
+            "notifications": 0,
             "borrowers": 0,
             "alternative_data": 0,
             "users": 0,
@@ -500,6 +502,7 @@ class Database:
 
         # 3) Follow-up tasks that may not be attached to an assessment
         summary["follow_up_tasks"] += _delete_query_docs("follow_up_tasks", "organization_id", org_id)
+        summary["notifications"] += _delete_query_docs("notifications", "organization_id", org_id)
 
         # 4) Usage and billing data
         summary["usage_logs"] += _delete_query_docs("usage_logs", "org_id", org_id)
@@ -812,6 +815,99 @@ class Database:
     # ------------------------------------------------------------------
     # Document Insights (Decision Chamber)
     # ------------------------------------------------------------------
+
+    @classmethod
+    def save_notification(cls, notification: Notification):
+        db = cls.get_db()
+        db.collection("notifications").document(notification.notification_id).set(notification.model_dump(mode='json'))
+        if hasattr(db, 'save'):
+            db.save()
+
+    @classmethod
+    def get_notification(cls, notification_id: str) -> Optional[Notification]:
+        db = cls.get_db()
+        doc = db.collection("notifications").document(notification_id).get()
+        if doc.exists:
+            return Notification(**doc.to_dict())
+        return None
+
+    @classmethod
+    def list_notifications_for_user(
+        cls,
+        recipient_user_id: str,
+        recipient_email: Optional[str] = None,
+        organization_id: Optional[str] = None,
+        unread_only: bool = False,
+        limit: int = 50
+    ) -> List[Notification]:
+        db = cls.get_db()
+        docs = []
+        # Prefer a narrow query but gracefully fall back to full scan if query filters fail.
+        try:
+            query = db.collection("notifications").where("recipient_user_id", "==", recipient_user_id)
+            docs = query.stream()
+        except Exception as query_error:
+            logger.warning(f"Notification user query failed, falling back to scan: {query_error}")
+            docs = db.collection("notifications").stream()
+
+        notifications = []
+        target_user_id = (recipient_user_id or "").strip()
+        target_email = (recipient_email or "").strip().lower()
+        target_org = (organization_id or "").strip().upper() if organization_id else None
+        for doc in docs:
+            try:
+                notification = Notification(**doc.to_dict())
+                notification_user_id = (notification.recipient_user_id or "").strip()
+                notification_email = (notification.recipient_email or "").strip().lower()
+                notification_org = (notification.organization_id or "").strip().upper()
+
+                is_recipient_match = (
+                    notification_user_id == target_user_id
+                    or (target_email and notification_email == target_email)
+                )
+                if not is_recipient_match:
+                    continue
+                if target_org and notification_org != target_org:
+                    continue
+                if unread_only and notification.is_read:
+                    continue
+
+                notifications.append(notification)
+            except Exception as e:
+                logger.info(f"Skipping malformed notification {doc.id}: {e}")
+
+        notifications.sort(key=lambda n: n.created_at, reverse=True)
+        return notifications[:limit]
+
+    @classmethod
+    def mark_notification_read(cls, notification_id: str, recipient_user_id: str) -> bool:
+        notification = cls.get_notification(notification_id)
+        if not notification or notification.recipient_user_id != recipient_user_id:
+            return False
+        if notification.is_read:
+            return True
+
+        notification.is_read = True
+        notification.read_at = datetime.now(timezone.utc)
+        cls.save_notification(notification)
+        return True
+
+    @classmethod
+    def mark_all_notifications_read(cls, recipient_user_id: str, organization_id: str) -> int:
+        notifications = cls.list_notifications_for_user(
+            recipient_user_id=recipient_user_id,
+            recipient_email=None,
+            organization_id=organization_id,
+            unread_only=True,
+            limit=1000
+        )
+        updated = 0
+        for notification in notifications:
+            notification.is_read = True
+            notification.read_at = datetime.now(timezone.utc)
+            cls.save_notification(notification)
+            updated += 1
+        return updated
 
     @classmethod
     def save_document_insight(cls, insight: DocumentInsightRecord):

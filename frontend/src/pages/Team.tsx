@@ -273,7 +273,7 @@ export default function Team() {
             </div>
 
             {showModal && (
-                <div className="fixed inset-0 bg-slate-900/50 flex items-center justify-center p-4 backdrop-blur-sm z-50">
+                <div className="fixed inset-0 bg-slate-900/50 flex items-center justify-center p-4 z-50">
                     <div className="bg-white rounded-xl max-w-md w-full p-6 shadow-2xl">
                         <h2 className="text-xl font-bold text-slate-900 mb-4">Add Team Member</h2>
                         <form onSubmit={handleCreate}>

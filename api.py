@@ -52,6 +52,7 @@ from models.document_insight import (
 from models.unified_profile import UnifiedFinancialProfile, AssessmentReadiness
 from models.sms_log import SMSLog
 from models.follow_up_task import FollowUpTask, FollowUpStatus
+from models.notification import Notification
 from services.sms_service import SMSService
 from services.email_service import EmailService
 from services.webhook_service import WebhookService
@@ -3809,6 +3810,77 @@ async def export_org_audit_logs(
     return response
 
 
+@app.get("/org/notifications", response_model=List[Notification])
+async def get_org_notifications(
+    limit: int = 50,
+    unread_only: bool = False,
+    current_user: User = Depends(AuthAgent.get_current_user)
+):
+    """
+    Returns notifications for the current user.
+    """
+    safe_limit = max(1, min(limit, 200))
+    return Database.list_notifications_for_user(
+        recipient_user_id=current_user.id,
+        recipient_email=current_user.email,
+        organization_id=current_user.organization_id,
+        unread_only=unread_only,
+        limit=safe_limit
+    )
+
+
+@app.get("/org/notifications/unread-count", response_model=Dict[str, int])
+async def get_unread_notification_count(
+    current_user: User = Depends(AuthAgent.get_current_user)
+):
+    unread = Database.list_notifications_for_user(
+        recipient_user_id=current_user.id,
+        recipient_email=current_user.email,
+        organization_id=current_user.organization_id,
+        unread_only=True,
+        limit=1000
+    )
+    return {"count": len(unread)}
+
+
+@app.post("/org/notifications/read-all", response_model=Dict[str, int])
+async def mark_all_notifications_read(
+    current_user: User = Depends(AuthAgent.get_current_user)
+):
+    updated = Database.mark_all_notifications_read(
+        recipient_user_id=current_user.id,
+        organization_id=current_user.organization_id
+    )
+    AuditAgent.log_event(
+        "NOTIFICATIONS_READ_ALL",
+        current_user.email,
+        {"updated": updated, "org": current_user.organization_id}
+    )
+    return {"updated": updated}
+
+
+@app.post("/org/notifications/{notification_id}/read", response_model=Dict[str, str])
+async def mark_notification_read(
+    notification_id: str,
+    current_user: User = Depends(AuthAgent.get_current_user)
+):
+    notification = Database.get_notification(notification_id)
+    if not notification:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    if notification.organization_id != current_user.organization_id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    if notification.recipient_user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    Database.mark_notification_read(notification_id, current_user.id)
+    AuditAgent.log_event(
+        "NOTIFICATION_READ",
+        current_user.email,
+        {"notification_id": notification_id, "org": current_user.organization_id}
+    )
+    return {"status": "ok"}
+
+
 def _resolve_user_limit(org: Organization) -> Optional[int]:
     if org.user_limit is not None:
         return org.user_limit
@@ -3882,6 +3954,53 @@ async def list_org_users(
         "can_add_users": can_add_users,
         "plan": org.plan.value if hasattr(org.plan, 'value') else str(org.plan)
     }
+
+
+@app.get("/org/referral-targets", response_model=Dict)
+async def list_org_referral_targets(
+    current_user: User = Depends(AuthAgent.get_current_user)
+):
+    """
+    Returns minimal organization team-member data for referral assignment.
+    """
+    org_id = (current_user.organization_id or "").strip()
+    org = Database.get_organization(org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    # Use a full scan + in-memory filter for resilience. Some deployments have
+    # intermittent query inconsistencies on org-scoped user lookups.
+    normalized_org = org_id.upper()
+    users = [
+        u for u in Database.list_all_users()
+        if (u.organization_id or "").strip().upper() == normalized_org
+    ]
+    targets = []
+    for member in users:
+        role_value = member.role.value if hasattr(member.role, "value") else str(member.role)
+        role_value = role_value.upper()
+
+        targets.append({
+            "id": member.id,
+            "full_name": member.full_name,
+            "email": member.email,
+            "role": role_value,
+            "is_self": member.id == current_user.id
+        })
+
+    if not targets:
+        # Safety fallback: include authenticated user so referral flow remains operable.
+        self_role = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
+        targets.append({
+            "id": current_user.id,
+            "full_name": current_user.full_name,
+            "email": current_user.email,
+            "role": str(self_role).upper(),
+            "is_self": True
+        })
+
+    targets.sort(key=lambda x: (x["full_name"] or x["email"] or "").lower())
+    return {"targets": targets}
 
 
 @app.post("/org/users", response_model=Dict)
@@ -4827,8 +4946,9 @@ async def record_officer_action(
     request: Request = None
 ):
     """
-    Records a final human decision for an assessment.
-    This does not change the AI recommendation but represents the institution's official verdict.
+    Records a human officer action for an assessment.
+    - APPROVE seals the final decision.
+    - REFER creates a pending referral handoff and keeps the case editable for the assigned officer.
     """
     # 1. Verify Assessment
     assessment = Database.get_assessment(assessment_id)
@@ -4843,11 +4963,40 @@ async def record_officer_action(
     if assessment.final_decision_metadata:
         raise HTTPException(status_code=400, detail="This assessment has already been sealed with a final decision and cannot be modified.")
 
+    pending_referral = (
+        assessment.pending_referral_metadata
+        if isinstance(assessment.pending_referral_metadata, dict)
+        else None
+    )
+    if pending_referral:
+        assigned_user_id = (pending_referral.get("referred_to_user_id") or "").strip()
+        if assigned_user_id and assigned_user_id != user.id and user.role != "SUPER_ADMIN":
+            raise HTTPException(
+                status_code=403,
+                detail="This referral is assigned to another team member. Only the assigned user can finalize it."
+            )
+
     # 3. Handle Decision Logic & Override Detection
     officer_decision = action_data.get("officer_decision")
     final_amount = action_data.get("final_amount", assessment.recommended_amount)
     final_duration = action_data.get("final_duration", assessment.recommended_duration_days)
     final_rate = action_data.get("final_interest_rate", assessment.recommended_interest_rate)
+    referred_to_user_id = (action_data.get("referred_to_user_id") or "").strip() or None
+    referred_to_user_name = (action_data.get("referred_to_user_name") or "").strip() or None
+    referred_to_user_email = (action_data.get("referred_to_user_email") or "").strip() or None
+    if pending_referral:
+        referred_to_user_id = referred_to_user_id or (pending_referral.get("referred_to_user_id") or None)
+        referred_to_user_name = referred_to_user_name or (pending_referral.get("referred_to_user_name") or None)
+        referred_to_user_email = referred_to_user_email or (pending_referral.get("referred_to_user_email") or None)
+
+    if officer_decision == "REFER" and not referred_to_user_id:
+        raise HTTPException(status_code=400, detail="Referral requires a target team member.")
+
+    if referred_to_user_id and (not referred_to_user_name or not referred_to_user_email):
+        recipient_user = Database.get_user_by_id(referred_to_user_id)
+        if recipient_user and (recipient_user.organization_id or "").upper() == (user.organization_id or "").upper():
+            referred_to_user_name = referred_to_user_name or recipient_user.full_name
+            referred_to_user_email = referred_to_user_email or recipient_user.email
 
     is_override = (
         officer_decision != assessment.decision or
@@ -4863,6 +5012,7 @@ async def record_officer_action(
     # 4. Create Action Metadata
     try:
         current_time = datetime.now(timezone.utc)
+        is_referral_handoff = officer_decision == "REFER"
         action = {
             "assessment_id": assessment_id,
             "officer_id": user.id,
@@ -4873,10 +5023,13 @@ async def record_officer_action(
             "final_interest_rate": final_rate,
             "officer_notes": action_data.get("officer_notes"),
             "override_reason_code": action_data.get("override_reason_code"),
+            "referred_to_user_id": referred_to_user_id,
+            "referred_to_user_name": referred_to_user_name,
+            "referred_to_user_email": referred_to_user_email,
             "borrower_message": action_data.get("borrower_message"),
             "communication_channel": action_data.get("communication_channel", CommChannel.NONE),
             "created_at": current_time,
-            "sealed_at": current_time.isoformat(), # Keep for legacy/frontend
+            "sealed_at": None if is_referral_handoff else current_time.isoformat(),
             "is_override": is_override,
             "ai_recommendation_snapshot": {
                 "decision": assessment.decision,
@@ -4894,11 +5047,86 @@ async def record_officer_action(
     if not action_data.get("confirmed_compliance"):
         raise HTTPException(status_code=400, detail="You must confirm that this decision complies with internal policies.")
 
-    # 6. Seal Assessment
+    # 6. Referral handoff (non-sealing)
+    if officer_decision == "REFER":
+        assessment.pending_referral_metadata = {
+            **action,
+            "status": "PENDING_REVIEW",
+            "referred_at": current_time.isoformat(),
+            "referred_by_user_id": user.id,
+            "referred_by_name": user.full_name or user.email
+        }
+        Database.save_assessment(assessment)
+
+        try:
+            org_users = [
+                u for u in Database.list_all_users()
+                if (u.organization_id or "").upper() == (user.organization_id or "").upper()
+            ]
+            recipient_ids = {u.id for u in org_users if u.id != user.id}
+            reason_code = action_data.get("override_reason_code")
+            instructions = (action_data.get("officer_notes") or "").strip()
+            actor_name = user.full_name or user.email or "A team member"
+            for member in org_users:
+                if member.id not in recipient_ids:
+                    continue
+
+                is_primary_assignee = bool(referred_to_user_id and member.id == referred_to_user_id)
+                title = "New Referral Assigned" if is_primary_assignee else "Team Referral Alert"
+                message = (
+                    f"{actor_name} referred assessment {assessment_id} to the team."
+                    if not is_primary_assignee
+                    else f"{actor_name} referred assessment {assessment_id} to you."
+                )
+                metadata = {
+                    "assessment_id": assessment_id,
+                    "referrer_user_id": user.id,
+                    "referrer_name": actor_name,
+                    "referred_to_user_id": referred_to_user_id,
+                    "referred_to_user_email": referred_to_user_email,
+                    "reason_code": reason_code,
+                    "instructions": instructions
+                }
+                notification = Notification(
+                    notification_id=f"NTF-{uuid.uuid4().hex[:12].upper()}",
+                    organization_id=user.organization_id,
+                    recipient_user_id=member.id,
+                    recipient_email=member.email,
+                    created_by_user_id=user.id,
+                    type="REFERRAL_ASSIGNED" if is_primary_assignee else "REFERRAL_TEAM_ALERT",
+                    title=title,
+                    message=message,
+                    assessment_id=assessment_id,
+                    metadata=metadata
+                )
+                Database.save_notification(notification)
+
+            AuditAgent.log_event("REFERRAL_ASSIGNED", user.email, {
+                "assessment_id": assessment_id,
+                "recipient_count": len(recipient_ids),
+                "referred_to_user_id": referred_to_user_id,
+                "org": user.organization_id
+            })
+        except Exception as notify_error:
+            logger.error(f"Failed to create referral notifications: {notify_error}")
+
+        client_ip = request.client.host if request and request.client else "unknown"
+        AuditAgent.log_event("REFERRAL_HANDOFF_CREATED", user.email, {
+            "assessment_id": assessment_id,
+            "referred_to_user_id": referred_to_user_id,
+            "override_reason_code": action_data.get("override_reason_code"),
+            "ip": client_ip,
+            "org": user.organization_id
+        })
+
+        return action
+
+    # 7. Seal Assessment
     assessment.final_decision_metadata = action
+    assessment.pending_referral_metadata = None
     Database.save_assessment(assessment)
 
-    # 6.5 Create Loan Record if Approved (Pending Disbursement)
+    # 7.5 Create Loan Record if Approved (Pending Disbursement)
     if officer_decision == "APPROVE":
         try:
             loan = Loan(
@@ -4914,18 +5142,19 @@ async def record_officer_action(
         except Exception as loan_err:
              logger.error(f"WARNING: Failed to auto-create loan record: {loan_err}")
 
-    # 7. Audit
+    # 8. Audit
     client_ip = request.client.host if request and request.client else "unknown"
     AuditAgent.log_event("FINAL_HUMAN_DECISION_SEALED", user.email, {
         "assessment_id": assessment_id,
         "decision": officer_decision,
         "is_override": is_override,
         "override_reason_code": action_data.get("override_reason_code"),
+        "referred_to_user_id": referred_to_user_id,
         "ip": client_ip,
         "org": user.organization_id
     })
 
-    # 8. Auto-generate decision exports (best-effort)
+    # 9. Auto-generate decision exports (best-effort)
     try:
         borrower = Database.get_borrower(assessment.borrower_id)
         if borrower:
