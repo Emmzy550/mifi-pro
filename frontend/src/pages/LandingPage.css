@@ -1,0 +1,888 @@
+﻿@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=DM+Sans:wght@300;400;500;600&display=swap');
+
+.mifi-landing {
+  --navy: #0b1426;
+  --navy-light: #112240;
+  --gold: #c9a84c;
+  --gold-light: #e8c97a;
+  --white: #f8f9fc;
+  --muted: #8892a4;
+  --green: #22c55e;
+  --red: #ef4444;
+  --amber: #f59e0b;
+  --border: rgba(201, 168, 76, 0.15);
+  margin: 0;
+  min-height: 100vh;
+  background: var(--navy);
+  color: var(--white);
+  font-family: 'DM Sans', sans-serif;
+  overflow-x: hidden;
+}
+
+.mifi-landing,
+.mifi-landing * {
+  box-sizing: border-box;
+}
+
+.mifi-landing a,
+.mifi-landing button,
+.mifi-landing input,
+.mifi-landing select {
+  font-family: 'DM Sans', sans-serif;
+}
+
+.mifi-landing nav {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.2rem 4rem;
+  background: rgba(11, 20, 38, 0.92);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+
+.mifi-landing .logo {
+  display: inline-flex;
+  align-items: center;
+  color: var(--white);
+  text-decoration: none;
+  width: min(14.75rem, 42vw);
+}
+
+.mifi-landing .landing-wordmark {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: 100%;
+}
+
+.mifi-landing .links {
+  display: flex;
+  gap: 2.5rem;
+  list-style: none;
+}
+
+.mifi-landing .links a,
+.mifi-landing .footer-links a {
+  color: var(--muted);
+  text-decoration: none;
+  transition: color 0.2s;
+}
+
+.mifi-landing .links a:hover,
+.mifi-landing .footer-links a:hover {
+  color: var(--white);
+}
+
+.mifi-landing .nav-cta,
+.mifi-landing .hero-actions,
+.mifi-landing .cta-actions,
+.mifi-landing .footer-links,
+.mifi-landing .hero-trust {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.mifi-landing .btn-ghost,
+.mifi-landing .btn-primary,
+.mifi-landing .btn-lg,
+.mifi-landing .btn-outline-lg,
+.mifi-landing .form-submit,
+.mifi-landing .dec-btn {
+  cursor: pointer;
+  transition: all 0.2s;
+  text-decoration: none;
+}
+
+.mifi-landing .btn-ghost {
+  padding: 0.5rem 1.2rem;
+  border: 1px solid rgba(201, 168, 76, 0.4);
+  border-radius: 6px;
+  color: var(--gold);
+  background: rgba(201, 168, 76, 0.08);
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.mifi-landing .btn-ghost:hover {
+  background: rgba(201, 168, 76, 0.15);
+  border-color: var(--gold);
+}
+
+.mifi-landing .btn-primary,
+.mifi-landing .btn-lg,
+.mifi-landing .form-submit {
+  border: 1px solid rgba(255, 232, 173, 0.32);
+  color: var(--navy);
+  background: linear-gradient(135deg, #f4d778 0%, #dfbd5d 52%, #cfa546 100%);
+  box-shadow:
+    0 10px 26px rgba(201, 168, 76, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+.mifi-landing .btn-primary {
+  padding: 0.6rem 1.4rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.mifi-landing .hero {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: center;
+  gap: 4rem;
+  min-height: 100vh;
+  padding: 8rem 4rem 4rem;
+  overflow: hidden;
+}
+
+.mifi-landing .hero-content,
+.mifi-landing .hero-visual,
+.mifi-landing .cta-section > * {
+  position: relative;
+  z-index: 1;
+}
+
+.mifi-landing .hero::before,
+.mifi-landing .hero::after,
+.mifi-landing .cta-section::before {
+  content: '';
+  position: absolute;
+  pointer-events: none;
+}
+
+.mifi-landing .hero::before {
+  top: -200px;
+  right: -200px;
+  width: 700px;
+  height: 700px;
+  background: radial-gradient(circle, rgba(201, 168, 76, 0.08) 0%, transparent 70%);
+}
+
+.mifi-landing .hero::after {
+  bottom: -100px;
+  left: -100px;
+  width: 500px;
+  height: 500px;
+  background: radial-gradient(circle, rgba(17, 34, 64, 0.8) 0%, transparent 70%);
+}
+
+.mifi-landing .hero-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+  padding: 0.4rem 1rem;
+  border: 1px solid rgba(201, 168, 76, 0.3);
+  border-radius: 100px;
+  background: rgba(201, 168, 76, 0.1);
+  color: var(--gold);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  animation: fadeUp 0.6s ease both;
+}
+
+.mifi-landing .hero-badge span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  animation: pulse 2s infinite;
+}
+
+.mifi-landing h1,
+.mifi-landing .section-title,
+.mifi-landing .cta-title,
+.mifi-landing .modal-title,
+.mifi-landing .success-title {
+  font-family: 'Playfair Display', serif;
+}
+
+.mifi-landing h1 {
+  margin: 0 0 1.5rem;
+  font-size: clamp(2.4rem, 4vw, 3.8rem);
+  line-height: 1.15;
+  animation: fadeUp 0.6s ease 0.1s both;
+}
+
+.mifi-landing h1 em {
+  font-style: normal;
+  background: linear-gradient(135deg, var(--gold), var(--gold-light));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.mifi-landing .hero-desc,
+.mifi-landing .section-desc,
+.mifi-landing .cta-desc {
+  color: var(--muted);
+  line-height: 1.75;
+}
+
+.mifi-landing .hero-desc {
+  max-width: 480px;
+  margin-bottom: 2.5rem;
+  font-size: 1.05rem;
+  animation: fadeUp 0.6s ease 0.2s both;
+}
+
+.mifi-landing .btn-lg,
+.mifi-landing .btn-outline-lg {
+  display: inline-block;
+  padding: 0.9rem 2rem;
+  border-radius: 8px;
+  font-size: 0.95rem;
+}
+
+.mifi-landing .btn-lg:hover,
+.mifi-landing .btn-primary:hover {
+  opacity: 1;
+  filter: none;
+  transform: translateY(-2px);
+  box-shadow:
+    0 14px 34px rgba(201, 168, 76, 0.38),
+    inset 0 1px 0 rgba(255, 255, 255, 0.36);
+}
+
+.mifi-landing .btn-primary:active,
+.mifi-landing .btn-lg:active,
+.mifi-landing .form-submit:active {
+  filter: none;
+}
+
+.mifi-landing .btn-outline-lg {
+  border: 1px solid rgba(201, 168, 76, 0.4);
+  background: rgba(201, 168, 76, 0.07);
+  color: var(--gold);
+}
+
+.mifi-landing .btn-outline-lg:hover {
+  background: rgba(201, 168, 76, 0.15);
+  border-color: var(--gold);
+}
+
+.mifi-landing .hero-trust {
+  gap: 2rem;
+  margin-top: 2.5rem;
+  animation: fadeUp 0.6s ease 0.4s both;
+}
+
+.mifi-landing .trust-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.mifi-landing .trust-item svg,
+.mifi-landing .green-text,
+.mifi-landing .risk-low-text,
+.mifi-landing .meta-value.approve,
+.mifi-landing .meta-value.low,
+.mifi-landing .float-value {
+  color: var(--green);
+}
+
+.mifi-landing .hero-visual {
+  position: relative;
+  animation: fadeLeft 0.8s ease 0.3s both;
+}
+
+.mifi-landing .decision-card,
+.mifi-landing .preview-box,
+.mifi-landing .problem-card,
+.mifi-landing .audience-card,
+.mifi-landing .modal,
+.mifi-landing .feature-item,
+.mifi-landing .field-box {
+  border: 1px solid var(--border);
+}
+
+.mifi-landing .decision-card,
+.mifi-landing .preview-box,
+.mifi-landing .problem-card,
+.mifi-landing .audience-card,
+.mifi-landing .modal,
+.mifi-landing .how-section,
+.mifi-landing .features-section,
+.mifi-landing .stats-bar,
+.mifi-landing .field-box,
+.mifi-landing .float-card {
+  background: var(--navy-light);
+}
+
+.mifi-landing .decision-card {
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: 0 40px 80px rgba(0, 0, 0, 0.5);
+}
+
+.mifi-landing .card-header,
+.mifi-landing .preview-header {
+  display: flex;
+  align-items: center;
+  padding: 1rem 1.5rem;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid var(--border);
+}
+
+.mifi-landing .card-header {
+  justify-content: space-between;
+}
+
+.mifi-landing .card-header-title,
+.mifi-landing .meta-item label,
+.mifi-landing .float-label,
+.mifi-landing .field-label,
+.mifi-landing .mini-label,
+.mifi-landing .section-label,
+.mifi-landing .preview-top-label {
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.mifi-landing .card-header-title,
+.mifi-landing .section-label {
+  font-weight: 600;
+}
+
+.mifi-landing .status-pill,
+.mifi-landing .rule-badge {
+  border-radius: 100px;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.mifi-landing .status-pill { padding: 0.25rem 0.7rem; }
+.mifi-landing .status-pending,
+.mifi-landing .badge-review { background: rgba(245, 158, 11, 0.15); color: var(--amber); }
+.mifi-landing .badge-pass { background: rgba(34, 197, 94, 0.15); color: var(--green); }
+.mifi-landing .badge-fail,
+.mifi-landing .status-rejected { background: rgba(239, 68, 68, 0.15); color: var(--red); }
+
+.mifi-landing .card-body,
+.mifi-landing .preview-content,
+.mifi-landing .modal {
+  padding: 1.5rem;
+}
+
+.mifi-landing .card-meta,
+.mifi-landing .extracted-fields,
+.mifi-landing .decision-buttons {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.mifi-landing .meta-item label,
+.mifi-landing .field-label,
+.mifi-landing .mini-label {
+  display: block;
+  margin-bottom: 0.35rem;
+  font-size: 0.65rem;
+}
+
+.mifi-landing .meta-value,
+.mifi-landing .field-value,
+.mifi-landing .preview-strong,
+.mifi-landing .problem-title,
+.mifi-landing .step-title,
+.mifi-landing .feature-title,
+.mifi-landing .audience-title {
+  font-weight: 600;
+}
+
+.mifi-landing .meta-value,
+.mifi-landing .field-value { font-size: 0.9rem; }
+
+.mifi-landing .risk-bar-wrap,
+.mifi-landing .rules-list,
+.mifi-landing .preview-note,
+.mifi-landing .modal-desc,
+.mifi-landing .cta-note {
+  margin-top: 1.5rem;
+}
+
+.mifi-landing .risk-bar-label,
+.mifi-landing .rule-item,
+.mifi-landing footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.mifi-landing .risk-bar {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.mifi-landing .risk-fill {
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--green), #86efac);
+  transition: width 1.5s ease;
+}
+
+.mifi-landing .rule-item {
+  padding: 0.65rem 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 0.8rem;
+}
+
+.mifi-landing .rule-item:last-child { border-bottom: none; }
+.mifi-landing .rule-name,
+.mifi-landing .problem-desc,
+.mifi-landing .step-desc,
+.mifi-landing .feature-desc,
+.mifi-landing .audience-desc,
+.mifi-landing .success-desc,
+.mifi-landing .footer-copy,
+.mifi-landing .footer-links a,
+.mifi-landing .float-sub { color: var(--muted); }
+
+.mifi-landing .decision-buttons { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.6rem; }
+.mifi-landing .dec-btn { padding: 0.65rem; border: 0; border-radius: 8px; font-size: 0.78rem; font-weight: 600; }
+.mifi-landing .dec-approve { background: linear-gradient(135deg, #22c55e, #4ade80); color: #fff; }
+.mifi-landing .dec-reject { background: linear-gradient(135deg, #ef4444, #f87171); color: #fff; }
+.mifi-landing .dec-refer { background: linear-gradient(135deg, #6366f1, #818cf8); color: #fff; }
+
+.mifi-landing .float-card {
+  position: absolute;
+  padding: 0.8rem 1.1rem;
+  border-radius: 12px;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+  font-size: 0.78rem;
+}
+
+.mifi-landing .float-card-1 { top: -20px; left: -60px; animation: floatY 4s ease-in-out infinite; }
+.mifi-landing .float-card-2 { right: -50px; bottom: 40px; animation: floatY 4s ease-in-out 2s infinite; }
+.mifi-landing .float-value { font-size: 1.1rem; font-weight: 700; }
+.mifi-landing .stats-bar,
+.mifi-landing .features-grid,
+.mifi-landing .problems-grid,
+.mifi-landing .how-grid,
+.mifi-landing .audience-grid {
+  display: grid;
+}
+
+.mifi-landing .stats-bar {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 2rem;
+  padding: 2.5rem 4rem;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.mifi-landing .stat-item { text-align: center; }
+.mifi-landing .stat-num { display: block; color: var(--gold); font-family: 'Playfair Display', serif; font-size: 2.4rem; font-weight: 700; }
+.mifi-landing .stat-label { margin-top: 0.3rem; color: var(--muted); font-size: 0.8rem; }
+
+.mifi-landing .section,
+.mifi-landing .cta-section { padding: 6rem 4rem; }
+.mifi-landing .section-label { margin-bottom: 0.8rem; font-size: 0.72rem; letter-spacing: 0.15em; }
+.mifi-landing .section-title,
+.mifi-landing .cta-title { margin: 0 0 1.2rem; font-size: clamp(1.8rem, 3vw, 2.8rem); line-height: 1.2; }
+.mifi-landing .section-desc { max-width: 540px; font-size: 1rem; }
+
+.mifi-landing .problems-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.5rem; margin-top: 3.5rem; }
+.mifi-landing .problem-card,
+.mifi-landing .audience-card { padding: 1.8rem; border-radius: 12px; transition: transform 0.3s, border-color 0.3s; }
+.mifi-landing .problem-card:hover,
+.mifi-landing .audience-card:hover { transform: translateY(-4px); border-color: rgba(201, 168, 76, 0.4); }
+.mifi-landing .problem-icon { width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; margin-bottom: 1.2rem; border-radius: 10px; background: rgba(201, 168, 76, 0.1); font-size: 1.2rem; }
+.mifi-landing .problem-desc,
+.mifi-landing .step-desc,
+.mifi-landing .feature-desc,
+.mifi-landing .audience-desc,
+.mifi-landing .success-desc { line-height: 1.65; }
+
+.mifi-landing .how-section,
+.mifi-landing .features-section { border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.mifi-landing .how-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5rem; align-items: center; }
+.mifi-landing .spaced-grid { margin-top: 3.5rem; }
+.mifi-landing .step { display: flex; gap: 1.5rem; padding: 1.8rem 0; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
+.mifi-landing .step:last-child { border-bottom: none; }
+.mifi-landing .step-num { width: 36px; height: 36px; min-width: 36px; display: flex; align-items: center; justify-content: center; margin-top: 2px; border: 1px solid var(--border); border-radius: 50%; color: var(--gold); font-weight: 700; }
+.mifi-landing .preview-box { border-radius: 16px; overflow: hidden; box-shadow: 0 30px 60px rgba(0, 0, 0, 0.4); }
+.mifi-landing .preview-header { gap: 0.5rem; }
+.mifi-landing .preview-title { margin-left: 0.5rem; color: var(--muted); font-size: 0.7rem; }
+.mifi-landing .preview-top-label { margin-bottom: 0.4rem; font-size: 0.7rem; }
+.mifi-landing .preview-strong { margin: 0 0 1rem; font-size: 0.75rem; }
+.mifi-landing .preview-note { padding: 0.9rem; border-radius: 8px; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.07); color: rgba(255, 255, 255, 0.7); font-size: 0.78rem; line-height: 1.6; }
+.mifi-landing .bs-parsed,
+.mifi-landing .anomaly-none { padding: 0.7rem 1rem; border-radius: 8px; }
+.mifi-landing .bs-parsed { margin: 0 0 1.2rem; background: rgba(34, 197, 94, 0.08); border: 1px solid rgba(34, 197, 94, 0.2); color: var(--green); font-size: 0.8rem; font-weight: 600; }
+.mifi-landing .field-box { padding: 0.8rem; border-radius: 8px; background: rgba(255, 255, 255, 0.04); }
+.mifi-landing .anomaly-none { background: rgba(34, 197, 94, 0.05); border: 1px solid rgba(34, 197, 94, 0.15); color: rgba(34, 197, 94, 0.8); font-size: 0.75rem; }
+
+.mifi-landing .section-head-center { margin-bottom: 3.5rem; text-align: center; }
+.mifi-landing .features-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.mifi-landing .feature-item { padding: 2.5rem; transition: background 0.3s; }
+.mifi-landing .feature-item:hover { background: rgba(201, 168, 76, 0.03); }
+.mifi-landing .feature-item:nth-child(3n + 1),
+.mifi-landing .feature-item:nth-child(3n + 2) { border-right: 1px solid var(--border); }
+.mifi-landing .feature-item:nth-child(-n + 3) { border-bottom: 1px solid var(--border); }
+.mifi-landing .feature-icon,
+.mifi-landing .audience-icon,
+.mifi-landing .success-icon { margin-bottom: 1rem; font-size: 1.8rem; }
+.mifi-landing .audience-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.5rem; margin-top: 3rem; }
+
+.mifi-landing .pricing-section {
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background:
+    radial-gradient(circle at top, rgba(201, 168, 76, 0.06), transparent 38%),
+    linear-gradient(180deg, rgba(17, 34, 64, 0.55), rgba(11, 20, 38, 0.95));
+}
+
+.mifi-landing .pricing-intro {
+  max-width: 700px;
+  margin: 0 auto;
+}
+
+.mifi-landing .pricing-grid,
+.mifi-landing .faq-list {
+  display: grid;
+  gap: 1.5rem;
+}
+
+.mifi-landing .pricing-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.mifi-landing .pricing-card,
+.mifi-landing .pricing-note,
+.mifi-landing .pilot-banner,
+.mifi-landing .faq-item {
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(17, 34, 64, 0.92);
+}
+
+.mifi-landing .pricing-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: 2rem;
+  min-height: 100%;
+  box-shadow: 0 24px 50px rgba(0, 0, 0, 0.24);
+}
+
+.mifi-landing .pricing-card.popular {
+  border-color: rgba(201, 168, 76, 0.42);
+  box-shadow: 0 28px 56px rgba(201, 168, 76, 0.14);
+}
+
+.mifi-landing .pricing-badge,
+.mifi-landing .pilot-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.85rem;
+  border-radius: 999px;
+  background: rgba(201, 168, 76, 0.16);
+  color: var(--gold-light);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.mifi-landing .pricing-badge {
+  position: absolute;
+  top: 1.4rem;
+  right: 1.4rem;
+}
+
+.mifi-landing .pricing-card-head {
+  margin-bottom: 1.8rem;
+  padding-right: 6rem;
+}
+
+.mifi-landing .pricing-name,
+.mifi-landing .pricing-subtitle {
+  margin: 0;
+  color: var(--white);
+  font-family: 'Playfair Display', serif;
+}
+
+.mifi-landing .pricing-name {
+  font-size: 1.45rem;
+  font-weight: 700;
+}
+
+.mifi-landing .pricing-subtitle {
+  font-size: clamp(1.5rem, 2.6vw, 2.1rem);
+}
+
+.mifi-landing .pricing-price {
+  margin-top: 0.8rem;
+  color: var(--gold-light);
+  font-size: clamp(2rem, 3vw, 2.7rem);
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.mifi-landing .pricing-billing-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-top: 0.7rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.mifi-landing .pricing-audience {
+  margin: 1rem 0 0;
+  color: var(--muted);
+  line-height: 1.8;
+}
+
+.mifi-landing .pricing-feature-list,
+.mifi-landing .pilot-list {
+  display: grid;
+  gap: 0.85rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mifi-landing .pricing-feature-list {
+  flex: 1;
+  margin-top: 0.2rem;
+}
+
+.mifi-landing .pricing-feature,
+.mifi-landing .pilot-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  color: var(--white);
+  line-height: 1.72;
+}
+
+.mifi-landing .pricing-feature svg,
+.mifi-landing .pilot-list svg {
+  flex-shrink: 0;
+  margin-top: 0.15rem;
+  color: var(--green);
+}
+
+.mifi-landing .pricing-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 2rem;
+  padding: 0.95rem 1.2rem;
+  border: 1px solid rgba(255, 232, 173, 0.3);
+  border-radius: 10px;
+  background: linear-gradient(135deg, #f4d778 0%, #dfbd5d 52%, #cfa546 100%);
+  color: var(--navy);
+  font-size: 0.95rem;
+  font-weight: 700;
+  text-decoration: none;
+  transition: transform 0.2s, box-shadow 0.2s, opacity 0.2s;
+  box-shadow: 0 14px 30px rgba(201, 168, 76, 0.22);
+}
+
+.mifi-landing .pricing-action:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 18px 34px rgba(201, 168, 76, 0.28);
+}
+
+.mifi-landing .pricing-action-secondary {
+  background: rgba(201, 168, 76, 0.08);
+  color: var(--gold-light);
+  border-color: rgba(201, 168, 76, 0.28);
+  box-shadow: none;
+}
+
+.mifi-landing .pricing-action-secondary:hover {
+  background: rgba(201, 168, 76, 0.12);
+}
+
+.mifi-landing .pricing-note {
+  margin-top: 1.6rem;
+  padding: 1.2rem 1.4rem;
+  color: var(--white);
+  line-height: 1.7;
+  text-align: center;
+}
+
+.mifi-landing .api-head,
+.mifi-landing .faq-block {
+  margin-top: 4rem;
+}
+
+.mifi-landing .pilot-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2rem;
+  margin-top: 4rem;
+  padding: 2rem;
+}
+
+.mifi-landing .pilot-copy {
+  max-width: 780px;
+}
+
+.mifi-landing .pilot-text {
+  margin: 1rem 0 1.5rem;
+}
+
+.mifi-landing .faq-list {
+  margin-top: 2rem;
+}
+
+.mifi-landing .faq-item {
+  overflow: hidden;
+}
+
+.mifi-landing .faq-question {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.25rem 1.4rem;
+  border: 0;
+  background: transparent;
+  color: var(--white);
+  font-size: 1rem;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mifi-landing .faq-symbol {
+  color: var(--gold-light);
+  font-size: 1.5rem;
+  line-height: 1;
+}
+
+.mifi-landing .faq-answer {
+  margin: 0;
+  padding: 0 1.4rem 1.4rem;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.mifi-landing .cta-section { position: relative; overflow: hidden; text-align: center; }
+.mifi-landing .cta-section::before { inset: 0; background: radial-gradient(ellipse at center, rgba(201, 168, 76, 0.06) 0%, transparent 70%); }
+.mifi-landing .cta-title { font-size: clamp(2rem, 4vw, 3.2rem); }
+.mifi-landing .cta-desc { max-width: 500px; margin: 0 auto 2.5rem; }
+.mifi-landing .cta-note { color: var(--muted); font-size: 0.78rem; }
+
+.mifi-landing .modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.8);
+  backdrop-filter: blur(8px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.3s;
+}
+
+.mifi-landing .modal-overlay.open { opacity: 1; pointer-events: all; }
+.mifi-landing .modal { position: relative; width: min(480px, calc(100% - 2rem)); padding: 2.5rem; border-radius: 16px; transform: translateY(20px); transition: transform 0.3s; }
+.mifi-landing .modal-overlay.open .modal { transform: translateY(0); }
+.mifi-landing .modal-desc { color: var(--muted); font-size: 0.85rem; line-height: 1.6; }
+.mifi-landing .form-group { margin-bottom: 1.2rem; }
+.mifi-landing .form-group label { display: block; margin-bottom: 0.5rem; color: var(--muted); font-size: 0.78rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
+.mifi-landing .form-group input,
+.mifi-landing .form-group select { width: 100%; padding: 0.75rem 1rem; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; background: rgba(255, 255, 255, 0.05); color: var(--white); font-size: 0.9rem; outline: none; }
+.mifi-landing .form-group input:focus,
+.mifi-landing .form-group select:focus { border-color: var(--gold); }
+.mifi-landing .form-group select option { background: var(--navy-light); }
+.mifi-landing .form-submit { width: 100%; padding: 0.9rem; border-radius: 8px; font-size: 0.95rem; font-weight: 700; }
+.mifi-landing .modal-close { position: absolute; top: 1.2rem; right: 1.2rem; border: 0; background: transparent; color: var(--muted); font-size: 1.2rem; }
+.mifi-landing .success-msg { text-align: center; padding: 1rem 0; }
+.mifi-landing .success-title { font-size: 1.4rem; }
+
+.mifi-landing footer {
+  padding: 2rem 4rem;
+  border-top: 1px solid var(--border);
+}
+
+.mifi-landing .footer-copy,
+.mifi-landing .footer-links a { font-size: 0.78rem; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.5); }
+}
+
+@keyframes fadeLeft {
+  from { opacity: 0; transform: translateX(40px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes floatY {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+
+@media (max-width: 900px) {
+  .mifi-landing nav { padding: 1rem 1.5rem; }
+  .mifi-landing .links,
+  .mifi-landing .hero-visual { display: none; }
+  .mifi-landing .hero { grid-template-columns: 1fr; gap: 3rem; padding: 7rem 1.5rem 3rem; }
+  .mifi-landing .stats-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 2rem 1.5rem; }
+  .mifi-landing .section,
+  .mifi-landing .cta-section,
+  .mifi-landing footer { padding: 4rem 1.5rem; }
+  .mifi-landing .problems-grid,
+  .mifi-landing .how-grid,
+  .mifi-landing .features-grid,
+  .mifi-landing .audience-grid,
+  .mifi-landing .pricing-grid { grid-template-columns: 1fr; }
+  .mifi-landing .feature-item { border-right: 1px solid var(--border); }
+  .mifi-landing .feature-item:not(:last-child) { border-bottom: 1px solid var(--border); }
+  .mifi-landing .cta-actions { flex-direction: column; }
+  .mifi-landing .pilot-banner { flex-direction: column; align-items: flex-start; }
+  .mifi-landing .pricing-card-head { padding-right: 0; }
+  .mifi-landing .pricing-badge { position: static; margin-bottom: 1rem; }
+  .mifi-landing .hero-trust,
+  .mifi-landing footer { flex-direction: column; align-items: flex-start; gap: 1rem; }
+}
+
+@media (max-width: 640px) {
+  .mifi-landing .nav-cta,
+  .mifi-landing .hero-actions,
+  .mifi-landing .cta-actions { flex-direction: column; align-items: stretch; }
+  .mifi-landing .btn-ghost,
+  .mifi-landing .btn-primary,
+  .mifi-landing .btn-lg,
+  .mifi-landing .btn-outline-lg { width: 100%; text-align: center; }
+  .mifi-landing .card-meta,
+  .mifi-landing .extracted-fields,
+  .mifi-landing .decision-buttons,
+  .mifi-landing .stats-bar { grid-template-columns: 1fr; }
+}

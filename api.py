@@ -51,7 +51,7 @@ from models.document_insight import (
 )
 from models.unified_profile import UnifiedFinancialProfile, AssessmentReadiness
 from models.sms_log import SMSLog
-from models.follow_up_task import FollowUpTask, FollowUpStatus
+from models.follow_up_task import FollowUpTask, FollowUpStatus, FollowUpType, FollowUpPriority
 from models.notification import Notification
 from services.sms_service import SMSService
 from services.email_service import EmailService
@@ -60,7 +60,7 @@ from utils.validators import normalize_phone, clean_name
 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, PlainTextResponse, Response
 import os
 import logging
 
@@ -2631,6 +2631,56 @@ async def get_org_watchlist(
     watchlist.sort(key=lambda item: (severity_rank.get(item["severity"], 0), item.get("risk_score") or 0), reverse=True)
     return watchlist[:limit]
 
+
+@app.get("/org/report", tags=["Dashboard"])
+async def get_org_report(
+    days: int = 30,
+    current_user: User = Depends(get_dashboard_user)
+):
+    """
+    Detailed organization report for the selected time window.
+    """
+    org = Database.get_organization(current_user.organization_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    from agents.organization_report_agent import OrganizationReportAgent
+
+    return OrganizationReportAgent.build_report_data(org, days)
+
+
+@app.get("/org/report/pdf", tags=["Dashboard"])
+async def download_org_report_pdf(
+    days: int = 30,
+    current_user: User = Depends(get_dashboard_user)
+):
+    """
+    Generates and downloads a PDF version of the organization report.
+    """
+    org = Database.get_organization(current_user.organization_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    from agents.organization_report_agent import OrganizationReportAgent
+
+    try:
+        report = OrganizationReportAgent.build_report_data(org, days)
+        pdf_bytes = OrganizationReportAgent.generate_report_pdf_bytes(report)
+        filename = f"organization-report-{days}d.pdf"
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
+    except Exception as exc:
+        logger.exception("Failed to generate organization report PDF")
+        raise HTTPException(status_code=500, detail=f"Failed to generate organization report PDF: {exc}")
+
 # Database initialization happens via the Database class
 # No local dictionaries needed for V2
 
@@ -4328,6 +4378,29 @@ async def list_org_payments(current_user: User = Depends(AuthAgent.get_current_u
     payments = Database.list_payments(current_user.organization_id)
     return sorted(payments, key=lambda x: x.timestamp, reverse=True)
 
+@app.get("/billing/payment/{payment_id}/status", tags=["Billing"])
+async def get_payment_status(
+    payment_id: str,
+    current_user: User = Depends(AuthAgent.get_current_user)
+):
+    """
+    Returns the latest payment status and refreshes Lipila state when applicable.
+    """
+    payment = Database.get_payment(payment_id)
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment record not found")
+
+    if payment.org_id != current_user.organization_id:
+        raise HTTPException(status_code=403, detail="Unauthorized to access this payment")
+
+    from agents.payment_agent import PaymentAgent
+    try:
+        return PaymentAgent.refresh_payment_status(payment)
+    except PaymentAgent.GatewayError as exc:
+        raise HTTPException(status_code=502, detail=f"Payment Gateway Error: {str(exc)}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to refresh payment status: {str(exc)}")
+
 @app.get("/billing/invoice/{payment_id}", tags=["Billing"])
 async def download_invoice(
     payment_id: str,
@@ -4981,6 +5054,21 @@ async def record_officer_action(
     final_amount = action_data.get("final_amount", assessment.recommended_amount)
     final_duration = action_data.get("final_duration", assessment.recommended_duration_days)
     final_rate = action_data.get("final_interest_rate", assessment.recommended_interest_rate)
+    if final_amount is None:
+        final_amount = assessment.recommended_amount if assessment.recommended_amount is not None else 0.0
+    if final_duration is None:
+        final_duration = (
+            assessment.recommended_duration_days
+            if assessment.recommended_duration_days is not None
+            else 0
+        )
+    if final_rate is None:
+        final_rate = assessment.recommended_interest_rate if assessment.recommended_interest_rate is not None else 0.0
+    if officer_decision != "APPROVE":
+        # Non-approve outcomes do not carry underwriting terms; persist safe numeric values for schema integrity.
+        final_amount = float(final_amount or 0.0)
+        final_duration = int(final_duration or 0)
+        final_rate = float(final_rate or 0.0)
     referred_to_user_id = (action_data.get("referred_to_user_id") or "").strip() or None
     referred_to_user_name = (action_data.get("referred_to_user_name") or "").strip() or None
     referred_to_user_email = (action_data.get("referred_to_user_email") or "").strip() or None
@@ -4998,11 +5086,12 @@ async def record_officer_action(
             referred_to_user_name = referred_to_user_name or recipient_user.full_name
             referred_to_user_email = referred_to_user_email or recipient_user.email
 
-    is_override = (
-        officer_decision != assessment.decision or
-        abs((final_amount or 0) - (assessment.recommended_amount or 0)) > 0.01 or
-        final_duration != assessment.recommended_duration_days
-    )
+    is_override = officer_decision != assessment.decision
+    if officer_decision == "APPROVE":
+        is_override = is_override or (
+            abs((final_amount or 0) - (assessment.recommended_amount or 0)) > 0.01 or
+            final_duration != (assessment.recommended_duration_days or 0)
+        )
     if is_override:
         if not action_data.get("officer_notes") or not str(action_data.get("officer_notes")).strip():
             raise HTTPException(status_code=400, detail="Override requires officer_notes for audit compliance.")
@@ -5492,6 +5581,23 @@ async def list_follow_up_tasks(
     )
 
 
+@app.get("/org/follow-ups", response_model=List[FollowUpTask])
+async def list_org_follow_up_tasks(
+    user: User = Depends(get_dashboard_user)
+):
+    organization_id = None if user.organization_id == "PLATFORM_OWNER" else (user.organization_id or "").strip().upper()
+    return Database.list_follow_up_tasks(organization_id=organization_id)
+
+
+def _normalize_follow_up_due_date(raw_due_date: Optional[str]) -> Optional[str]:
+    if raw_due_date in (None, ""):
+        return None
+    try:
+        return datetime.strptime(str(raw_due_date), "%Y-%m-%d").date().isoformat()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Follow-up due_date must be in YYYY-MM-DD format.") from exc
+
+
 @app.post("/assessment/{assessment_id}/follow-ups", response_model=FollowUpTask)
 async def create_follow_up_task(
     assessment_id: str,
@@ -5507,22 +5613,178 @@ async def create_follow_up_task(
     note = (payload.get("note") or "").strip()
     if not note:
         raise HTTPException(status_code=400, detail="Follow-up note is required")
-    due_date = payload.get("due_date")
+    title = (payload.get("title") or "").strip() or note[:72]
+    due_date = _normalize_follow_up_due_date(payload.get("due_date"))
+    reason_code = (payload.get("reason_code") or "").strip() or None
+    task_type_raw = str(payload.get("task_type") or FollowUpType.OTHER)
+    priority_raw = str(payload.get("priority") or FollowUpPriority.MEDIUM)
+    try:
+        task_type = FollowUpType(task_type_raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Unsupported follow-up task_type '{task_type_raw}'.") from exc
+    try:
+        priority = FollowUpPriority(priority_raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Unsupported follow-up priority '{priority_raw}'.") from exc
+
+    assigned_to_user_id = (payload.get("assigned_to_user_id") or "").strip() or None
+    assigned_to_user_name = (payload.get("assigned_to_user_name") or "").strip() or None
+    assigned_to_user_email = (payload.get("assigned_to_user_email") or "").strip() or None
+    notify_assignee = bool(payload.get("notify_assignee")) and bool(assigned_to_user_id)
+    send_email = bool(payload.get("send_email")) and bool(assigned_to_user_email)
+    assigned_user = None
+
+    if assigned_to_user_id:
+        assigned_user = Database.get_user_by_id(assigned_to_user_id)
+        if not assigned_user:
+            raise HTTPException(status_code=400, detail="Assigned follow-up owner was not found.")
+        if user.organization_id != "PLATFORM_OWNER" and assigned_user.organization_id != assessment.organization_id:
+            raise HTTPException(status_code=403, detail="Assigned follow-up owner is outside your organization.")
+        assigned_to_user_name = assigned_to_user_name or assigned_user.full_name or assigned_user.email
+        assigned_to_user_email = assigned_to_user_email or assigned_user.email
+
+    current_time = datetime.now(timezone.utc)
 
     task = FollowUpTask(
         task_id=f"FUP-{uuid.uuid4().hex[:10].upper()}",
         assessment_id=assessment_id,
         borrower_id=assessment.borrower_id,
         organization_id=assessment.organization_id,
+        title=title,
         note=note,
+        task_type=task_type,
+        reason_code=reason_code,
+        priority=priority,
         due_date=due_date,
         status=FollowUpStatus.OPEN,
-        created_by=user.email or user.id
+        is_blocking=bool(payload.get("is_blocking")),
+        created_by=user.id or user.email or "unknown",
+        created_by_name=user.full_name or user.email,
+        created_by_email=user.email,
+        assigned_to_user_id=assigned_to_user_id,
+        assigned_to_user_name=assigned_to_user_name,
+        assigned_to_user_email=assigned_to_user_email,
+        notify_assignee=notify_assignee,
+        updated_at=current_time
     )
+
+    if notify_assignee and assigned_user and assigned_user.id != user.id:
+        notification = Notification(
+            notification_id=f"NTF-{uuid.uuid4().hex[:12].upper()}",
+            organization_id=assessment.organization_id,
+            recipient_user_id=assigned_user.id,
+            recipient_email=assigned_user.email,
+            created_by_user_id=user.id,
+            type="FOLLOW_UP_ASSIGNED",
+            title=f"Follow-up assigned: {task.title}",
+            message=(
+                f"{user.full_name or user.email or 'A team member'} assigned you a "
+                f"{task.task_type.replace('_', ' ').title()} task for assessment {assessment_id}."
+            ),
+            assessment_id=assessment_id,
+            metadata={
+                "task_id": task.task_id,
+                "task_type": task.task_type,
+                "priority": task.priority,
+                "due_date": task.due_date,
+                "reason_code": task.reason_code,
+                "is_blocking": task.is_blocking
+            }
+        )
+        Database.save_notification(notification)
+        task.notification_sent_at = current_time
+
+        if send_email and assigned_user.email:
+            email_result = EmailService.send_email(
+                to_email=assigned_user.email,
+                subject=f"New follow-up assigned: {task.title}",
+                body_text=(
+                    f"You have been assigned a follow-up task in MIFI Pro.\n\n"
+                    f"Assessment: {assessment_id}\n"
+                    f"Title: {task.title}\n"
+                    f"Type: {task.task_type}\n"
+                    f"Priority: {task.priority}\n"
+                    f"Due date: {task.due_date or 'Not set'}\n"
+                    f"Reason code: {task.reason_code or 'Not provided'}\n"
+                    f"Blocking: {'Yes' if task.is_blocking else 'No'}\n\n"
+                    f"Task details:\n{task.note}"
+                )
+            )
+            task.email_notification_status = email_result.get("status")
+            task.email_notification_message = email_result.get("message") or email_result.get("environment")
+
     Database.save_follow_up_task(task)
     AuditAgent.log_event("FOLLOW_UP_TASK_CREATED", user.email, {
         "assessment_id": assessment_id,
         "task_id": task.task_id,
+        "task_type": task.task_type,
+        "priority": task.priority,
+        "assigned_to_user_id": task.assigned_to_user_id,
+        "notify_assignee": task.notify_assignee,
+        "org": assessment.organization_id
+    })
+    return task
+
+
+@app.patch("/assessment/{assessment_id}/follow-ups/{task_id}", response_model=FollowUpTask)
+async def update_follow_up_task(
+    assessment_id: str,
+    task_id: str,
+    payload: Dict[str, Any] = Body(...),
+    user: User = Depends(get_dashboard_user)
+):
+    assessment = Database.get_assessment(assessment_id)
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    if user.organization_id != "PLATFORM_OWNER" and assessment.organization_id != user.organization_id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    task = Database.get_follow_up_task(task_id)
+    if not task or task.assessment_id != assessment_id:
+        raise HTTPException(status_code=404, detail="Follow-up task not found")
+    if task.organization_id != assessment.organization_id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    current_time = datetime.now(timezone.utc)
+    next_status = task.status
+    if payload.get("status"):
+        try:
+            next_status = FollowUpStatus(str(payload.get("status")))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Unsupported follow-up status '{payload.get('status')}'.") from exc
+
+    resolution_note = (payload.get("resolution_note") or "").strip() or task.resolution_note
+    if next_status in {FollowUpStatus.COMPLETED, FollowUpStatus.CANCELED} and not resolution_note:
+        raise HTTPException(status_code=400, detail="Resolution note is required when completing or canceling a follow-up.")
+
+    if payload.get("priority"):
+        try:
+            task.priority = FollowUpPriority(str(payload.get("priority")))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Unsupported follow-up priority '{payload.get('priority')}'.") from exc
+
+    if "due_date" in payload:
+        task.due_date = _normalize_follow_up_due_date(payload.get("due_date"))
+
+    task.status = next_status
+    task.resolution_note = resolution_note
+    task.updated_at = current_time
+
+    if next_status in {FollowUpStatus.COMPLETED, FollowUpStatus.CANCELED}:
+        task.completed_at = current_time
+        task.completed_by = user.id or user.email
+        task.completed_by_name = user.full_name or user.email
+    else:
+        task.completed_at = None
+        task.completed_by = None
+        task.completed_by_name = None
+
+    Database.save_follow_up_task(task)
+    AuditAgent.log_event("FOLLOW_UP_TASK_UPDATED", user.email, {
+        "assessment_id": assessment_id,
+        "task_id": task.task_id,
+        "status": task.status,
+        "priority": task.priority,
         "org": assessment.organization_id
     })
     return task
@@ -6737,15 +6999,10 @@ async def view_documentation(doc_name: str):
 # Catch-all for React Router (must be at the bottom)
 @app.get("/{full_path:path}")
 async def catch_all(full_path: str):
-    # Skip API/Auth/Docs
-    # Skip API/Auth/Docs/etc. to allow 404s for missing API paths
-    api_prefixes = ["api", "auth", "docs", "openapi", "billing", "admin/platform", "org", "borrower", "assessment", "loan"]
-    if any(full_path.startswith(p) for p in api_prefixes):
-        # But wait, if it's the Admin Dashboard path (no /api), we want index.html
-        # Only block if it's a specific API endpoint or a missing asset
-        if not full_path.endswith(".js") and not full_path.endswith(".css"):
-             # If it's a known API prefix but NOT an actual route, we'll let it 404 below
-             pass
+    # Prevent API typos (e.g. /api/api/...) from silently returning index.html.
+    # Those should fail as API 404s so the client can surface a real error.
+    if full_path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="Not Found")
     
     # 1. Try serving from frontend/dist
     if os.path.exists(frontend_dist):

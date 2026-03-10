@@ -73,7 +73,7 @@ class BillingAgent:
                  return False, {
                     "error": "Upgrade Required",
                     "code": 402,
-                    "message": "Your current plan does not support Production access. Upgrade to Starter or Growth to unlock live decision processing."
+                    "message": "Your current plan does not support Production access. Upgrade to Starter, Standard, or Growth to unlock live decision processing."
                 }
 
             # Enforce strict PaymentStatus.PAID for production

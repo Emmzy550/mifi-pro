@@ -97,7 +97,7 @@ export default function Decisions() {
                         className="bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm font-medium text-slate-700 outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all shadow-sm cursor-pointer"
                     >
                         <option value="ALL">All Decisions</option>
-                        <option value="MANUAL">Manual Assessments</option>
+                        <option value="MANUAL">Assesments</option>
                         <option value="API">API Assessments</option>
                     </select>
                 </div>

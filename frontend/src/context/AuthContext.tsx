@@ -3,9 +3,21 @@ import axios from 'axios';
 import { auth } from '../firebase';
 import { onAuthStateChanged, signOut, User as FirebaseUser } from 'firebase/auth';
 
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+
+const resolveApiBaseUrl = () => {
+    const configuredBaseUrl = import.meta.env.VITE_API_URL?.trim();
+    if (typeof window !== 'undefined' && LOCAL_HOSTS.has(window.location.hostname)) {
+        if (!configuredBaseUrl || configuredBaseUrl === '/api') {
+            return 'http://localhost:8000';
+        }
+    }
+    return configuredBaseUrl || 'http://localhost:8000';
+};
+
 // Configure Axios
 const api = axios.create({
-    baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000',
+    baseURL: resolveApiBaseUrl(),
 });
 
 // Add token to requests

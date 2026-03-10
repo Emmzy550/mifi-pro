@@ -19,13 +19,15 @@ import PolicyStudio from './pages/PolicyStudio';
 import Team from './pages/Team';
 import LandingPage from './pages/LandingPage';
 import Notifications from './pages/Notifications';
+import FollowUps from './pages/FollowUps';
+import OrganizationReport from './pages/OrganizationReport';
 import { Toaster } from 'react-hot-toast';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
     const { user, isLoading } = useAuth();
 
     if (isLoading) return <div className="min-h-screen bg-background text-foreground flex items-center justify-center">Loading...</div>;
-    if (!user) return <Navigate to="/login" replace />;
+    if (!user) return <Navigate to="/" replace />;
 
     return <>{children}</>;
 }
@@ -85,7 +87,9 @@ export default function App() {
                         <Route path="decisions/:assessmentId" element={<DecisionReview />} />
                         <Route path="policy-studio" element={<PolicyStudio />} />
                         <Route path="team" element={<Team />} />
+                        <Route path="follow-ups" element={<FollowUps />} />
                         <Route path="notifications" element={<Notifications />} />
+                        <Route path="organization-report" element={<OrganizationReport />} />
                         <Route path="audit-logs" element={<AuditLogs />} />
                         <Route path="documentation" element={<Documentation />} />
                         <Route path="usage-billing" element={<UsageBilling />} />

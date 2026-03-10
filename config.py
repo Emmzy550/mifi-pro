@@ -236,7 +236,7 @@ SECRET_KEY: str = os.getenv("SECRET_KEY", "DEVELOPMENT_INSECURE_KEY_12345")
 USD_TO_ZMW_RATE: float = float(os.getenv("USD_TO_ZMW_RATE", "28.5"))
 
 LIPILA_SECRET_KEY: str = os.getenv("LIPILA_SECRET_KEY", "")
-LIPILA_BASE_URL: str = os.getenv("LIPILA_BASE_URL", "https://blz.lipila.io/api/v1")
+LIPILA_BASE_URL: str = os.getenv("LIPILA_BASE_URL", "https://api.lipila.dev/api/v1")
 
 # ============================================================================
 # HELPER FUNCTIONS

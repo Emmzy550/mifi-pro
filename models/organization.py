@@ -14,6 +14,7 @@ class OrgEnvironment(str, Enum):
 class BillingPlan(str, Enum):
     SANDBOX = "SANDBOX"
     STARTER = "STARTER"
+    STANDARD = "STANDARD"
     GROWTH = "GROWTH"
     ENTERPRISE = "ENTERPRISE"
 
@@ -75,6 +76,7 @@ class Organization(BaseModel):
             # Map common variations
             if "SANDBOX" in v_upper: return BillingPlan.SANDBOX
             if "STARTER" in v_upper: return BillingPlan.STARTER
+            if "STANDARD" in v_upper: return BillingPlan.STANDARD
             if "GROWTH" in v_upper: return BillingPlan.GROWTH
             if "ENTERPRISE" in v_upper: return BillingPlan.ENTERPRISE
         return v

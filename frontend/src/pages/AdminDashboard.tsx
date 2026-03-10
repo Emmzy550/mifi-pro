@@ -1,50 +1,131 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useAuth, api } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
-import { X, Activity, Shield, Key, BarChart, AlertTriangle, CheckCircle2, RefreshCw, Slash, Settings, Trash2 } from 'lucide-react';
+import { X, Activity, Shield, BarChart3, AlertTriangle, RefreshCw, Trash2, Building2, Search, Plus, ChevronRight, Sparkles, Cpu, Clock3 } from 'lucide-react';
 import toast from 'react-hot-toast';
+
+type AdminOrg = {
+    id: string;
+    name: string;
+    plan?: string;
+    plan_name?: string;
+    status?: string;
+    environment?: string;
+    payment_status?: string;
+    billing_status?: string;
+    monthly_limit?: number | null;
+    created_at?: string;
+};
+
+type AuditLogRecord = {
+    event_id: string;
+    event_type: string;
+    actor: string;
+    organization_id: string;
+    timestamp: string;
+    details?: Record<string, unknown>;
+};
+
+type OrgDetails = {
+    organization: AdminOrg & { feature_flags?: Record<string, boolean> };
+    metrics?: { usage_24h?: number; usage_7d?: number; last_assessment_at?: string | null };
+};
+
+type AdminActionDialog = {
+    action: 'toggle-status' | 'rotate-keys' | 'delete-org';
+    title: string;
+    message: string;
+    confirmLabel: string;
+    tone: 'rose' | 'amber' | 'slate';
+    orgId: string;
+    nextStatus?: string;
+    requiresExactMatch?: boolean;
+    exactMatchValue?: string;
+    exactMatchLabel?: string;
+};
+
+const PLAN_OPTIONS = ['sandbox', 'starter', 'standard', 'growth', 'enterprise'];
+const formatZmwAmount = (amount: number) => `K${Number(amount || 0).toLocaleString()}`;
+const formatLimit = (value?: number | null) => (value === null || value === undefined ? 'Plan default' : value.toLocaleString());
+const planLabel = (org: AdminOrg) => `${org.plan_name || org.plan || 'SANDBOX'}`.toUpperCase();
+const heroSurfaceStyle = {
+    background: 'radial-gradient(circle at top left, rgba(99,102,241,0.18), transparent 42%), linear-gradient(135deg, #0f172a 0%, #1e293b 48%, #334155 100%)'
+};
+const drawerHeaderStyle = {
+    background: 'linear-gradient(135deg, #0f172a 0%, #1e293b 55%, #334155 100%)'
+};
+const tone = (value?: string) => {
+    const normalized = `${value || ''}`.toUpperCase();
+    if (['ACTIVE', 'PAID', 'PRODUCTION'].includes(normalized)) return 'bg-emerald-50 text-emerald-700 border-emerald-200';
+    if (normalized === 'PENDING') return 'bg-amber-50 text-amber-700 border-amber-200';
+    return 'bg-rose-50 text-rose-700 border-rose-200';
+};
 
 export default function AdminDashboard() {
     const { user } = useAuth();
     const navigate = useNavigate();
-    const [activeTab, setActiveTab] = useState('orgs');
-    const [orgs, setOrgs] = useState([]);
-    const [logs, setLogs] = useState([]);
+    const [activeTab, setActiveTab] = useState<'orgs' | 'audit' | 'governance'>('orgs');
+    const [orgs, setOrgs] = useState<AdminOrg[]>([]);
+    const [logs, setLogs] = useState<AuditLogRecord[]>([]);
     const [loading, setLoading] = useState(false);
     const [showAddOrg, setShowAddOrg] = useState(false);
-    const [platformSettings, setPlatformSettings] = useState({
-        llm_enabled: false,
-        total_mfis: 0,
-        total_disbursed_volume: 0,
-        total_assessments: 0,
-        global_default_rate: 0
-    });
-
-    // Form State
+    const [orgSearch, setOrgSearch] = useState('');
+    const [platformSettings, setPlatformSettings] = useState({ llm_enabled: false, total_mfis: 0, total_disbursed_volume: 0, total_assessments: 0, global_default_rate: 0 });
     const [newOrgName, setNewOrgName] = useState('');
     const [newOrgPlan, setNewOrgPlan] = useState('sandbox');
     const [newOrgAdminEmail, setNewOrgAdminEmail] = useState('');
-    const [credentials, setCredentials] = useState<{ email: string, password: string } | null>(null);
+    const [credentials, setCredentials] = useState<{ email: string; password: string } | null>(null);
     const [inviteNotice, setInviteNotice] = useState<{ email: string } | null>(null);
-
-    // Organization Detail Drawer State
     const [selectedOrgId, setSelectedOrgId] = useState<string | null>(null);
-    const [orgDetails, setOrgDetails] = useState<any>(null);
+    const [orgDetails, setOrgDetails] = useState<OrgDetails | null>(null);
     const [detailsLoading, setDetailsLoading] = useState(false);
     const [actionLoading, setActionLoading] = useState(false);
-    const [newLimit, setNewLimit] = useState<string>('');
+    const [newLimit, setNewLimit] = useState('');
     const [rotatedKey, setRotatedKey] = useState<string | null>(null);
+    const [adminActionDialog, setAdminActionDialog] = useState<AdminActionDialog | null>(null);
+    const [adminActionInput, setAdminActionInput] = useState('');
 
     useEffect(() => {
         if (user && user.role !== 'SUPER_ADMIN') {
             navigate('/dashboard');
             return;
         }
+        if (activeTab === 'orgs') void fetchOrgs();
+        if (activeTab === 'audit') void fetchLogs();
+        if (activeTab === 'governance') void fetchPlatformStats();
+    }, [user, activeTab, navigate]);
 
-        if (activeTab === 'orgs') fetchOrgs();
-        if (activeTab === 'audit') fetchLogs();
-        if (activeTab === 'governance') fetchPlatformStats();
-    }, [user, activeTab]);
+    useEffect(() => {
+        if (!selectedOrgId && !adminActionDialog) return;
+
+        const previousOverflow = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+
+        return () => {
+            document.body.style.overflow = previousOverflow;
+        };
+    }, [selectedOrgId, adminActionDialog]);
+
+    const filteredOrgs = useMemo(() => {
+        const search = orgSearch.trim().toLowerCase();
+        if (!search) return orgs;
+        return orgs.filter((org) =>
+            [org.id, org.name, org.plan, org.plan_name, org.environment, org.status]
+                .filter(Boolean)
+                .some((value) => `${value}`.toLowerCase().includes(search))
+        );
+    }, [orgSearch, orgs]);
+
+    const orgStats = useMemo(
+        () => ({
+            total: orgs.length,
+            active: orgs.filter((org) => `${org.status || ''}`.toUpperCase() === 'ACTIVE').length,
+            production: orgs.filter((org) => `${org.environment || ''}`.toUpperCase() === 'PRODUCTION').length,
+            pending: orgs.filter((org) => `${org.payment_status || ''}`.toUpperCase() === 'PENDING').length
+        }),
+        [orgs]
+    );
 
     const fetchPlatformStats = async () => {
         setLoading(true);
@@ -53,6 +134,7 @@ export default function AdminDashboard() {
             setPlatformSettings(res.data);
         } catch (e) {
             console.error(e);
+            toast.error('Failed to load platform statistics.');
         } finally {
             setLoading(false);
         }
@@ -62,9 +144,10 @@ export default function AdminDashboard() {
         setLoading(true);
         try {
             const res = await api.get('/admin/organizations');
-            setOrgs(res.data);
+            setOrgs(Array.isArray(res.data) ? res.data : []);
         } catch (e) {
             console.error(e);
+            toast.error('Failed to load organizations.');
         } finally {
             setLoading(false);
         }
@@ -74,9 +157,10 @@ export default function AdminDashboard() {
         setLoading(true);
         try {
             const res = await api.get('/admin/audit-logs');
-            setLogs(res.data);
+            setLogs(Array.isArray(res.data) ? res.data : []);
         } catch (e) {
             console.error(e);
+            toast.error('Failed to load audit logs.');
         } finally {
             setLoading(false);
         }
@@ -94,29 +178,23 @@ export default function AdminDashboard() {
                 admin_email: newOrgAdminEmail
             });
 
-            if (res.data && res.data.user_created) {
-                if (res.data.invite_sent) {
-                    setInviteNotice({ email: newOrgAdminEmail });
-                }
-                if (res.data.initial_credentials) {
-                    setCredentials(res.data.initial_credentials);
-                }
+            if (res.data?.user_created) {
+                if (res.data.invite_sent) setInviteNotice({ email: newOrgAdminEmail });
+                if (res.data.initial_credentials) setCredentials(res.data.initial_credentials);
                 setNewOrgName('');
                 setNewOrgAdminEmail('');
-                fetchOrgs();
-            } else if (res.data) {
-                // Success: Org created but no user requested/created
-                setShowAddOrg(false);
-                setNewOrgName('');
-                setNewOrgAdminEmail('');
-                fetchOrgs();
-                toast.success("Organization created successfully.");
+                await fetchOrgs();
+                return;
             }
+
+            setShowAddOrg(false);
+            setNewOrgName('');
+            setNewOrgAdminEmail('');
+            await fetchOrgs();
+            toast.success('Organization created successfully.');
         } catch (e: any) {
             console.error(e);
-            // Show specific error from backend (e.g. Email exists)
-            const errorMsg = e.response?.data?.detail || "Failed to create organization. Please try again.";
-            toast.error(errorMsg);
+            toast.error(e.response?.data?.detail || 'Failed to create organization.');
         } finally {
             setLoading(false);
         }
@@ -127,9 +205,10 @@ export default function AdminDashboard() {
         try {
             await api.patch('/admin/platform/settings', { llm_enabled: enabled });
             await fetchPlatformStats();
+            toast.success(`AI explanations ${enabled ? 'enabled' : 'disabled'}.`);
         } catch (e) {
             console.error(e);
-            toast.error("Failed to update AI settings");
+            toast.error('Failed to update AI settings.');
         } finally {
             setLoading(false);
         }
@@ -139,49 +218,81 @@ export default function AdminDashboard() {
         setSelectedOrgId(orgId);
         setDetailsLoading(true);
         setRotatedKey(null);
+        setAdminActionDialog(null);
+        setAdminActionInput('');
         try {
             const res = await api.get(`/admin/organizations/${orgId}/details`);
             setOrgDetails(res.data);
             const limitValue = res.data.organization.monthly_limit;
             setNewLimit(limitValue === null || limitValue === undefined ? '' : String(limitValue));
-        } catch (e) {
+        } catch (e: any) {
             console.error(e);
-            toast.error("Failed to fetch organization details.");
+            if (e?.response?.status === 404) {
+                setOrgs((current) => current.filter((org) => org.id !== orgId));
+                setSelectedOrgId(null);
+                setOrgDetails(null);
+                toast.error('Organization no longer exists.');
+            } else {
+                toast.error('Failed to fetch organization details.');
+            }
         } finally {
             setDetailsLoading(false);
         }
     };
 
-    const handleToggleOrgStatus = async () => {
+    const handleToggleOrgStatus = () => {
         if (!orgDetails) return;
-        const newStatus = orgDetails.organization.status === 'ACTIVE' ? 'SUSPENDED' : 'ACTIVE';
-        if (!window.confirm(`Are you sure you want to ${newStatus.toLowerCase()} this organization?`)) return;
+        const currentStatus = `${orgDetails.organization.status || ''}`.toUpperCase();
+        const newStatus = currentStatus === 'ACTIVE' ? 'SUSPENDED' : 'ACTIVE';
+        setAdminActionInput('');
+        setAdminActionDialog({
+            action: 'toggle-status',
+            title: `${newStatus === 'ACTIVE' ? 'Reactivate' : 'Suspend'} organization`,
+            message: `This will ${newStatus.toLowerCase()} ${orgDetails.organization.name} (${orgDetails.organization.id}).`,
+            confirmLabel: newStatus === 'ACTIVE' ? 'Reactivate organization' : 'Suspend organization',
+            tone: newStatus === 'ACTIVE' ? 'slate' : 'rose',
+            orgId: orgDetails.organization.id,
+            nextStatus: newStatus
+        });
+    };
 
+    const applyToggleOrgStatus = async (orgId: string, newStatus: string) => {
         setActionLoading(true);
         try {
-            await api.patch(`/admin/organizations/${orgDetails.organization.id}`, { status: newStatus });
-            await fetchOrgDetails(orgDetails.organization.id);
-            fetchOrgs(); // Refresh list
+            await api.patch(`/admin/organizations/${orgId}`, { status: newStatus });
+            setOrgs((current) => current.map((org) => org.id === orgId ? { ...org, status: newStatus } : org));
+            await fetchOrgDetails(orgId);
+            toast.success(`Organization ${newStatus === 'ACTIVE' ? 'reactivated' : 'suspended'}.`);
         } catch (e) {
             console.error(e);
-            toast.error("Failed to update organization status.");
+            toast.error('Failed to update organization status.');
         } finally {
             setActionLoading(false);
         }
     };
 
-    const handleRotateKeys = async () => {
+    const handleRotateKeys = () => {
         if (!orgDetails) return;
-        if (!window.confirm("WARNING: This will revoke ALL existing API keys for this organization and generate a new one. This cannot be undone. Proceed?")) return;
+        setAdminActionInput('');
+        setAdminActionDialog({
+            action: 'rotate-keys',
+            title: 'Rotate API keys',
+            message: `This revokes all existing API keys for ${orgDetails.organization.name} and generates a new key set.`,
+            confirmLabel: 'Rotate keys',
+            tone: 'amber',
+            orgId: orgDetails.organization.id
+        });
+    };
 
+    const applyRotateKeys = async (orgId: string) => {
         setActionLoading(true);
         try {
-            const res = await api.post(`/admin/organizations/${orgDetails.organization.id}/rotate-keys`);
+            const res = await api.post(`/admin/organizations/${orgId}/rotate-keys`);
             setRotatedKey(res.data.new_key);
-            toast.success("API keys rotated successfully.");
+            toast.success('API keys rotated successfully.');
         } catch (e) {
             console.error(e);
-            toast.error("Failed to rotate API keys.");
+            toast.error('Failed to rotate API keys.');
         } finally {
             setActionLoading(false);
         }
@@ -192,487 +303,469 @@ export default function AdminDashboard() {
         const trimmed = newLimit.trim();
         const parsedLimit = trimmed === '' ? null : Number(trimmed);
         if (parsedLimit !== null && (!Number.isFinite(parsedLimit) || parsedLimit < 0)) {
-            toast.error("Please enter a valid non-negative limit.");
+            toast.error('Please enter a valid non-negative limit.');
             return;
         }
         setActionLoading(true);
         try {
             await api.patch(`/admin/organizations/${orgDetails.organization.id}`, { monthly_limit: parsedLimit });
+            setOrgs((current) => current.map((org) => org.id === orgDetails.organization.id ? { ...org, monthly_limit: parsedLimit } : org));
             await fetchOrgDetails(orgDetails.organization.id);
-            fetchOrgs(); // Refresh list
-            toast.success("Limit updated successfully.");
+            toast.success('Usage limit updated.');
         } catch (e) {
             console.error(e);
-            toast.error("Failed to update usage limit.");
+            toast.error('Failed to update usage limit.');
         } finally {
             setActionLoading(false);
         }
     };
 
-    const handleDeleteOrganization = async () => {
+    const handleDeleteOrganization = () => {
         if (!orgDetails) return;
         const orgId = orgDetails.organization.id;
-        const orgName = orgDetails.organization.name;
-        const confirmation = window.prompt(
-            `This will permanently delete ${orgName} (${orgId}) and all related data.\nType the Organization ID to confirm:`
-        );
-        if (confirmation !== orgId) {
-            if (confirmation !== null) {
-                toast.error("Confirmation did not match organization ID.");
-            }
-            return;
-        }
+        setAdminActionInput('');
+        setAdminActionDialog({
+            action: 'delete-org',
+            title: 'Delete organization permanently',
+            message: `This will permanently delete ${orgDetails.organization.name} and all related data.`,
+            confirmLabel: 'Delete permanently',
+            tone: 'rose',
+            orgId,
+            requiresExactMatch: true,
+            exactMatchValue: orgId,
+            exactMatchLabel: 'Type the Organization ID to confirm'
+        });
+    };
 
+    const applyDeleteOrganization = async (orgId: string) => {
         setActionLoading(true);
         try {
             await api.delete(`/admin/organizations/${orgId}`);
-            toast.success("Organization permanently deleted.");
+            setOrgs((current) => current.filter((org) => org.id !== orgId));
             setSelectedOrgId(null);
             setOrgDetails(null);
-            fetchOrgs();
+            setRotatedKey(null);
+            toast.success('Organization permanently deleted.');
         } catch (e: any) {
             console.error(e);
-            toast.error(e?.response?.data?.detail || "Failed to delete organization.");
+            toast.error(e?.response?.data?.detail || 'Failed to delete organization.');
         } finally {
             setActionLoading(false);
         }
     };
 
-    if (loading && orgs.length === 0 && logs.length === 0) return <div className="p-8">Loading Admin Dashboard...</div>;
+    const closeAdminActionDialog = () => {
+        if (actionLoading) return;
+        setAdminActionDialog(null);
+        setAdminActionInput('');
+    };
+
+    const closeOrganizationOverlay = () => {
+        if (actionLoading) return;
+        setSelectedOrgId(null);
+        setOrgDetails(null);
+        setAdminActionDialog(null);
+        setAdminActionInput('');
+    };
+
+    const handleAdminActionConfirm = async () => {
+        if (!adminActionDialog) return;
+
+        if (adminActionDialog.requiresExactMatch && adminActionInput.trim() !== adminActionDialog.exactMatchValue) {
+            toast.error('Confirmation did not match organization ID.');
+            return;
+        }
+
+        setAdminActionDialog(null);
+        setAdminActionInput('');
+
+        if (adminActionDialog.action === 'toggle-status' && adminActionDialog.nextStatus) {
+            await applyToggleOrgStatus(adminActionDialog.orgId, adminActionDialog.nextStatus);
+            return;
+        }
+
+        if (adminActionDialog.action === 'rotate-keys') {
+            await applyRotateKeys(adminActionDialog.orgId);
+            return;
+        }
+
+        if (adminActionDialog.action === 'delete-org') {
+            await applyDeleteOrganization(adminActionDialog.orgId);
+        }
+    };
+
+    if (loading && orgs.length === 0 && logs.length === 0 && activeTab !== 'governance') {
+        return <div className="p-8 text-slate-500">Loading super admin workspace...</div>;
+    }
 
     return (
-        <div className="p-6">
-            <h1 className="text-3xl font-bold mb-6 text-slate-800">Super Admin Dashboard</h1>
+        <div className="w-full space-y-8">
+            <section style={heroSurfaceStyle} className="rounded-[32px] border border-slate-200/80 p-8 text-white shadow-xl shadow-slate-900/10">
+                <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.22em] text-slate-100">
+                    <Sparkles size={14} />
+                    Platform Control
+                </div>
+                <div className="grid gap-6 xl:grid-cols-[minmax(0,1.2fr)_minmax(360px,0.8fr)]">
+                    <div>
+                        <h1 className="text-3xl font-semibold tracking-tight md:text-4xl">Super Admin Workspace</h1>
+                        <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300">
+                            Manage organizations, monitor platform-wide activity, and apply governance controls from a wider operational view.
+                        </p>
+                    </div>
+                    <div className="grid gap-4 md:grid-cols-2">
+                        <div className="rounded-3xl border border-white/15 bg-white p-5 text-slate-900 shadow-sm"><div className="text-xs uppercase tracking-[0.22em] text-slate-500">Organizations</div><div className="mt-2 text-3xl font-semibold">{orgStats.total}</div></div>
+                        <div className="rounded-3xl border border-white/15 bg-white p-5 text-slate-900 shadow-sm"><div className="text-xs uppercase tracking-[0.22em] text-slate-500">Active</div><div className="mt-2 text-3xl font-semibold">{orgStats.active}</div></div>
+                        <div className="rounded-3xl border border-white/15 bg-white p-5 text-slate-900 shadow-sm"><div className="text-xs uppercase tracking-[0.22em] text-slate-500">Production</div><div className="mt-2 text-3xl font-semibold">{orgStats.production}</div></div>
+                        <div className="rounded-3xl border border-white/15 bg-white p-5 text-slate-900 shadow-sm"><div className="text-xs uppercase tracking-[0.22em] text-slate-500">Pending Pay</div><div className="mt-2 text-3xl font-semibold">{orgStats.pending}</div></div>
+                    </div>
+                </div>
+            </section>
 
-            <div className="flex space-x-4 mb-6 border-b">
-                <button
-                    className={`pb-2 px-4 ${activeTab === 'orgs' ? 'border-b-2 border-indigo-600 font-bold text-indigo-600' : 'text-slate-500'}`}
-                    onClick={() => setActiveTab('orgs')}
-                >
-                    Organizations
-                </button>
-                <button
-                    className={`pb-2 px-4 ${activeTab === 'audit' ? 'border-b-2 border-indigo-600 font-bold text-indigo-600' : 'text-slate-500'}`}
-                    onClick={() => setActiveTab('audit')}
-                >
-                    Global Audit Logs
-                </button>
-                <button
-                    className={`pb-2 px-4 ${activeTab === 'governance' ? 'border-b-2 border-indigo-600 font-bold text-indigo-600' : 'text-slate-500'}`}
-                    onClick={() => setActiveTab('governance')}
-                >
-                    🛡️ AI Governance
-                </button>
+            <div className="rounded-[28px] border border-slate-200 bg-white p-3 shadow-sm">
+                <div className="flex flex-wrap gap-2">
+                    {[
+                        ['orgs', 'Organizations', Building2],
+                        ['audit', 'Audit Trail', Clock3],
+                        ['governance', 'AI Governance', Cpu]
+                    ].map(([key, label, Icon]: any) => (
+                        <button
+                            key={key}
+                            type="button"
+                            onClick={() => setActiveTab(key)}
+                            className={`inline-flex items-center gap-2 rounded-2xl px-4 py-3 text-sm font-semibold transition ${activeTab === key ? 'bg-slate-900 text-white shadow-lg shadow-slate-900/10' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'}`}
+                        >
+                            <Icon size={16} />
+                            {label}
+                        </button>
+                    ))}
+                </div>
             </div>
 
             {activeTab === 'orgs' && (
-                <div>
-                    <div className="flex justify-between mb-4">
-                        <h2 className="text-xl font-semibold">Registered Clients</h2>
-                        <button
-                            onClick={() => { setShowAddOrg(true); setCredentials(null); setInviteNotice(null); }}
-                            className="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700"
-                        >
-                            + Add Organization
-                        </button>
+                <div className="space-y-6">
+                    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
+                        <div className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
+                            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                                <div>
+                                    <h2 className="text-xl font-semibold text-slate-900">Organization Directory</h2>
+                                    <p className="mt-1 text-sm text-slate-500">Search, inspect, and manage institutions from a cleaner card-based view.</p>
+                                </div>
+                                <div className="flex flex-col gap-3 md:flex-row">
+                                    <div className="relative min-w-[260px]">
+                                        <Search size={18} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+                                        <input
+                                            type="text"
+                                            value={orgSearch}
+                                            onChange={(e) => setOrgSearch(e.target.value)}
+                                            placeholder="Search organization, ID, plan, or status"
+                                            className="w-full rounded-2xl border border-slate-200 bg-slate-50 py-3 pl-11 pr-4 text-sm outline-none transition focus:border-slate-300 focus:bg-white focus:ring-4 focus:ring-slate-100"
+                                        />
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => { setShowAddOrg((current) => !current); setCredentials(null); setInviteNotice(null); }}
+                                        className="inline-flex items-center justify-center gap-2 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800"
+                                    >
+                                        <Plus size={16} />
+                                        {showAddOrg ? 'Close Form' : 'Add Organization'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        <div className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
+                            <h3 className="font-semibold text-slate-900">Ops Snapshot</h3>
+                            <div className="mt-4 space-y-3 text-sm">
+                                <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"><span className="text-slate-500">Visible institutions</span><span className="font-semibold text-slate-900">{filteredOrgs.length}</span></div>
+                                <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"><span className="text-slate-500">Suspended</span><span className="font-semibold text-slate-900">{orgs.filter((org) => `${org.status || ''}`.toUpperCase() === 'SUSPENDED').length}</span></div>
+                                <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"><span className="text-slate-500">Needs payment</span><span className="font-semibold text-slate-900">{orgs.filter((org) => ['UNPAID', 'FAILED', 'PENDING'].includes(`${org.payment_status || ''}`.toUpperCase())).length}</span></div>
+                            </div>
+                        </div>
                     </div>
 
                     {showAddOrg && (
-                        <div className="bg-white p-4 mb-4 rounded shadow border">
-                            {(!credentials && !inviteNotice) ? (
-                                <>
-                                    <h3 className="font-bold mb-2">New Organization</h3>
-                                    <form onSubmit={handleCreateOrg} className="flex flex-wrap gap-4 items-end">
-                                        <div>
-                                            <label className="block text-sm font-medium">Org Name</label>
-                                            <input
-                                                type="text"
-                                                value={newOrgName}
-                                                onChange={e => setNewOrgName(e.target.value)}
-                                                className="border rounded p-2"
-                                                placeholder="e.g. Microfinance X"
-                                                required
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="block text-sm font-medium">Admin Email (Initial User)</label>
-                                            <input
-                                                type="email"
-                                                value={newOrgAdminEmail}
-                                                onChange={e => setNewOrgAdminEmail(e.target.value)}
-                                                className="border rounded p-2"
-                                                placeholder="admin@client.com"
-                                                required
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="block text-sm font-medium">Plan</label>
-                                            <select
-                                                value={newOrgPlan}
-                                                onChange={e => setNewOrgPlan(e.target.value)}
-                                                className="border rounded p-2"
-                                            >
-                                                <option value="sandbox">Sandbox</option>
-                                                <option value="starter">Starter</option>
-                                                <option value="enterprise">Enterprise</option>
-                                            </select>
-                                        </div>
-                                        <div className="flex gap-2">
-                                            <button type="submit" disabled={loading} className="bg-green-600 text-white px-4 py-2 rounded font-bold disabled:opacity-50">
-                                                {loading ? 'Creating...' : 'Create Org & User'}
-                                            </button>
-                                            <button type="button" onClick={() => setShowAddOrg(false)} className="text-slate-500 px-2 py-2">Cancel</button>
-                                        </div>
-                                    </form>
-                                </>
+                        <div className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+                            {!credentials && !inviteNotice ? (
+                                <form onSubmit={handleCreateOrg} className="grid gap-4 lg:grid-cols-[1.2fr_1.2fr_0.8fr_auto] lg:items-end">
+                                    <div><label className="mb-2 block text-sm font-medium text-slate-700">Organization name</label><input type="text" value={newOrgName} onChange={(e) => setNewOrgName(e.target.value)} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-slate-300 focus:bg-white focus:ring-4 focus:ring-slate-100" placeholder="e.g. Microfinance X" required /></div>
+                                    <div><label className="mb-2 block text-sm font-medium text-slate-700">Initial admin email</label><input type="email" value={newOrgAdminEmail} onChange={(e) => setNewOrgAdminEmail(e.target.value)} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-slate-300 focus:bg-white focus:ring-4 focus:ring-slate-100" placeholder="admin@institution.com" required /></div>
+                                    <div><label className="mb-2 block text-sm font-medium text-slate-700">Plan</label><select value={newOrgPlan} onChange={(e) => setNewOrgPlan(e.target.value)} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-slate-300 focus:bg-white focus:ring-4 focus:ring-slate-100">{PLAN_OPTIONS.map((option) => <option key={option} value={option}>{option.charAt(0).toUpperCase() + option.slice(1)}</option>)}</select></div>
+                                    <div className="flex gap-2"><button type="submit" disabled={loading} className="rounded-2xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:opacity-60">{loading ? 'Creating...' : 'Create'}</button><button type="button" onClick={() => setShowAddOrg(false)} className="rounded-2xl px-4 py-3 text-sm font-semibold text-slate-500 transition hover:bg-slate-100 hover:text-slate-900">Cancel</button></div>
+                                </form>
                             ) : inviteNotice ? (
-                                <div className="bg-emerald-50 p-4 border border-emerald-200 rounded">
-                                    <h3 className="text-emerald-800 font-bold mb-2">Organization Created Successfully!</h3>
-                                    <p className="text-emerald-700">
-                                        An invitation email was sent to <strong>{inviteNotice.email}</strong>.
-                                    </p>
-                                    <button
-                                        onClick={() => setShowAddOrg(false)}
-                                        className="mt-4 bg-slate-800 text-white px-6 py-2 rounded font-bold hover:bg-slate-700 transition-colors"
-                                    >
-                                        Done
-                                    </button>
-                                </div>
+                                <div className="rounded-3xl border border-emerald-200 bg-emerald-50 p-5"><h3 className="text-lg font-semibold text-emerald-900">Organization created</h3><p className="mt-2 text-sm text-emerald-700">An invitation email was sent to <span className="font-semibold">{inviteNotice.email}</span>.</p><button onClick={() => setShowAddOrg(false)} className="mt-5 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800">Done</button></div>
                             ) : (
-                                <div className="bg-green-50 p-4 border border-green-200 rounded">
-                                    <h3 className="text-green-800 font-bold mb-2">Organization Created Successfully!</h3>
-                                    <p className="mb-4 text-green-700">Email delivery is not configured. Please provide these credentials to the client administrator:</p>
-                                    <div className="bg-white p-4 border rounded font-mono text-sm shadow-inner">
-                                        <p><strong>URL:</strong> {window.location.origin}/login</p>
-                                        <p><strong>Email:</strong> {credentials?.email}</p>
-                                        <p><strong>Password:</strong> <span className="text-red-600 font-bold select-all bg-red-50 px-1">{credentials?.password}</span></p>
-                                    </div>
-                                    <p className="mt-4 text-xs text-red-600 italic">!! Make sure to copy the password now. It will not be shown again.</p>
-                                    <button
-                                        onClick={() => setShowAddOrg(false)}
-                                        className="mt-4 bg-slate-800 text-white px-6 py-2 rounded font-bold hover:bg-slate-700 transition-colors"
-                                    >
-                                        Done
-                                    </button>
-                                </div>
+                                <div className="rounded-3xl border border-amber-200 bg-amber-50 p-5"><h3 className="text-lg font-semibold text-amber-900">Organization created</h3><p className="mt-2 text-sm text-amber-800">Email delivery is not configured. Share these credentials with the client administrator.</p><div className="mt-4 rounded-2xl border border-amber-200 bg-white p-4 font-mono text-sm"><p><strong>URL:</strong> {window.location.origin}/login</p><p><strong>Email:</strong> {credentials?.email}</p><p><strong>Password:</strong> <span className="select-all font-bold text-rose-600">{credentials?.password}</span></p></div><button onClick={() => setShowAddOrg(false)} className="mt-5 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800">Done</button></div>
                             )}
                         </div>
                     )}
 
-                    <div className="bg-white rounded shadow overflow-hidden">
-                        <table className="w-full text-left">
-                            <thead className="bg-slate-100 border-b">
-                                <tr>
-                                    <th className="p-4">ID</th>
-                                    <th className="p-4">Name</th>
-                                    <th className="p-4">Plan</th>
-                                    <th className="p-4">Status</th>
-                                    <th className="p-4">Limit</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {orgs.map((org: any) => (
-                                    <tr
-                                        key={org.id}
-                                        className="border-b hover:bg-indigo-50/30 cursor-pointer transition-colors"
-                                        onClick={() => fetchOrgDetails(org.id)}
-                                    >
-                                        <td className="p-4 font-mono text-sm">{org.id}</td>
-                                        <td className="p-4 font-medium">{org.name}</td>
-                                        <td className="p-4">
-                                            <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs uppercase">{org.plan_name || org.plan}</span>
-                                        </td>
-                                        <td className="p-4">
-                                            {org.status === 'ACTIVE' ? (
-                                                <span className="text-green-600 font-bold">Active</span>
-                                            ) : (
-                                                <span className="text-red-600 font-bold">{org.status}</span>
-                                            )}
-                                        </td>
-                                        <td className="p-4">{org.monthly_limit}</td>
-                                    </tr>
-                                ))}
-                                {orgs.length === 0 && !loading && (
-                                    <tr>
-                                        <td colSpan={5} className="p-8 text-center text-slate-400 italic">No organizations found.</td>
-                                    </tr>
-                                )}
-                            </tbody>
-                        </table>
+                    <div className="grid gap-4 xl:grid-cols-2 2xl:grid-cols-3">
+                        {filteredOrgs.map((org) => (
+                            <button key={org.id} type="button" onClick={() => fetchOrgDetails(org.id)} className="rounded-[28px] border border-slate-200 bg-white p-5 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-lg">
+                                <div className="flex items-start justify-between gap-4">
+                                    <div><div className="mb-2 inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500"><Building2 size={12} /> {planLabel(org)}</div><h3 className="text-lg font-semibold text-slate-900">{org.name}</h3><p className="mt-1 font-mono text-xs text-slate-500">{org.id}</p></div>
+                                    <div className="rounded-2xl bg-slate-100 p-2 text-slate-500"><ChevronRight size={18} /></div>
+                                </div>
+                                <div className="mt-5 grid grid-cols-2 gap-3">
+                                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3"><div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Status</div><div className={`mt-2 inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${tone(org.status)}`}>{org.status || 'UNKNOWN'}</div></div>
+                                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3"><div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Environment</div><div className={`mt-2 inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${tone(org.environment)}`}>{org.environment || 'SANDBOX'}</div></div>
+                                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3"><div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Payment</div><div className={`mt-2 inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${tone(org.payment_status)}`}>{org.payment_status || 'UNPAID'}</div></div>
+                                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3"><div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Monthly limit</div><div className="mt-2 text-sm font-semibold text-slate-900">{formatLimit(org.monthly_limit)}</div></div>
+                                </div>
+                                <div className="mt-4 flex items-center justify-between text-xs text-slate-500"><span>Billing: {(org.billing_status || 'FREE').toUpperCase()}</span><span>{org.created_at ? new Date(org.created_at).toLocaleDateString() : 'Recently created'}</span></div>
+                            </button>
+                        ))}
                     </div>
+
+                    {filteredOrgs.length === 0 && !loading && <div className="rounded-[28px] border border-dashed border-slate-300 bg-white px-6 py-12 text-center text-slate-500">No organizations matched your current search.</div>}
                 </div>
             )}
 
             {activeTab === 'audit' && (
-                <div>
-                    <div className="bg-white rounded shadow overflow-hidden">
-                        <table className="w-full text-left">
-                            <thead className="bg-slate-100 border-b">
-                                <tr>
-                                    <th className="p-4">Time</th>
-                                    <th className="p-4">Event</th>
-                                    <th className="p-4">Actor</th>
-                                    <th className="p-4">Org</th>
-                                    <th className="p-4">Details</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {logs.map((log: any) => (
-                                    <tr key={log.event_id} className="border-b hover:bg-slate-50">
-                                        <td className="p-4 text-sm text-slate-500">
-                                            {new Date(log.timestamp).toLocaleString()}
-                                        </td>
-                                        <td className="p-4 font-mono text-sm font-bold">{log.event_type}</td>
-                                        <td className="p-4 text-sm">{log.actor}</td>
-                                        <td className="p-4 text-xs font-mono">{log.organization_id}</td>
-                                        <td className="p-4 text-xs font-mono text-slate-600 max-w-xs truncate">
-                                            {JSON.stringify(log.details)}
-                                        </td>
-                                    </tr>
-                                ))}
-                                {logs.length === 0 && !loading && (
-                                    <tr>
-                                        <td colSpan={5} className="p-8 text-center text-slate-400 italic">No audit logs found.</td>
-                                    </tr>
-                                )}
-                            </tbody>
-                        </table>
+                <div className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
+                    <div className="mb-5 flex items-center justify-between gap-4">
+                        <div>
+                            <h2 className="text-xl font-semibold text-slate-900">Global audit trail</h2>
+                            <p className="mt-1 text-sm text-slate-500">Platform-wide events across onboarding, billing, governance, and operations.</p>
+                        </div>
+                        <div className="rounded-2xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-600">{logs.length} events</div>
+                    </div>
+                    <div className="space-y-3">
+                        {logs.map((log) => (
+                            <div key={log.event_id} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                                    <div className="space-y-2">
+                                        <div className="inline-flex rounded-full bg-slate-900 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-white">{log.event_type}</div>
+                                        <div className="text-sm text-slate-700"><span className="font-semibold">{log.actor}</span> • <span className="font-mono text-xs">{log.organization_id}</span></div>
+                                    </div>
+                                    <div className="text-sm text-slate-500">{new Date(log.timestamp).toLocaleString()}</div>
+                                </div>
+                                <pre className="mt-4 overflow-x-auto rounded-2xl border border-slate-200 bg-white p-4 text-xs text-slate-600">{JSON.stringify(log.details || {}, null, 2)}</pre>
+                            </div>
+                        ))}
+                        {logs.length === 0 && !loading && <div className="rounded-[28px] border border-dashed border-slate-300 px-6 py-12 text-center text-slate-500">No audit logs found.</div>}
                     </div>
                 </div>
             )}
 
             {activeTab === 'governance' && (
-                <div className="max-w-4xl mx-auto">
-                    <div className="bg-white p-6 rounded-xl shadow-lg border border-slate-200">
-                        <div className="flex justify-between items-center mb-6">
+                <div className="grid gap-6 xl:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]">
+                    <div className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+                        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                             <div>
-                                <h2 className="text-2xl font-bold text-slate-800">Platform Intelligence & AI Control</h2>
-                                <p className="text-slate-500 mt-1">Configure global AI behavior and view aggregated performance.</p>
+                                <h2 className="text-2xl font-semibold text-slate-900">AI governance</h2>
+                                <p className="mt-1 text-sm text-slate-500">Control the explanation layer without touching the underlying decision rules.</p>
                             </div>
-                            <div className="flex items-center space-x-3 bg-slate-50 p-3 rounded-lg border">
-                                <span className="text-sm font-semibold text-slate-600">AI Explanations:</span>
-                                <button
-                                    onClick={() => handleUpdateLLM(!platformSettings.llm_enabled)}
-                                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${platformSettings.llm_enabled ? 'bg-indigo-600' : 'bg-slate-300'}`}
-                                >
-                                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${platformSettings.llm_enabled ? 'translate-x-6' : 'translate-x-1'}`} />
+                            <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                                <span className="text-sm font-semibold text-slate-600">AI explanations</span>
+                                <button onClick={() => handleUpdateLLM(!platformSettings.llm_enabled)} className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${platformSettings.llm_enabled ? 'bg-emerald-600' : 'bg-slate-300'}`}>
+                                    <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${platformSettings.llm_enabled ? 'translate-x-6' : 'translate-x-1'}`} />
                                 </button>
-                                <span className={`text-xs font-bold px-2 py-0.5 rounded ${platformSettings.llm_enabled ? 'bg-green-100 text-green-700' : 'bg-slate-200 text-slate-600'}`}>
-                                    {platformSettings.llm_enabled ? 'ENABLED' : 'DISABLED'}
-                                </span>
+                                <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${platformSettings.llm_enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'}`}>{platformSettings.llm_enabled ? 'Enabled' : 'Disabled'}</span>
                             </div>
                         </div>
-
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
-                            <div className="p-4 bg-indigo-50 border border-indigo-100 rounded-lg">
-                                <h3 className="font-bold text-indigo-900 mb-2">Vertex AI Rephrasing Layer</h3>
-                                <p className="text-sm text-indigo-700 leading-relaxed">
-                                    When enabled, Gemini rephrases technical output for clarity.
-                                    <span className="block mt-2 font-bold italic">!! Decision logic remains 100% rule-based.</span>
-                                </p>
-                            </div>
-                            <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg">
-                                <h3 className="font-bold text-slate-800 mb-2">Security & Identity</h3>
-                                <ul className="text-sm text-slate-600 space-y-1">
-                                    <li>✅ Model: Gemini 1.5 Flash</li>
-                                    <li>✅ Privacy: PII Masking Active</li>
-                                    <li>✅ Source Tracking: Enabled</li>
-                                </ul>
-                            </div>
+                        <div className="mt-6 grid gap-4 md:grid-cols-2">
+                            <div className="rounded-3xl border border-indigo-100 bg-indigo-50 p-5"><div className="mb-3 flex items-center gap-3 text-indigo-700"><Sparkles size={18} /><h3 className="font-semibold">Explanation layer</h3></div><p className="text-sm leading-6 text-indigo-800">When enabled, the platform rephrases technical output for clarity while keeping decisions rule-based.</p></div>
+                            <div className="rounded-3xl border border-slate-200 bg-slate-50 p-5"><div className="mb-3 flex items-center gap-3 text-slate-700"><Shield size={18} /><h3 className="font-semibold">Security posture</h3></div><ul className="space-y-2 text-sm text-slate-600"><li>PII masking active</li><li>Source tracking enabled</li><li>Governance logging enabled</li></ul></div>
                         </div>
-
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                            <div className="p-4 border rounded-lg text-center">
-                                <div className="text-xs text-slate-500 uppercase font-bold tracking-wider mb-1">Total MFIs</div>
-                                <div className="text-2xl font-bold text-slate-800">{platformSettings.total_mfis || 0}</div>
-                            </div>
-                            <div className="p-4 border rounded-lg text-center">
-                                <div className="text-xs text-slate-500 uppercase font-bold tracking-wider mb-1">Assessments</div>
-                                <div className="text-2xl font-bold text-slate-800">{platformSettings.total_assessments || 0}</div>
-                            </div>
-                            <div className="p-4 border rounded-lg text-center">
-                                <div className="text-xs text-slate-500 uppercase font-bold tracking-wider mb-1">Disbursed Vol.</div>
-                                <div className="text-2xl font-bold text-slate-800">${(platformSettings.total_disbursed_volume || 0).toLocaleString()}</div>
-                            </div>
-                            <div className="p-4 border rounded-lg text-center">
-                                <div className="text-xs text-slate-500 uppercase font-bold tracking-wider mb-1">Avg Default</div>
-                                <div className="text-2xl font-bold text-slate-800">{(platformSettings.global_default_rate || 0).toFixed(1)}%</div>
-                            </div>
+                    </div>
+                    <div className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+                        <h3 className="text-lg font-semibold text-slate-900">Platform metrics</h3>
+                        <div className="mt-5 grid grid-cols-2 gap-3">
+                            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4"><div className="text-xs uppercase tracking-[0.22em] text-slate-400">Total MFIs</div><div className="mt-2 text-2xl font-semibold text-slate-900">{platformSettings.total_mfis || 0}</div></div>
+                            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4"><div className="text-xs uppercase tracking-[0.22em] text-slate-400">Assessments</div><div className="mt-2 text-2xl font-semibold text-slate-900">{platformSettings.total_assessments || 0}</div></div>
+                            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4"><div className="text-xs uppercase tracking-[0.22em] text-slate-400">Disbursed volume</div><div className="mt-2 text-2xl font-semibold text-slate-900">{formatZmwAmount(platformSettings.total_disbursed_volume || 0)}</div></div>
+                            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4"><div className="text-xs uppercase tracking-[0.22em] text-slate-400">Avg default</div><div className="mt-2 text-2xl font-semibold text-slate-900">{(platformSettings.global_default_rate || 0).toFixed(1)}%</div></div>
                         </div>
                     </div>
                 </div>
             )}
 
-            {/* Organization Detail Side Drawer */}
-            <div
-                className={`fixed inset-y-0 right-0 w-96 bg-white shadow-2xl border-l transform transition-transform duration-300 ease-in-out z-50 ${selectedOrgId ? 'translate-x-0' : 'translate-x-full'}`}
-            >
-                {detailsLoading ? (
-                    <div className="flex items-center justify-center h-full text-slate-400">
-                        <Activity className="animate-spin mr-2" />
-                        Loading details...
+            {selectedOrgId && typeof document !== 'undefined' && createPortal((
+                <div className="fixed inset-0 z-[80] overflow-y-auto bg-white">
+                    <div
+                        className="min-h-full w-full bg-white text-slate-900"
+                    >
+                        {detailsLoading ? (
+                            <div className="flex h-full items-center justify-center gap-3 text-slate-400"><Activity className="animate-spin" size={18} /> Loading organization details...</div>
+                        ) : orgDetails ? (
+                            <div className="flex min-h-full flex-col">
+                                <div style={drawerHeaderStyle} className="border-b border-slate-200 p-6 text-white">
+                                    <div className="mx-auto w-full max-w-[1440px]">
+                                        <div className="flex items-start justify-between gap-4">
+                                            <div>
+                                                <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-200"><Building2 size={12} /> Organization detail</div>
+                                                <h3 className="text-2xl font-semibold">{orgDetails.organization.name}</h3>
+                                                <p className="mt-2 font-mono text-xs text-slate-300">{orgDetails.organization.id}</p>
+                                            </div>
+                                            <button onClick={closeOrganizationOverlay} className="rounded-2xl bg-white/10 p-2 text-white transition hover:bg-white/20"><X size={18} /></button>
+                                        </div>
+                                        <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+                                            <div className="rounded-2xl bg-white/10 p-4"><div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Plan</div><div className="mt-2 text-sm font-semibold">{planLabel(orgDetails.organization)}</div></div>
+                                            <div className="rounded-2xl bg-white/10 p-4"><div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Environment</div><div className="mt-2 text-sm font-semibold">{orgDetails.organization.environment || 'SANDBOX'}</div></div>
+                                            <div className="rounded-2xl bg-white/10 p-4"><div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Status</div><div className="mt-2 text-sm font-semibold">{orgDetails.organization.status || 'UNKNOWN'}</div></div>
+                                            <div className="rounded-2xl bg-white/10 p-4"><div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Payment</div><div className="mt-2 text-sm font-semibold">{orgDetails.organization.payment_status || 'UNPAID'}</div></div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="mx-auto w-full max-w-[1440px] flex-1 space-y-8 p-6">
+                                    <section><h4 className="mb-4 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.22em] text-slate-400"><BarChart3 size={14} /> Usage metrics</h4><div className="grid grid-cols-2 gap-4"><div className="rounded-3xl border border-slate-200 bg-slate-50 p-4"><div className="text-xs uppercase tracking-[0.22em] text-slate-400">Last 24h</div><div className="mt-2 text-3xl font-semibold text-slate-900">{orgDetails.metrics?.usage_24h || 0}</div></div><div className="rounded-3xl border border-slate-200 bg-slate-50 p-4"><div className="text-xs uppercase tracking-[0.22em] text-slate-400">Last 7d</div><div className="mt-2 text-3xl font-semibold text-slate-900">{orgDetails.metrics?.usage_7d || 0}</div></div></div>{orgDetails.metrics?.last_assessment_at && <p className="mt-3 text-xs text-slate-500">Last assessment: {new Date(orgDetails.metrics.last_assessment_at).toLocaleString()}</p>}</section>
+                                    <section><h4 className="mb-4 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.22em] text-slate-400"><Shield size={14} /> Configuration</h4><div className="grid gap-3"><div className="rounded-2xl border border-slate-200 bg-slate-50 p-4"><div className="flex items-center justify-between gap-4 text-sm"><span className="text-slate-500">Billing status</span><span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${tone(orgDetails.organization.billing_status)}`}>{orgDetails.organization.billing_status || 'FREE'}</span></div></div><div className="rounded-2xl border border-slate-200 bg-slate-50 p-4"><div className="flex items-center justify-between gap-4 text-sm"><span className="text-slate-500">Custom limit</span><span className="font-semibold text-slate-900">{formatLimit(orgDetails.organization.monthly_limit)}</span></div></div><div className="rounded-2xl border border-slate-200 bg-slate-50 p-4"><div className="text-sm text-slate-500">Feature flags</div><div className="mt-3 flex flex-wrap gap-2">{Object.keys(orgDetails.organization.feature_flags || {}).length > 0 ? Object.keys(orgDetails.organization.feature_flags || {}).map((flag) => <span key={flag} className="rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700">{flag}</span>) : <span className="text-sm text-slate-400">No feature flags enabled.</span>}</div></div></div></section>
+                                    <section>
+                                        <h4 className="mb-4 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.22em] text-rose-400">
+                                            <AlertTriangle size={14} />
+                                            Administrative actions
+                                        </h4>
+                                        <div className="grid gap-4 sm:grid-cols-2">
+                                            <div className="rounded-3xl border border-slate-200 bg-white p-4">
+                                                <p className="text-sm font-semibold text-slate-900">Access control</p>
+                                                <p className="mt-1 text-xs text-slate-500">Temporarily suspend or restore organization access.</p>
+                                                <button onClick={handleToggleOrgStatus} disabled={actionLoading} className={`mt-4 w-full rounded-2xl py-3 text-sm font-semibold text-white transition ${`${orgDetails.organization.status || ''}`.toUpperCase() === 'ACTIVE' ? 'bg-rose-600 hover:bg-rose-700' : 'bg-emerald-600 hover:bg-emerald-700'} disabled:opacity-60`}>
+                                                    {`${orgDetails.organization.status || ''}`.toUpperCase() === 'ACTIVE' ? 'Suspend organization' : 'Reactivate organization'}
+                                                </button>
+                                            </div>
+
+                                            <div className="rounded-3xl border border-slate-200 bg-white p-4">
+                                                <p className="text-sm font-semibold text-slate-900">API security</p>
+                                                <p className="mt-1 text-xs text-slate-500">Rotate keys and invalidate the current key set.</p>
+                                                {!rotatedKey ? (
+                                                    <button
+                                                        type="button"
+                                                        onClick={handleRotateKeys}
+                                                        disabled={actionLoading}
+                                                        style={{
+                                                            appearance: 'none',
+                                                            WebkitAppearance: 'none',
+                                                            background: 'linear-gradient(135deg, #d97706 0%, #b45309 100%)',
+                                                            color: '#ffffff',
+                                                            borderColor: '#92400e'
+                                                        }}
+                                                        className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-2xl border py-3 text-sm font-semibold shadow-[0_10px_24px_rgba(217,119,6,0.24)] transition hover:brightness-105 disabled:opacity-60"
+                                                    >
+                                                        <RefreshCw className={actionLoading ? 'animate-spin' : ''} size={16} />
+                                                        Rotate keys
+                                                    </button>
+                                                ) : (
+                                                    <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                                                        <p className="text-xs font-semibold uppercase tracking-[0.22em] text-amber-700">New API key</p>
+                                                        <code className="mt-3 block rounded-2xl border border-amber-200 bg-white p-3 text-xs text-slate-700">{rotatedKey}</code>
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            <div className="rounded-3xl border border-slate-200 bg-white p-4">
+                                                <p className="text-sm font-semibold text-slate-900">Monthly limit override</p>
+                                                <p className="mt-1 text-xs text-slate-500">Leave empty to fall back to the organization plan default.</p>
+                                                <div className="mt-4 flex gap-2">
+                                                    <input type="number" value={newLimit} onChange={(e) => setNewLimit(e.target.value)} className="flex-1 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-slate-300 focus:bg-white focus:ring-4 focus:ring-slate-100" placeholder="Leave empty for plan default" />
+                                                    <button onClick={handleUpdateLimit} disabled={actionLoading} className="rounded-2xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-60">
+                                                        Update
+                                                    </button>
+                                                </div>
+                                            </div>
+
+                                            <div className="sticky bottom-0 z-10 rounded-3xl border-2 border-rose-300 bg-white p-4 shadow-lg sm:col-span-2">
+                                                <p className="text-sm font-semibold text-rose-900">Permanent delete</p>
+                                                <p className="mt-1 text-xs text-rose-800">Delete the organization and remove all related records from the platform.</p>
+                                                <button
+                                                    type="button"
+                                                    onClick={handleDeleteOrganization}
+                                                    disabled={actionLoading}
+                                                    style={{
+                                                        appearance: 'none',
+                                                        WebkitAppearance: 'none',
+                                                        background: 'linear-gradient(135deg, #be123c 0%, #9f1239 100%)',
+                                                        color: '#ffffff',
+                                                        borderColor: '#881337'
+                                                    }}
+                                                    className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-2xl border py-3 text-sm font-semibold shadow-[0_10px_24px_rgba(190,24,93,0.24)] transition hover:brightness-105 disabled:opacity-60"
+                                                >
+                                                    <Trash2 size={16} />
+                                                    Delete Organization Permanently
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </section>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="flex h-full items-center justify-center text-slate-400">Select an organization to view details.</div>
+                        )}
                     </div>
-                ) : orgDetails ? (
-                    <div className="flex flex-col h-full">
-                        {/* Drawer Header */}
-                        <div className="p-6 border-b flex justify-between items-center bg-slate-50">
+                </div>
+            ), document.body)}
+
+            {adminActionDialog && typeof document !== 'undefined' && createPortal((
+                <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm">
+                    <div className="w-full max-w-lg rounded-[28px] border border-slate-200 bg-white p-6 shadow-2xl">
+                        <div className="flex items-start justify-between gap-4">
                             <div>
-                                <h3 className="font-bold text-lg text-slate-800">{orgDetails.organization.name}</h3>
-                                <p className="text-xs font-mono text-slate-500">{orgDetails.organization.id}</p>
+                                <div className={`inline-flex rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] ${
+                                    adminActionDialog.tone === 'rose'
+                                        ? 'bg-rose-100 text-rose-700'
+                                        : adminActionDialog.tone === 'amber'
+                                            ? 'bg-amber-100 text-amber-700'
+                                            : 'bg-slate-100 text-slate-700'
+                                }`}>
+                                    Administrative action
+                                </div>
+                                <h3 className="mt-3 text-xl font-semibold text-slate-900">{adminActionDialog.title}</h3>
                             </div>
                             <button
-                                onClick={() => setSelectedOrgId(null)}
-                                className="p-2 hover:bg-slate-200 rounded-full transition-colors"
+                                type="button"
+                                onClick={closeAdminActionDialog}
+                                disabled={actionLoading}
+                                className="rounded-2xl border border-slate-200 p-2 text-slate-500 transition hover:bg-slate-50 hover:text-slate-900 disabled:opacity-60"
+                                aria-label="Close confirmation dialog"
                             >
-                                <X size={20} />
+                                <X size={18} />
                             </button>
                         </div>
 
-                        {/* Drawer Body */}
-                        <div className="flex-1 overflow-y-auto p-6 space-y-8">
-                            {/* Metrics Section */}
-                            <section>
-                                <h4 className="flex items-center gap-2 text-xs font-bold text-slate-400 uppercase tracking-widest mb-4">
-                                    <BarChart size={14} /> Usage Metrics
-                                </h4>
-                                <div className="grid grid-cols-2 gap-4">
-                                    <div className="p-3 bg-slate-50 rounded-lg border">
-                                        <p className="text-xs text-slate-500 mb-1">Last 24h</p>
-                                        <p className="text-2xl font-bold text-indigo-600">{orgDetails.metrics.usage_24h}</p>
-                                    </div>
-                                    <div className="p-3 bg-slate-50 rounded-lg border">
-                                        <p className="text-xs text-slate-500 mb-1">Last 7d</p>
-                                        <p className="text-2xl font-bold text-indigo-600">{orgDetails.metrics.usage_7d}</p>
-                                    </div>
-                                </div>
-                                {orgDetails.metrics.last_assessment_at && (
-                                    <p className="mt-3 text-[10px] text-slate-400 italic">
-                                        Last assessment: {new Date(orgDetails.metrics.last_assessment_at).toLocaleString()}
-                                    </p>
-                                )}
-                            </section>
+                        <p className="mt-4 text-sm leading-6 text-slate-600">{adminActionDialog.message}</p>
 
-                            {/* Config Section */}
-                            <section>
-                                <h4 className="flex items-center gap-2 text-xs font-bold text-slate-400 uppercase tracking-widest mb-4">
-                                    <Shield size={14} /> Configuration
-                                </h4>
-                                <div className="space-y-3">
-                                    <div className="flex justify-between items-center text-sm">
-                                        <span className="text-slate-600">Environment</span>
-                                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${orgDetails.organization.environment === 'PRODUCTION' ? 'bg-orange-100 text-orange-700' : 'bg-slate-100 text-slate-600'}`}>
-                                            {orgDetails.organization.environment}
-                                        </span>
-                                    </div>
-                                    <div className="flex justify-between items-start text-sm pt-1">
-                                        <span className="text-slate-600">Feature Flags</span>
-                                        <div className="text-right">
-                                            {Object.keys(orgDetails.organization.feature_flags || {}).length > 0 ? (
-                                                Object.keys(orgDetails.organization.feature_flags).map(flag => (
-                                                    <span key={flag} className="inline-block px-1.5 py-0.5 bg-indigo-50 text-indigo-700 rounded text-[10px] ml-1 mb-1">
-                                                        {flag}
-                                                    </span>
-                                                ))
-                                            ) : (
-                                                <span className="text-slate-400 italic text-xs">None enabled</span>
-                                            )}
-                                        </div>
-                                    </div>
-                                </div>
-                            </section>
+                        {adminActionDialog.requiresExactMatch && (
+                            <div className="mt-5">
+                                <label className="mb-2 block text-sm font-medium text-slate-700">
+                                    {adminActionDialog.exactMatchLabel}
+                                </label>
+                                <input
+                                    type="text"
+                                    value={adminActionInput}
+                                    onChange={(event) => setAdminActionInput(event.target.value)}
+                                    placeholder={adminActionDialog.exactMatchValue}
+                                    className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-slate-300 focus:bg-white focus:ring-4 focus:ring-slate-100"
+                                />
+                            </div>
+                        )}
 
-                            {/* Actions Section */}
-                            <section>
-                                <h4 className="flex items-center gap-2 text-xs font-bold text-red-400 uppercase tracking-widest mb-4">
-                                    <AlertTriangle size={14} /> Administrative Actions
-                                </h4>
-                                <div className="space-y-4">
-                                    {/* Suspend / Resume */}
-                                    <div className="p-4 border border-dashed rounded-lg bg-red-50/30">
-                                        <p className="text-xs font-medium text-slate-700 mb-2">Access Control</p>
-                                        <button
-                                            onClick={handleToggleOrgStatus}
-                                            disabled={actionLoading}
-                                            className={`w-full py-2 rounded font-bold text-xs flex items-center justify-center gap-2 transition-colors ${orgDetails.organization.status === 'ACTIVE' ? 'bg-red-600 text-white hover:bg-red-700' : 'bg-green-600 text-white hover:bg-green-700'}`}
-                                        >
-                                            {orgDetails.organization.status === 'ACTIVE' ? <Slash size={14} /> : <CheckCircle2 size={14} />}
-                                            {orgDetails.organization.status === 'ACTIVE' ? 'Suspend API Access' : 'Resume API Access'}
-                                        </button>
-                                    </div>
-
-                                    {/* Rotate Keys */}
-                                    <div className="p-4 border border-dashed rounded-lg bg-orange-50/30">
-                                        <p className="text-xs font-medium text-slate-700 mb-2">Security Override</p>
-                                        {!rotatedKey ? (
-                                            <button
-                                                onClick={handleRotateKeys}
-                                                disabled={actionLoading}
-                                                className="w-full py-2 bg-orange-600 text-white rounded font-bold text-xs flex items-center justify-center gap-2 hover:bg-orange-700 transition-colors"
-                                            >
-                                                <RefreshCw className={actionLoading ? 'animate-spin' : ''} size={14} />
-                                                Force Key Rotation
-                                            </button>
-                                        ) : (
-                                            <div className="bg-white p-3 border rounded border-orange-200">
-                                                <p className="text-[10px] text-orange-600 font-bold mb-1">NEW API KEY GENERATED:</p>
-                                                <code className="text-xs block bg-slate-50 p-2 rounded break-all select-all font-mono border">
-                                                    {rotatedKey}
-                                                </code>
-                                                <p className="text-[9px] text-slate-400 mt-2 italic text-center">Copy immediately. All previous keys are dead.</p>
-                                            </div>
-                                        )}
-                                    </div>
-
-                                    {/* Adjust Limits */}
-                                    <div className="p-4 border border-dashed rounded-lg bg-indigo-50/30">
-                                        <p className="text-xs font-medium text-slate-700 mb-2">Operational Quota</p>
-                                        <div className="flex gap-2">
-                                            <input
-                                                type="number"
-                                                value={newLimit}
-                                                onChange={e => setNewLimit(e.target.value)}
-                                                className="flex-1 border rounded p-2 text-sm focus:ring-1 focus:ring-indigo-500 outline-none"
-                                            />
-                                            <button
-                                                onClick={handleUpdateLimit}
-                                                disabled={actionLoading}
-                                                className="bg-indigo-600 text-white px-3 py-2 rounded font-bold text-xs hover:bg-indigo-700 transition-colors"
-                                            >
-                                                Update
-                                            </button>
-                                        </div>
-                                    </div>
-
-                                    {/* Permanent Delete */}
-                                    <div className="p-4 border border-dashed rounded-lg bg-red-100/40">
-                                        <p className="text-xs font-medium text-slate-700 mb-2">Permanent Delete</p>
-                                        <button
-                                            onClick={handleDeleteOrganization}
-                                            disabled={actionLoading}
-                                            className="w-full py-2 bg-red-700 text-white rounded font-bold text-xs flex items-center justify-center gap-2 hover:bg-red-800 transition-colors disabled:opacity-60"
-                                        >
-                                            <Trash2 size={14} />
-                                            Delete Organization Permanently
-                                        </button>
-                                    </div>
-                                </div>
-                            </section>
+                        <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+                            <button
+                                type="button"
+                                onClick={closeAdminActionDialog}
+                                disabled={actionLoading}
+                                className="rounded-2xl border border-slate-200 px-5 py-3 text-sm font-semibold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900 disabled:opacity-60"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                onClick={handleAdminActionConfirm}
+                                disabled={actionLoading}
+                                className={`rounded-2xl px-5 py-3 text-sm font-semibold text-white transition disabled:opacity-60 ${
+                                    adminActionDialog.tone === 'rose'
+                                        ? 'bg-rose-700 hover:bg-rose-800'
+                                        : adminActionDialog.tone === 'amber'
+                                            ? 'bg-amber-600 hover:bg-amber-700'
+                                            : 'bg-slate-900 hover:bg-slate-800'
+                                }`}
+                            >
+                                {actionLoading ? 'Processing...' : adminActionDialog.confirmLabel}
+                            </button>
                         </div>
                     </div>
-                ) : (
-                    <div className="flex items-center justify-center h-full text-slate-400 italic">
-                        Select an organization to view details
-                    </div>
-                )}
-            </div>
-
-            {/* Click-away backdrop */}
-            {selectedOrgId && (
-                <div
-                    className="fixed inset-0 bg-slate-900/20 z-40 transition-opacity"
-                    onClick={() => setSelectedOrgId(null)}
-                />
-            )}
+                </div>
+            ), document.body)}
         </div>
     );
 }

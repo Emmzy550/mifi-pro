@@ -3,7 +3,7 @@ import re
 import uuid
 import hashlib
 from datetime import datetime, timezone
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 from reportlab.lib.pagesizes import letter
@@ -44,9 +44,170 @@ class DecisionExportAgent:
             return f"ZMW {value}"
 
     @staticmethod
+    def _format_role_label(role_value: Optional[str]) -> str:
+        role = (role_value or "").strip().upper()
+        role_map = {
+            "OFFICER": "Loan Officer",
+            "ORG_ADMIN": "Senior Credit Officer",
+            "SUPER_ADMIN": "Super Admin",
+            "AUDITOR": "Audit Officer",
+            "VIEWER": "Viewer",
+            "DEVELOPER": "Developer",
+        }
+        return role_map.get(role, role_value or "Loan Officer")
+
+    @staticmethod
+    def _format_timestamp(value: Any) -> str:
+        if isinstance(value, datetime):
+            dt = value
+        elif isinstance(value, str) and value.strip():
+            try:
+                dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return value
+        else:
+            dt = datetime.now(timezone.utc)
+
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _humanize_rule_key(rule_key: str) -> str:
+        text = (rule_key or "").replace("_", " ").strip().lower()
+        if not text:
+            return "Policy Rule"
+        return text[0].upper() + text[1:]
+
+    @staticmethod
+    def _build_pdf_policy_rules(assessment: Assessment) -> List[Dict[str, str]]:
+        metadata = assessment.decision_metadata or {}
+        blocking = [str(f).upper() for f in (assessment.blocking_factors or [])]
+        adjustments = metadata.get("adjustments_applied") if isinstance(metadata.get("adjustments_applied"), list) else []
+
+        rules: List[Dict[str, str]] = []
+
+        def add_rule(rule: str, status: str, reason: str = ""):
+            rules.append({
+                "rule": rule,
+                "status": status,
+                "reason": reason.strip(),
+            })
+
+        # Duration rule
+        duration_reason = metadata.get("duration_rejection_reason")
+        duration_adjustments = [
+            adj for adj in adjustments
+            if "DURATION" in str(adj.get("type", "")).upper()
+        ]
+        if duration_reason:
+            add_rule("Duration Policy", "FAIL", f"Requested tenor is outside allowed policy bounds: {duration_reason}.")
+        elif duration_adjustments:
+            first_adj = duration_adjustments[0]
+            reason = first_adj.get("reason") or "Requested duration was adjusted to match policy limits."
+            add_rule("Duration Policy", "REVIEW", f"Duration policy adjustment applied: {reason}")
+        else:
+            add_rule("Duration Policy", "PASS")
+
+        # Observation window rule
+        if "INSUFFICIENT_OBSERVATION_WINDOW" in blocking:
+            add_rule(
+                "Observation Window Sufficiency",
+                "REVIEW",
+                "Available transaction history window is insufficient for full automated confidence.",
+            )
+        else:
+            add_rule("Observation Window Sufficiency", "PASS")
+
+        # Risk threshold rule
+        fail_risk_codes = {"HIGH_RISK_SCORE", "POLICY_RISK_THRESHOLD_EXCEEDED"}
+        critical_codes = [code for code in blocking if "CRITICAL" in code]
+        fail_hits = sorted(set([code for code in blocking if code in fail_risk_codes] + critical_codes))
+        if fail_hits:
+            readable = ", ".join(DecisionExportAgent._humanize_rule_key(code) for code in fail_hits)
+            add_rule("Risk Threshold Compliance", "FAIL", f"Risk policy threshold triggered by: {readable}.")
+        else:
+            add_rule("Risk Threshold Compliance", "PASS")
+
+        # Capacity safety rule
+        if "INSUFFICIENT_TRANSACTION_HISTORY" in blocking or "CALCULATED_AMOUNT_ZERO" in blocking:
+            reason_code = "INSUFFICIENT_TRANSACTION_HISTORY" if "INSUFFICIENT_TRANSACTION_HISTORY" in blocking else "CALCULATED_AMOUNT_ZERO"
+            add_rule(
+                "Capacity Safety Limit",
+                "FAIL",
+                f"Capacity check failed due to {DecisionExportAgent._humanize_rule_key(reason_code)}.",
+            )
+        else:
+            capacity_adj = next(
+                (adj for adj in adjustments if str(adj.get("type", "")).upper() == "CAPACITY_CAP"),
+                None,
+            )
+            if capacity_adj:
+                reason = capacity_adj.get("reason") or "Requested amount exceeded capacity and was reduced."
+                add_rule("Capacity Safety Limit", "REVIEW", reason)
+            else:
+                add_rule("Capacity Safety Limit", "PASS")
+
+        # Policy cap / haircut rule
+        policy_cap_reason = assessment.policy_cap_reason or metadata.get("policy_cap_reason")
+        risk_haircut = next(
+            (adj for adj in adjustments if "RISK_HAIRCUT" in str(adj.get("type", "")).upper()),
+            None,
+        )
+        if policy_cap_reason:
+            add_rule(
+                "Policy Cap & Risk Haircut",
+                "REVIEW",
+                f"Policy cap applied due to {DecisionExportAgent._humanize_rule_key(str(policy_cap_reason))}.",
+            )
+        elif risk_haircut:
+            add_rule("Policy Cap & Risk Haircut", "REVIEW", "Risk haircut was applied based on risk profile.")
+        else:
+            add_rule("Policy Cap & Risk Haircut", "PASS")
+
+        # Starter loan rule
+        starter_applied = bool(metadata.get("starter_loan_applied", assessment.starter_loan_applied))
+        if starter_applied:
+            add_rule(
+                "Starter Loan Policy",
+                "REVIEW",
+                "Starter-loan policy constraints were applied due to limited repayment history.",
+            )
+        else:
+            add_rule("Starter Loan Policy", "PASS")
+
+        # Include any extra blocking rules not covered above.
+        covered_codes = {
+            "INSUFFICIENT_OBSERVATION_WINDOW",
+            "HIGH_RISK_SCORE",
+            "POLICY_RISK_THRESHOLD_EXCEEDED",
+            "INSUFFICIENT_TRANSACTION_HISTORY",
+            "CALCULATED_AMOUNT_ZERO",
+        }
+        for code in blocking:
+            if code in covered_codes or "CRITICAL" in code:
+                continue
+            add_rule(
+                f"Rule: {DecisionExportAgent._humanize_rule_key(code)}",
+                "REVIEW",
+                f"Manual review signal triggered by {DecisionExportAgent._humanize_rule_key(code)}.",
+            )
+
+        status_rank = {"FAIL": 0, "REVIEW": 1, "PASS": 2}
+        rules.sort(key=lambda item: (status_rank.get(item["status"], 3), item["rule"]))
+        return rules
+
+    @staticmethod
     def _build_export_payload(assessment: Assessment, borrower: Borrower) -> Dict:
         final_meta = assessment.final_decision_metadata or {}
         outcome = final_meta.get("officer_decision") or DecisionExportAgent._string_value(assessment.decision)
+        officer_name = final_meta.get("officer_name") or "Unknown Officer"
+        officer_role = final_meta.get("officer_role")
+        officer_id = final_meta.get("officer_id")
+        if not officer_role and officer_id:
+            officer = Database.get_user_by_id(officer_id)
+            officer_role = getattr(officer, "role", None) if officer else None
+        sealed_timestamp_raw = final_meta.get("sealed_at") or final_meta.get("created_at")
 
         # Identification status
         id_provided = "Yes" if getattr(borrower, "id_provided", False) else "No"
@@ -68,7 +229,11 @@ class DecisionExportAgent:
             "policy_version": assessment.policy_version,
             "identification_provided": id_provided,
             "id_type": id_type,
-            "key_factors": DecisionExportAgent._generate_key_factors(assessment, borrower)
+            "key_factors": DecisionExportAgent._generate_key_factors(assessment, borrower),
+            "policy_rules": DecisionExportAgent._build_pdf_policy_rules(assessment),
+            "sealed_by_name": officer_name,
+            "sealed_by_role": DecisionExportAgent._format_role_label(DecisionExportAgent._string_value(officer_role)),
+            "sealed_at_formatted": DecisionExportAgent._format_timestamp(sealed_timestamp_raw),
         }
         return payload
 
@@ -199,15 +364,17 @@ class DecisionExportAgent:
 
     @staticmethod
     def _write_pdf(file_path: str, payload: Dict):
-        from reportlab.platypus import HRFlowable, Image, Table, TableStyle, Spacer, Paragraph
+        from reportlab.platypus import HRFlowable, Image, KeepTogether, Table, TableStyle, Spacer, Paragraph
         from reportlab.lib.pagesizes import A4
         from reportlab.lib import colors
         from reportlab.lib.units import inch
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.pdfgen import canvas as pdf_canvas
         import os
 
         styles = getSampleStyleSheet()
         brand_color = colors.HexColor("#0F172A")  # Deep navy
+        accent_gold = colors.HexColor("#C9A84C")
         label_color = colors.HexColor("#64748B")
         border_color = colors.HexColor("#E2E8F0")
         card_bg = colors.HexColor("#F8FAFC")
@@ -254,6 +421,14 @@ class DecisionExportAgent:
             textColor=colors.black,
             fontName='Helvetica-Bold'
         )
+        reason_style = ParagraphStyle(
+            'MFIReason',
+            parent=styles['Normal'],
+            fontSize=9,
+            leading=12,
+            textColor=colors.HexColor("#334155"),
+            fontName='Helvetica'
+        )
 
         large_value_style = ParagraphStyle(
             'MFILargeValue',
@@ -261,6 +436,14 @@ class DecisionExportAgent:
             fontSize=13,
             textColor=brand_color,
             fontName='Helvetica-Bold'
+        )
+        brand_wordmark_style = ParagraphStyle(
+            'MFIBrandWordmark',
+            parent=styles['Normal'],
+            fontSize=15,
+            leading=16,
+            textColor=brand_color,
+            fontName='Helvetica-Bold',
         )
 
         def _decision_colors(decision: str):
@@ -284,24 +467,70 @@ class DecisionExportAgent:
             ]))
             return table
 
+        def _status_badge(status: str):
+            status_upper = (status or "REVIEW").upper()
+            if status_upper == "PASS":
+                bg, fg = approve_bg, approve_text
+            elif status_upper == "FAIL":
+                bg, fg = reject_bg, reject_text
+            else:
+                bg, fg = review_bg, review_text
+
+            badge = Table(
+                [[Paragraph(
+                    f"<b>{status_upper}</b>",
+                    ParagraphStyle(
+                        f"MFIStatus{status_upper}",
+                        parent=styles["Normal"],
+                        textColor=fg,
+                        alignment=1
+                    )
+                )]],
+                colWidths=[0.95 * inch]
+            )
+            badge.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, -1), bg),
+                ('BOX', (0, 0), (-1, -1), 0.6, fg),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ]))
+            return badge
+
         doc = SimpleDocTemplate(
             file_path,
             pagesize=A4,
             leftMargin=0.7*inch,
             rightMargin=0.7*inch,
             topMargin=0.7*inch,
-            bottomMargin=0.75*inch
+            bottomMargin=1.95*inch
         )
         content = []
 
-        # Header: Logo + Title
-        logo_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "logo.png"))
-        logo_cell = ""
-        if os.path.exists(logo_path):
-            logo_cell = Image(logo_path, width=0.4*inch, height=0.4*inch)
+        # Header: Current brand wordmark + title
+        brand_wordmark = Table(
+            [[
+                Paragraph(
+                    "<font color='#0F172A'><b>MIF</b></font>"
+                    "<font color='#C9A84C'><b>i</b></font>"
+                    "<font color='#0F172A'><b> PRO</b></font>",
+                    brand_wordmark_style,
+                )
+            ]],
+            colWidths=[1.55 * inch],
+        )
+        brand_wordmark.setStyle(TableStyle([
+            ('LINEBEFORE', (0, 0), (0, 0), 2, accent_gold),
+            ('LEFTPADDING', (0, 0), (-1, -1), 10),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+            ('TOPPADDING', (0, 0), (-1, -1), 2),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ]))
         header_table = Table(
-            [[logo_cell, Paragraph("Credit Decision Summary", title_style)]],
-            colWidths=[0.55*inch, doc.width - 0.55*inch]
+            [[brand_wordmark, Paragraph("Credit Decision Summary", title_style)]],
+            colWidths=[1.75 * inch, doc.width - 1.75 * inch]
         )
         header_table.setStyle(TableStyle([
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
@@ -388,33 +617,115 @@ class DecisionExportAgent:
         content.append(Spacer(1, 12))
 
         # 5. Policy & Risk Analysis
-        content.append(Paragraph("Risk Assessment Factors", section_header_style))
 
-        risk_lines = []
-        for factor in payload['key_factors']:
-            risk_lines.append(Paragraph(f"<font color='#475569'>•</font> {factor}", styles['Normal']))
-            risk_lines.append(Spacer(1, 4))
+        policy_rules = payload.get("policy_rules") or []
+        rule_rows = [[
+            Paragraph("Policy Rule", label_style),
+            Paragraph("Status", label_style),
+            Paragraph("Reason (for FAIL/REVIEW)", label_style),
+        ]]
+        for item in policy_rules:
+            status = (item.get("status") or "REVIEW").upper()
+            reason = (item.get("reason") or "").strip() if status in ("FAIL", "REVIEW") else ""
+            rule_rows.append([
+                Paragraph(item.get("rule") or "Policy Rule", styles["Normal"]),
+                _status_badge(status),
+                Paragraph(reason or "-", reason_style),
+            ])
 
-        content.append(_card(risk_lines, doc.width))
+        risk_table = Table(
+            rule_rows,
+            colWidths=[doc.width * 0.45, doc.width * 0.18, doc.width * 0.37],
+            repeatRows=1
+        )
+        risk_table.setStyle(TableStyle([
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('LINEBELOW', (0, 0), (-1, 0), 0.6, border_color),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8FAFC")]),
+            ('LEFTPADDING', (0, 0), (-1, -1), 6),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ]))
+
+        # Keep this section together so it is not split/cut across pages.
+        content.append(KeepTogether([
+            Paragraph("Risk Assessment Factors", section_header_style),
+            _card([risk_table], doc.width),
+        ]))
         content.append(Spacer(1, 12))
 
         content.append(Paragraph("Policy Justification", section_header_style))
         content.append(_card([Paragraph(payload["decision_summary"], styles["Normal"])], doc.width))
 
-        def _footer(canvas, doc_obj):
-            canvas.saveState()
-            canvas.setStrokeColor(border_color)
-            canvas.setLineWidth(0.6)
-            canvas.line(doc.leftMargin, 0.6 * inch, doc.pagesize[0] - doc.rightMargin, 0.6 * inch)
-            canvas.setFont("Helvetica", 8)
+        def _draw_standard_footer(pdf, page_number: int):
+            pdf.saveState()
+            pdf.setStrokeColor(border_color)
+            pdf.setLineWidth(0.6)
+            pdf.line(doc.leftMargin, 0.6 * inch, doc.pagesize[0] - doc.rightMargin, 0.6 * inch)
+            pdf.setFont("Helvetica", 8)
             footer_left = f"Loan Officer AI \u2013 Partner Console | Generated {payload['generated_at'].strftime('%Y-%m-%d %H:%M')}"
-            canvas.setFillColor(label_color)
-            canvas.drawString(doc.leftMargin, 0.45 * inch, footer_left)
-            page_text = f"Page {canvas.getPageNumber()}"
-            canvas.drawRightString(doc.pagesize[0] - doc.rightMargin, 0.45 * inch, page_text)
-            canvas.restoreState()
+            pdf.setFillColor(label_color)
+            pdf.drawString(doc.leftMargin, 0.45 * inch, footer_left)
+            pdf.drawRightString(doc.pagesize[0] - doc.rightMargin, 0.45 * inch, f"Page {page_number}")
+            pdf.restoreState()
 
-        doc.build(content, onFirstPage=_footer, onLaterPages=_footer)
+        def _draw_seal_block(pdf):
+            top_y = 1.68 * inch
+            label_x = doc.leftMargin
+            value_x = doc.leftMargin + 1.25 * inch
+
+            pdf.saveState()
+            pdf.setStrokeColor(border_color)
+            pdf.setLineWidth(0.8)
+            pdf.line(doc.leftMargin, top_y, doc.pagesize[0] - doc.rightMargin, top_y)
+
+            pdf.setFillColor(brand_color)
+            pdf.setFont("Helvetica-Bold", 9.5)
+            pdf.drawString(label_x, top_y - 0.18 * inch, "Decision Sealed By")
+
+            rows = [
+                ("Officer Name", payload.get("sealed_by_name") or "Unknown Officer"),
+                ("Role", payload.get("sealed_by_role") or "Loan Officer"),
+                ("Timestamp", payload.get("sealed_at_formatted") or DecisionExportAgent._format_timestamp(None)),
+                ("Assessment ID", payload.get("assessment_id") or "N/A"),
+            ]
+            y = top_y - 0.38 * inch
+            for label, value in rows:
+                pdf.setFillColor(label_color)
+                pdf.setFont("Helvetica-Bold", 8.2)
+                pdf.drawString(label_x, y, f"{label}:")
+                pdf.setFillColor(colors.black)
+                pdf.setFont("Helvetica", 8.2)
+                pdf.drawString(value_x, y, str(value))
+                y -= 0.15 * inch
+
+            pdf.setStrokeColor(border_color)
+            pdf.setLineWidth(0.6)
+            pdf.line(label_x, y + 0.02 * inch, label_x + 3.2 * inch, y + 0.02 * inch)
+            pdf.restoreState()
+
+        class _LastPageCanvas(pdf_canvas.Canvas):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._saved_page_states = []
+
+            def showPage(self):
+                self._saved_page_states.append(dict(self.__dict__))
+                self._startPage()
+
+            def save(self):
+                self._saved_page_states.append(dict(self.__dict__))
+                total_pages = len(self._saved_page_states)
+                for page_number, state in enumerate(self._saved_page_states, start=1):
+                    self.__dict__.update(state)
+                    _draw_standard_footer(self, page_number)
+                    if page_number == total_pages:
+                        _draw_seal_block(self)
+                    super().showPage()
+                super().save()
+
+        doc.build(content, canvasmaker=_LastPageCanvas)
 
     @staticmethod
     def _write_xlsx(file_path: str, payload: Dict, assessment: Assessment, borrower: Borrower):

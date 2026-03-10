@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { AlertCircle, ArrowRight, Eye, EyeOff, Loader2, Lock, Mail } from 'lucide-react';
 import { signInWithEmailAndPassword } from 'firebase/auth';
 import toast from 'react-hot-toast';
 import { useAuth } from '../context/AuthContext';
 import { auth } from '../firebase';
+import BrandWordmark from '../components/BrandWordmark';
+import './Login.css';
 
 export default function Login() {
     const [email, setEmail] = useState('');
@@ -21,7 +23,7 @@ export default function Login() {
 
     React.useEffect(() => {
         if (user && !isLoading) {
-            navigate('/dashboard');
+            navigate('/dashboard', { replace: true });
         }
     }, [user, isLoading, navigate]);
 
@@ -49,14 +51,25 @@ export default function Login() {
     };
 
     return (
-        <div className="login-page min-h-screen relative overflow-hidden bg-background text-foreground flex items-center justify-center p-5 sm:p-8">
-            <div className="login-card relative z-20 w-full max-w-[27.5rem] rounded-2xl border border-border/60 bg-card px-6 py-7 sm:px-8 sm:py-8">
+        <div className="login-page login-page-landing min-h-screen relative overflow-hidden flex items-center justify-center p-5 sm:p-8">
+            <div className="login-bg-orb login-bg-orb-top" aria-hidden="true" />
+            <div className="login-bg-orb login-bg-orb-bottom" aria-hidden="true" />
+
+            <div className="login-card login-card-landing relative z-20 w-full max-w-[27.5rem] rounded-2xl px-6 py-7 sm:px-8 sm:py-8">
+                <Link
+                    to="/"
+                    className="login-home-link mb-5 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.12em]"
+                >
+                    <span aria-hidden="true">←</span>
+                    Back to Landing Page
+                </Link>
+
                 <div className="mb-7 text-center">
-                    <div className="login-logo-shell mx-auto mb-4 inline-flex h-14 w-14 items-center justify-center rounded-xl border border-border bg-muted">
-                        <img src="/logo.png" alt="Mifi Pro" className="h-9 w-auto object-contain" />
-                    </div>
-                    <p className="text-xs uppercase tracking-[0.16em] font-semibold text-muted-foreground">Mifi Pro</p>
-                    <h1 className="login-headline mt-2 text-2xl font-semibold text-foreground">Sign in to Partner Console</h1>
+                    <BrandWordmark className="login-wordmark mx-auto mb-5 block h-auto" showTagline />
+                    <h1 className="login-headline mt-2 text-2xl font-semibold">Sign in to Partner Console</h1>
+                    <p className="login-subtitle mt-3 text-sm">
+                        Access the same credit operations workspace behind the MIFI Pro landing experience.
+                    </p>
                 </div>
 
                 {error ? (
@@ -65,7 +78,7 @@ export default function Login() {
                         role="alert"
                         aria-live="polite"
                         aria-atomic="true"
-                        className="login-error mb-5 rounded-xl border border-border bg-muted px-3 py-2.5 text-sm text-foreground flex items-start gap-2.5"
+                        className="login-error mb-5 rounded-xl px-3 py-2.5 text-sm flex items-start gap-2.5"
                     >
                         <AlertCircle size={17} className="shrink-0 mt-0.5 text-rose-500" />
                         <span>{error}</span>
@@ -74,11 +87,11 @@ export default function Login() {
 
                 <form onSubmit={handleSubmit} className="space-y-5" noValidate>
                     <div>
-                        <label htmlFor={emailId} className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.09em] text-muted-foreground">
+                        <label htmlFor={emailId} className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.09em] login-label">
                             Work Email
                         </label>
                         <div className="group relative">
-                            <Mail className="login-input-icon absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground group-focus-within:text-foreground" size={17} />
+                            <Mail className="login-input-icon absolute left-3 top-1/2 -translate-y-1/2" size={17} />
                             <input
                                 id={emailId}
                                 type="email"
@@ -88,18 +101,18 @@ export default function Login() {
                                 aria-invalid={Boolean(error)}
                                 aria-describedby={error ? errorId : undefined}
                                 onChange={(e) => setEmail(e.target.value)}
-                                className="login-input w-full h-11 rounded-xl border border-border bg-background pl-10 pr-3 text-sm text-foreground placeholder:text-muted-foreground"
+                                className="login-input w-full h-11 rounded-xl pl-10 pr-3 text-sm"
                                 placeholder="name@company.com"
                             />
                         </div>
                     </div>
 
                     <div>
-                        <label htmlFor={passwordId} className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.09em] text-muted-foreground">
+                        <label htmlFor={passwordId} className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.09em] login-label">
                             Password
                         </label>
                         <div className="group relative">
-                            <Lock className="login-input-icon absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground group-focus-within:text-foreground" size={17} />
+                            <Lock className="login-input-icon absolute left-3 top-1/2 -translate-y-1/2" size={17} />
                             <input
                                 id={passwordId}
                                 type={showPassword ? 'text' : 'password'}
@@ -109,13 +122,13 @@ export default function Login() {
                                 aria-invalid={Boolean(error)}
                                 aria-describedby={error ? errorId : undefined}
                                 onChange={(e) => setPassword(e.target.value)}
-                                className="login-input w-full h-11 rounded-xl border border-border bg-background pl-10 pr-11 text-sm text-foreground placeholder:text-muted-foreground"
+                                className="login-input w-full h-11 rounded-xl pl-10 pr-11 text-sm"
                                 placeholder="Enter your password"
                             />
                             <button
                                 type="button"
                                 onClick={() => setShowPassword((value) => !value)}
-                                className="login-password-toggle absolute right-2.5 top-1/2 -translate-y-1/2 inline-flex items-center justify-center rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                                className="login-password-toggle absolute right-2.5 top-1/2 -translate-y-1/2 inline-flex items-center justify-center rounded-md p-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
                                 aria-label={showPassword ? 'Hide password' : 'Show password'}
                             >
                                 {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
@@ -154,8 +167,8 @@ export default function Login() {
                     </button>
                 </form>
 
-                <div className="mt-6 border-t border-border/70 pt-4 text-center">
-                    <p className="text-[11px] text-muted-foreground/90">
+                <div className="login-footer mt-6 pt-4 text-center">
+                    <p className="text-[11px]">
                         Audit-logged access | Role-based permissions | Encrypted in transit
                     </p>
                 </div>

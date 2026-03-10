@@ -182,7 +182,7 @@ class AuthAgent:
                 logger.debug(f"[AUTH DEBUG] Valid local JWT found for: {email}")
         except JWTError:
             # This is expected for standard dashboard users who send Firebase tokens
-            logger.error("[AUTH DEBUG] Local JWT decode failed. Attempting Firebase ID token...")
+            logger.debug("[AUTH DEBUG] Local JWT decode failed. Attempting Firebase ID token...")
         except Exception as e:
             logger.error(f"[AUTH DEBUG] Unexpected local JWT error: {e}")
 

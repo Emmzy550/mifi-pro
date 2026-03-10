@@ -1,8 +1,9 @@
 import React, { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
-import { Upload, FileSpreadsheet, ArrowRight, AlertTriangle, CheckCircle2, X, Plus, Trash2 } from 'lucide-react';
-import { requiredColumns, columnAliases, normalizeHeader } from '../utils/borrowerUpload';
+import { Upload, FileSpreadsheet, AlertTriangle, CheckCircle2, X, Plus, Trash2 } from 'lucide-react';
+import { normalizeHeader } from '../utils/borrowerUpload';
+import ColumnMappingStep from '../components/ColumnMappingStep';
 
 export default function ManualAssessmentUpload() {
     const navigate = useNavigate();
@@ -11,28 +12,29 @@ export default function ManualAssessmentUpload() {
     const [rows, setRows] = useState<any[][]>([]);
     const [isParsing, setIsParsing] = useState(false);
     const [parseError, setParseError] = useState<string | null>(null);
-    const [missingColumns, setMissingColumns] = useState<string[]>([]);
-    const canContinue = rows.length > 0 && !isParsing && !parseError;
 
     const previewRows = useMemo(() => rows.slice(0, 6), [rows]);
     const headerMeta = useMemo(
         () => headers.map((header, idx) => ({ header, idx })).filter((item) => item.header.trim() !== ''),
         [headers]
     );
-    const computeMissingColumns = (candidateHeaders: string[]) => {
-        const normalized = new Set(candidateHeaders.map((header) => normalizeHeader(header)).filter(Boolean));
-        return requiredColumns.filter((col) => {
-            const aliases = columnAliases[col] || [col];
-            return !aliases.some((alias) => normalized.has(normalizeHeader(alias)));
-        });
-    };
+    const parsedRowsForMapping = useMemo(
+        () =>
+            rows.map((row) => {
+                const normalizedRow: Record<string, any> = {};
+                headers.forEach((header, index) => {
+                    normalizedRow[header] = row?.[index] ?? '';
+                });
+                return normalizedRow;
+            }),
+        [headers, rows]
+    );
 
     const handleFileChange = async (selected: File | null) => {
         if (!selected) return;
         setFile(selected);
         setIsParsing(true);
         setParseError(null);
-        setMissingColumns([]);
         setHeaders([]);
         setRows([]);
 
@@ -52,8 +54,6 @@ export default function ManualAssessmentUpload() {
             const previewHeaders = rawHeaders.length > 0 ? rawHeaders : Object.keys((dataRows?.[0] as any) || {});
             setHeaders(previewHeaders);
             setRows(dataRows);
-
-            setMissingColumns(computeMissingColumns(previewHeaders));
         } catch (err: any) {
             console.error('Failed to parse Excel upload', err);
             setParseError(err?.message || 'Unable to parse the uploaded file. Please try again.');
@@ -66,7 +66,6 @@ export default function ManualAssessmentUpload() {
         setHeaders((prev) => {
             const next = [...prev];
             next[headerIndex] = value;
-            setMissingColumns(computeMissingColumns(next));
             return next;
         });
     };
@@ -81,9 +80,7 @@ export default function ManualAssessmentUpload() {
                 counter += 1;
                 nextName = `${baseName} ${counter}`;
             }
-            const next = [...prev, nextName];
-            setMissingColumns(computeMissingColumns(next));
-            return next;
+            return [...prev, nextName];
         });
         setRows((prev) => prev.map((row) => [...row, '']));
     };
@@ -96,11 +93,7 @@ export default function ManualAssessmentUpload() {
     };
 
     const removeColumn = (headerIndex: number) => {
-        setHeaders((prev) => {
-            const next = prev.filter((_, idx) => idx !== headerIndex);
-            setMissingColumns(computeMissingColumns(next));
-            return next;
-        });
+        setHeaders((prev) => prev.filter((_, idx) => idx !== headerIndex));
         setRows((prev) => prev.map((row) => row.filter((_, idx) => idx !== headerIndex)));
     };
 
@@ -119,7 +112,6 @@ export default function ManualAssessmentUpload() {
         setHeaders([]);
         setRows([]);
         setParseError(null);
-        setMissingColumns([]);
         setIsParsing(false);
     };
 
@@ -127,7 +119,7 @@ export default function ManualAssessmentUpload() {
         <div className="max-w-5xl mx-auto pb-20 space-y-8">
             <header className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
                 <div>
-                    <h1 className="text-2xl font-bold text-slate-900">Upload Excel for Manual Assessments</h1>
+                    <h1 className="text-2xl font-bold text-slate-900">Upload Excel for Assesments</h1>
                     <p className="text-slate-500">
                         Upload a spreadsheet, review the parsed borrowers, and then attach payslips or bank statements.
                     </p>
@@ -201,15 +193,9 @@ export default function ManualAssessmentUpload() {
                                 <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-primary/10 text-primary font-semibold">
                                     <CheckCircle2 size={14} /> {rows.length} rows detected
                                 </span>
-                                {missingColumns.length === 0 ? (
-                                    <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-100 text-emerald-700 font-semibold">
-                                        <CheckCircle2 size={14} /> All required columns found
-                                    </span>
-                                ) : (
-                                    <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-100 text-amber-700 font-semibold">
-                                        <AlertTriangle size={14} /> Missing: {missingColumns.join(', ')}
-                                    </span>
-                                )}
+                                <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-100 text-slate-700 font-semibold">
+                                    <AlertTriangle size={14} /> Column mapping required before continue
+                                </span>
                             </div>
 
                             <div className="border border-slate-200 rounded-xl overflow-hidden">
@@ -285,53 +271,47 @@ export default function ManualAssessmentUpload() {
                     <div>
                         <h3 className="text-sm font-semibold text-slate-900">Next Step</h3>
                         <p className="text-xs text-slate-500">
-                            After confirming the data, you can attach payslips or bank statements per borrower.
+                            Map spreadsheet columns to system fields, then continue to borrower document upload.
                         </p>
                     </div>
 
                     <div className="space-y-3 text-xs text-slate-600">
                         <div className="flex items-start gap-2">
                             <CheckCircle2 size={14} className="text-primary mt-0.5" />
-                            Validate required fields and fix missing columns.
+                            Map required fields (name, phone, employment, income, loan amount).
                         </div>
                         <div className="flex items-start gap-2">
                             <CheckCircle2 size={14} className="text-primary mt-0.5" />
-                            Preview the parsed rows before creating assessments.
+                            Review parsed rows and column alignment.
                         </div>
                         <div className="flex items-start gap-2">
                             <CheckCircle2 size={14} className="text-primary mt-0.5" />
                             Attach supporting documents for each borrower.
                         </div>
                     </div>
-
-                    <button
-                        disabled={!canContinue}
-                        onClick={() => {
-                            if (!canContinue) return;
-                            if (missingColumns.length > 0) {
-                                const confirm = window.confirm(
-                                    `Missing required columns: ${missingColumns.join(', ')}. Continue anyway?`
-                                );
-                                if (!confirm) return;
-                            }
-                            const payload = {
-                                fileName: file?.name || '',
-                                headers,
-                                rows,
-                                createdAt: new Date().toISOString()
-                            };
-                            sessionStorage.setItem('manual_assessment_upload', JSON.stringify(payload));
-                            navigate('/manual-assessments/upload-documents');
-                        }}
-                        className="w-full bg-primary hover:bg-primary/90 text-white py-3 rounded-xl font-semibold flex items-center justify-center gap-2 transition-all disabled:opacity-60 disabled:cursor-not-allowed"
-                    >
-                        Continue to document upload <ArrowRight size={16} />
-                    </button>
-                    <p className="text-[10px] text-slate-400">
-                        You can review and attach documents on the next screen.
-                    </p>
+                    <p className="text-[10px] text-slate-400">Use the mapping step below to continue.</p>
                 </div>
             </div>
+
+            {rows.length > 0 && !parseError && (
+                <ColumnMappingStep
+                    headers={headers}
+                    parsedRows={parsedRowsForMapping}
+                    onContinue={({ mapping, mappedRows, originalHeaders }) => {
+                        const payload = {
+                            fileName: file?.name || '',
+                            headers,
+                            rows,
+                            mapping,
+                            mappedRows,
+                            originalHeaders,
+                            createdAt: new Date().toISOString()
+                        };
+                        sessionStorage.setItem('manual_assessment_upload', JSON.stringify(payload));
+                        navigate('/manual-assessments/upload-documents');
+                    }}
+                />
+            )}
         </div>
     );
 }

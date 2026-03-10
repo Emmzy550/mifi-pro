@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
 import {
+    ChevronLeft,
+    ChevronRight,
     LayoutDashboard,
     Key,
     Shield,
@@ -11,6 +13,7 @@ import {
     CreditCard,
     Lock,
     ClipboardList,
+    Clock3,
     SlidersHorizontal,
     Users,
     Bell,
@@ -20,6 +23,9 @@ import {
 } from 'lucide-react';
 import { api, useAuth } from '../context/AuthContext';
 import DecisionCopilot from './DecisionCopilot';
+import BrandWordmark from './BrandWordmark';
+
+const UNREAD_NOTIFICATIONS_POLL_MS = 30000;
 
 /*
 Design rule:
@@ -71,7 +77,9 @@ const NAV_SECTIONS: NavSection[] = [
     {
         title: 'Organization',
         items: [
+            { label: 'Follow-ups', href: '/follow-ups', icon: Clock3 },
             { label: 'Team', href: '/team', icon: Users, visible: (role) => TEAM_ROLES.has(role) },
+            { label: 'Reports', href: '/organization-report', icon: FileText },
             { label: 'Usage & Billing', href: '/usage-billing', icon: CreditCard }
         ]
     },
@@ -97,11 +105,13 @@ const formatRoleLabel = (role?: string) => {
 function SidebarNavItem({
     item,
     pathname,
-    unreadNotificationCount
+    unreadNotificationCount,
+    collapsed
 }: {
     item: NavItem;
     pathname: string;
     unreadNotificationCount: number;
+    collapsed: boolean;
 }) {
     const Icon = item.icon;
     const active = isRouteActive(pathname, item.href);
@@ -112,15 +122,17 @@ function SidebarNavItem({
         <Link
             to={item.href}
             aria-current={active ? 'page' : undefined}
+            aria-label={collapsed ? item.label : undefined}
+            title={collapsed ? item.label : undefined}
             className={`sidebar-item focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35 focus-visible:ring-offset-2 ${
                 active ? 'sidebar-item-active' : ''
-            }`}
+            } ${collapsed ? 'sidebar-item-collapsed' : ''}`}
         >
             <span aria-hidden className={`sidebar-item-accent ${active ? 'sidebar-item-accent-active' : ''}`} />
             <Icon size={18} className="sidebar-item-icon" />
-            <span className="truncate">{item.label}</span>
+            <span className="sidebar-item-label truncate">{item.label}</span>
             {showBadge && (
-                <span className="ml-auto inline-flex min-w-[20px] items-center justify-center rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                <span className="sidebar-item-badge ml-auto inline-flex min-w-[20px] items-center justify-center rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold text-white">
                     {displayCount}
                 </span>
             )}
@@ -132,12 +144,14 @@ function SidebarSectionBlock({
     section,
     pathname,
     role,
-    unreadNotificationCount
+    unreadNotificationCount,
+    collapsed
 }: {
     section: NavSection;
     pathname: string;
     role: string;
     unreadNotificationCount: number;
+    collapsed: boolean;
 }) {
     const items = section.items.filter((item) => (item.visible ? item.visible(role) : true));
     if (items.length === 0) return null;
@@ -152,6 +166,7 @@ function SidebarSectionBlock({
                         item={item}
                         pathname={pathname}
                         unreadNotificationCount={unreadNotificationCount}
+                        collapsed={collapsed}
                     />
                 ))}
             </div>
@@ -164,10 +179,12 @@ export default function Layout() {
     const location = useLocation();
     const navigate = useNavigate();
     const [isDarkMode, setIsDarkMode] = useState(false);
+    const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
     const [isCopilotDockedOpen, setIsCopilotDockedOpen] = useState(false);
     const [unreadNotificationCount, setUnreadNotificationCount] = useState(0);
 
     const role = (user?.role || '').toUpperCase();
+    const isWideContentRoute = location.pathname === '/admin' || location.pathname.startsWith('/admin/');
     const visibleSections = useMemo(
         () =>
             NAV_SECTIONS.filter((section) =>
@@ -181,6 +198,7 @@ export default function Layout() {
         const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
         const shouldUseDark = savedTheme ? savedTheme === 'dark' : prefersDark;
         setIsDarkMode(shouldUseDark);
+        setIsSidebarCollapsed(localStorage.getItem('sidebar-collapsed') === 'true');
     }, []);
 
     useEffect(() => {
@@ -188,6 +206,10 @@ export default function Layout() {
         document.documentElement.classList.toggle('dark', isDarkMode);
         localStorage.setItem('ui-theme', isDarkMode ? 'dark' : 'light');
     }, [isDarkMode]);
+
+    useEffect(() => {
+        localStorage.setItem('sidebar-collapsed', isSidebarCollapsed ? 'true' : 'false');
+    }, [isSidebarCollapsed]);
 
     const fetchUnreadCount = useCallback(async () => {
         if (!user?.id) return;
@@ -208,7 +230,7 @@ export default function Layout() {
         };
 
         fetchUnreadCount();
-        intervalHandle = setInterval(fetchUnreadCount, 5000);
+        intervalHandle = setInterval(fetchUnreadCount, UNREAD_NOTIFICATIONS_POLL_MS);
         window.addEventListener('focus', fetchUnreadCount);
         window.addEventListener('notifications:refresh', fetchUnreadCount as EventListener);
         document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -221,20 +243,33 @@ export default function Layout() {
         };
     }, [fetchUnreadCount, location.pathname]);
 
-    const handleLogout = () => {
-        logout();
-        navigate('/login');
+    const handleLogout = async () => {
+        await logout();
+        navigate('/', { replace: true });
     };
 
     return (
         <div className={`flex h-screen overflow-hidden app-shell ${isDarkMode ? 'theme-dark' : ''}`}>
-            <aside className="w-64 sidebar-shell flex flex-col sticky top-0 min-h-screen h-screen flex-shrink-0">
+            <aside className={`sidebar-shell flex flex-col sticky top-0 min-h-screen h-screen flex-shrink-0 ${isSidebarCollapsed ? 'sidebar-shell-collapsed' : ''}`}>
+                <button
+                    type="button"
+                    onClick={() => setIsSidebarCollapsed((prev) => !prev)}
+                    className="sidebar-collapse-toggle"
+                    aria-label={isSidebarCollapsed ? 'Expand navigation sidebar' : 'Collapse navigation sidebar'}
+                    aria-expanded={!isSidebarCollapsed}
+                    title={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+                >
+                    {isSidebarCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
+                </button>
                 <div className="sidebar-header px-4 py-4 border-b border-border">
-                    <div className="flex items-center gap-3">
-                        <img src="/logo.png" alt="Mifi Pro" className="h-9 w-auto object-contain" />
-                        <div className="min-w-0">
-                            <p className="text-sm font-semibold text-foreground truncate">Partner Console</p>
-                            <p className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">Loan Officer AI</p>
+                    <div className={`sidebar-brand ${isSidebarCollapsed ? 'sidebar-brand-collapsed' : ''}`}>
+                        <div className={`sidebar-brand-shell ${isSidebarCollapsed ? 'sidebar-brand-shell-collapsed' : ''}`}>
+                            <BrandWordmark
+                                className={`block h-auto ${isSidebarCollapsed ? 'w-[56px]' : 'w-[156px]'}`}
+                                showTagline={false}
+                                tone={isDarkMode ? 'dark' : 'light'}
+                                surfaceColor={isDarkMode ? '#0f172a' : '#f8fafc'}
+                            />
                         </div>
                     </div>
                 </div>
@@ -248,30 +283,32 @@ export default function Layout() {
                                 pathname={location.pathname}
                                 role={role}
                                 unreadNotificationCount={unreadNotificationCount}
+                                collapsed={isSidebarCollapsed}
                             />
                         ))}
                     </div>
                 </nav>
 
                 <div className="p-3 sidebar-bottom mt-auto border-t border-border space-y-3">
-                    <div className="rounded-xl border border-border bg-card p-3 shadow-sm">
-                        <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">Appearance</p>
+                    <div className="sidebar-utility-card rounded-xl border border-border bg-card p-3 shadow-sm">
+                        <p className="sidebar-utility-heading text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">Appearance</p>
                         <button
                             onClick={() => setIsDarkMode((prev) => !prev)}
                             aria-label={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
-                            className="mt-2 w-full inline-flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35 transition-colors duration-150"
+                            title={isSidebarCollapsed ? (isDarkMode ? 'Light Mode' : 'Dark Mode') : undefined}
+                            className="sidebar-utility-button mt-2 w-full inline-flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35 transition-colors duration-150"
                         >
                             {isDarkMode ? <Sun size={16} /> : <Moon size={16} />}
-                            <span>{isDarkMode ? 'Light Mode' : 'Dark Mode'}</span>
+                            <span className="sidebar-button-label">{isDarkMode ? 'Light Mode' : 'Dark Mode'}</span>
                         </button>
                     </div>
 
-                    <div className="rounded-xl border border-border bg-card p-3 shadow-sm">
-                        <div className="flex items-center gap-3">
+                    <div className="sidebar-utility-card rounded-xl border border-border bg-card p-3 shadow-sm">
+                        <div className={`flex items-center gap-3 ${isSidebarCollapsed ? 'justify-center' : ''}`}>
                             <div className="w-8 h-8 rounded-full bg-muted flex items-center justify-center text-sm font-bold text-foreground">
                                 {user?.email?.[0]?.toUpperCase() || 'U'}
                             </div>
-                            <div className="min-w-0 flex-1">
+                            <div className="sidebar-user-meta min-w-0 flex-1">
                                 <p className="text-sm font-semibold text-foreground truncate">{user?.email}</p>
                                 <span className="mt-1 inline-flex items-center rounded-full border border-border bg-muted px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
                                     {formatRoleLabel(user?.role)}
@@ -282,16 +319,20 @@ export default function Layout() {
 
                     <button
                         onClick={handleLogout}
-                        className="w-full inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/40 transition-colors duration-150"
+                        aria-label="Sign Out"
+                        title={isSidebarCollapsed ? 'Sign Out' : undefined}
+                        className={`sidebar-logout-button w-full inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/40 transition-colors duration-150 ${
+                            isSidebarCollapsed ? 'justify-center' : ''
+                        }`}
                     >
                         <LogOut size={16} />
-                        <span>Sign Out</span>
+                        <span className="sidebar-button-label">Sign Out</span>
                     </button>
                 </div>
             </aside>
 
             <main className={`copilot-main flex-1 overflow-y-auto ${isCopilotDockedOpen ? 'copilot-main-docked' : ''}`}>
-                <div className="page-shell">
+                <div className={`page-shell ${isWideContentRoute ? 'page-shell-wide' : ''}`}>
                     <Outlet />
                 </div>
             </main>

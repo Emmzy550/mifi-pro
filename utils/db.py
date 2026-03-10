@@ -776,6 +776,18 @@ class Database:
         if hasattr(db, 'save'): db.save()
 
     @classmethod
+    def get_follow_up_task(cls, task_id: str) -> Optional[FollowUpTask]:
+        db = cls.get_db()
+        doc = db.collection("follow_up_tasks").document(task_id).get()
+        if not doc.exists:
+            return None
+        try:
+            return FollowUpTask(**doc.to_dict())
+        except Exception as e:
+            logger.info(f"Skipping malformed follow-up task {task_id}: {e}")
+            return None
+
+    @classmethod
     def list_follow_up_tasks(
         cls,
         organization_id: Optional[str] = None,
@@ -794,6 +806,28 @@ class Database:
                 tasks.append(FollowUpTask(**doc.to_dict()))
             except Exception as e:
                 logger.info(f"Skipping malformed follow-up task {doc.id}: {e}")
+
+        if organization_id and not tasks:
+            try:
+                all_docs = db.collection("follow_up_tasks").stream()
+                normalized_org = str(organization_id).strip().upper()
+                for doc in all_docs:
+                    payload = doc.to_dict()
+                    if not payload:
+                        continue
+                    payload_org = str(payload.get("organization_id") or "").strip().upper()
+                    payload_assessment = str(payload.get("assessment_id") or "").strip()
+                    if payload_org != normalized_org:
+                        continue
+                    if assessment_id and payload_assessment != assessment_id:
+                        continue
+                    try:
+                        tasks.append(FollowUpTask(**payload))
+                    except Exception as e:
+                        logger.info(f"Skipping malformed follow-up task {doc.id}: {e}")
+            except Exception as e:
+                logger.info(f"Case-insensitive follow-up fallback failed: {e}")
+
         tasks.sort(key=lambda t: t.created_at, reverse=True)
         return tasks
 
