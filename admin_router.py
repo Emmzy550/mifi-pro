@@ -7,6 +7,7 @@ import secrets
 from models.user import User, UserRole
 from models.organization import Organization, OrgStatus, BillingPlan
 from models.api_key import APIKey, KeyStatus
+from models.demo_request import DemoRequest
 from agents.auth_agent import AuthAgent, get_super_admin
 from services.email_service import EmailService
 from utils.db import Database
@@ -271,6 +272,17 @@ async def list_global_audit_logs(
     View global audit logs.
     """
     return AuditAgent.list_logs(limit=limit)
+
+@admin_router.get("/demo-requests", response_model=List[DemoRequest])
+async def list_demo_requests(
+    limit: int = Query(100, ge=1, le=500),
+    status: Optional[str] = Query(None),
+    current_user: User = Depends(get_super_admin)
+):
+    """
+    View inbound landing page requests from prospective institutions.
+    """
+    return Database.list_demo_requests(limit=limit, status=status)
 
 @admin_router.post("/users", response_model=User)
 async def create_admin_user(

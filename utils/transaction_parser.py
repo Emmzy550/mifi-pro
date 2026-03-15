@@ -67,13 +67,14 @@ from utils.extractors.fallback import FallbackExtractor
 from utils.extractors.nrc import NRCExtractor
 from utils.extractors.bank_statement_fallback import BankStatementFallbackExtractor
 from utils.extractors.payslip_fallback import PayslipFallbackExtractor
+from utils.extractors.mobile_money import MobileMoneyExtractor
 
 class TransactionParser:
     """
     Orchestrator for document extraction.
     Routes documents to the correct strategy based on classification.
     """
-    def parse(self, file_content: bytes, filename: str) -> ExtractionResult:
+    def parse(self, file_content: bytes, filename: str, document_hint: Optional[str] = None) -> ExtractionResult:
         # 1. Convert to Text
         text = self._extract_text(file_content, filename)
         if not text:
@@ -90,6 +91,15 @@ class TransactionParser:
 
         # 2. Classify
         doc_type, confidence = DocumentClassifier.classify(text, filename)
+        normalized_hint = (document_hint or "").strip().lower()
+        if normalized_hint == "mobile_money" and doc_type in {
+            DocumentType.UNKNOWN,
+            DocumentType.GENERIC_CSV,
+            DocumentType.BANK_STATEMENT,
+            DocumentType.MOBILE_MONEY,
+        }:
+            doc_type = DocumentType.MOBILE_MONEY
+            confidence = max(confidence, 0.85)
         if confidence < 0.6 or doc_type == DocumentType.UNKNOWN:
             result = ExtractionResult(
                 document_type=DocumentType.UNKNOWN,
@@ -103,6 +113,35 @@ class TransactionParser:
         # 3. Dispatch (Strategy-based, isolated per document type)
         if doc_type == DocumentType.BANK_STATEMENT:
             result = self._extract_bank_statement(text)
+            if not result.raw_text_preview:
+                result.raw_text_preview = text[:200]
+            return self._finalize_result(result)
+        if doc_type == DocumentType.MOBILE_MONEY:
+            result = self._extract_mobile_money(text)
+            if not result.transactions and normalized_hint == "mobile_money":
+                csv_fallback = self._extract_csv(text)
+                if csv_fallback.transactions:
+                    result.transactions = csv_fallback.transactions
+                    if result.bank_statement_summary:
+                        if result.bank_statement_summary.total_money_in is None:
+                            result.bank_statement_summary.total_money_in = round(
+                                sum(tx.credit or 0.0 for tx in csv_fallback.transactions if tx.direction == "INFLOW"),
+                                2,
+                            )
+                        if result.bank_statement_summary.total_money_out is None:
+                            result.bank_statement_summary.total_money_out = round(
+                                sum(tx.debit or 0.0 for tx in csv_fallback.transactions if tx.direction == "OUTFLOW"),
+                                2,
+                            )
+                        if result.bank_statement_summary.deposit_count is None:
+                            result.bank_statement_summary.deposit_count = sum(
+                                1 for tx in csv_fallback.transactions if tx.direction == "INFLOW"
+                            )
+                    result.confidence = max(result.confidence, csv_fallback.confidence)
+                    result.warnings = [
+                        warning for warning in result.warnings
+                        if "No transactions were extracted from mobile money statement." not in warning
+                    ]
             if not result.raw_text_preview:
                 result.raw_text_preview = text[:200]
             return self._finalize_result(result)
@@ -259,6 +298,33 @@ class TransactionParser:
 
         return result
 
+    def _extract_mobile_money(self, text: str) -> ExtractionResult:
+        """
+        Mobile money strategy with dedicated layout parsing.
+        """
+        try:
+            result = MobileMoneyExtractor().extract(text)
+        except Exception as e:
+            result = ExtractionResult(
+                document_type=DocumentType.MOBILE_MONEY,
+                confidence=0.0,
+                warnings=[f"Mobile money extractor failed: {e}"],
+                raw_text_preview=text[:500]
+            )
+
+        summary = result.bank_statement_summary
+        is_success = bool(
+            summary and (
+                len(result.transactions) > 0 or
+                summary.total_money_in is not None or
+                summary.total_money_out is not None or
+                summary.closing_balance is not None
+            )
+        )
+        if not is_success and "Mobile money extraction incomplete." not in result.warnings:
+            result.warnings.append("Mobile money extraction incomplete.")
+        return result
+
     def _extract_nrc(self, text: str) -> ExtractionResult:
         """
         NRC strategy with document-specific success criteria and fallback.
@@ -299,6 +365,11 @@ class TransactionParser:
                     result.bank_statement_summary = BankStatementSummary()
                 if not result.bank_statement_summary.summary_profile:
                     result.bank_statement_summary.summary_profile = SummaryProfile.BANK_STATEMENT_SUMMARY.value
+            elif result.document_type == DocumentType.MOBILE_MONEY:
+                if not result.bank_statement_summary:
+                    result.bank_statement_summary = BankStatementSummary()
+                if not result.bank_statement_summary.summary_profile:
+                    result.bank_statement_summary.summary_profile = SummaryProfile.BANK_STATEMENT_SUMMARY.value
             elif result.document_type == DocumentType.PAYSLIP:
                 if not result.payslip_summary:
                     result.payslip_summary = PayslipSummary()
@@ -317,6 +388,8 @@ class TransactionParser:
         if result.document_type != DocumentType.UNKNOWN:
             summary_profile = None
             if result.document_type == DocumentType.BANK_STATEMENT and result.bank_statement_summary:
+                summary_profile = result.bank_statement_summary.summary_profile
+            elif result.document_type == DocumentType.MOBILE_MONEY and result.bank_statement_summary:
                 summary_profile = result.bank_statement_summary.summary_profile
             elif result.document_type == DocumentType.PAYSLIP and result.payslip_summary:
                 summary_profile = result.payslip_summary.summary_profile

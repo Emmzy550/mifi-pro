@@ -11,6 +11,7 @@ from reportlab.graphics.charts.barcharts import VerticalBarChart
 from reportlab.graphics.charts.piecharts import Pie
 from reportlab.graphics.shapes import Drawing, String
 from reportlab.lib import colors
+from reportlab.lib.enums import TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
@@ -540,6 +541,7 @@ class OrganizationReportAgent:
             fontSize=8,
             leading=10,
             textColor=colors.HexColor("#64748b"),
+            alignment=TA_LEFT,
         )
         value_style = ParagraphStyle(
             "Value",
@@ -547,6 +549,50 @@ class OrganizationReportAgent:
             fontSize=10,
             leading=13,
             textColor=colors.HexColor("#0f172a"),
+            alignment=TA_LEFT,
+            wordWrap="CJK",
+        )
+        table_header_style = ParagraphStyle(
+            "TableHeader",
+            parent=styles["Normal"],
+            fontName="Helvetica-Bold",
+            fontSize=8.5,
+            leading=10.5,
+            textColor=colors.HexColor("#334155"),
+            alignment=TA_LEFT,
+            wordWrap="CJK",
+        )
+        table_header_right_style = ParagraphStyle(
+            "TableHeaderRight",
+            parent=table_header_style,
+            alignment=TA_RIGHT,
+        )
+        table_cell_style = ParagraphStyle(
+            "TableCell",
+            parent=styles["Normal"],
+            fontSize=9.5,
+            leading=11.5,
+            textColor=colors.HexColor("#0f172a"),
+            alignment=TA_LEFT,
+            wordWrap="CJK",
+        )
+        table_cell_right_style = ParagraphStyle(
+            "TableCellRight",
+            parent=table_cell_style,
+            alignment=TA_RIGHT,
+        )
+        metric_label_style = ParagraphStyle(
+            "MetricLabel",
+            parent=table_cell_style,
+            fontName="Helvetica-Bold",
+            textColor=colors.HexColor("#475569"),
+        )
+        metric_value_style = ParagraphStyle(
+            "MetricValue",
+            parent=table_cell_style,
+            fontName="Helvetica-Bold",
+            fontSize=10,
+            leading=12,
         )
 
         summary = report["summary"]
@@ -554,12 +600,79 @@ class OrganizationReportAgent:
         team = report["team"]
         portfolio = report["portfolio"]
         activity = report["activity"]
+        usable_width = doc.width
+
+        def width_ratio(*parts: float) -> List[float]:
+            total = sum(parts) or 1
+            return [usable_width * (part / total) for part in parts]
+
+        def table_paragraph(value: Any, style: ParagraphStyle) -> Paragraph:
+            text = "-" if value is None else str(value).strip() or "-"
+            safe_text = escape(cls._pdf_safe_text(text)).replace("\n", "<br/>")
+            return Paragraph(safe_text, style)
+
+        def build_table(
+            rows: List[List[Any]],
+            col_widths: List[float],
+            *,
+            header: bool = True,
+            alignments: Optional[List[str]] = None,
+            header_fill: str = "#e2e8f0",
+            header_text_color: str = "#334155",
+            grid_color: str = "#e2e8f0",
+            stripe_fill: str = "#f8fafc",
+            plain_fill: str = "#ffffff",
+            repeat_header: bool = True,
+        ) -> Table:
+            formatted_rows: List[List[Paragraph]] = []
+            for row_index, row in enumerate(rows):
+                formatted_row: List[Paragraph] = []
+                for col_index, value in enumerate(row):
+                    align_right = bool(alignments and col_index < len(alignments) and alignments[col_index] == "right")
+                    if header and row_index == 0:
+                        style = table_header_right_style if align_right else table_header_style
+                    else:
+                        style = table_cell_right_style if align_right else table_cell_style
+                    formatted_row.append(table_paragraph(value, style))
+                formatted_rows.append(formatted_row)
+
+            table = Table(
+                formatted_rows,
+                colWidths=col_widths,
+                hAlign="LEFT",
+                repeatRows=1 if header and repeat_header else 0,
+            )
+            table_styles = [
+                ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor(grid_color)),
+                ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor(grid_color)),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, -1), 7),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(plain_fill)),
+            ]
+            if header:
+                table_styles.extend(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(header_fill)),
+                        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor(header_text_color)),
+                    ]
+                )
+            data_start = 1 if header else 0
+            for row_index in range(data_start, len(rows)):
+                if (row_index - data_start) % 2 == 0:
+                    table_styles.append(
+                        ("BACKGROUND", (0, row_index), (-1, row_index), colors.HexColor(stripe_fill))
+                    )
+            table.setStyle(TableStyle(table_styles))
+            return table
 
         story: List[Any] = []
         story.append(Paragraph("Organization Report", title_style))
         story.append(
             Paragraph(
-                f"{organization['name']} · {report['range']['days']}-day summary · Generated {datetime.now().strftime('%b %d, %Y %H:%M UTC')}",
+                f"{organization['name']} - {report['range']['days']}-day summary - Generated {datetime.now(timezone.utc).strftime('%b %d, %Y %H:%M UTC')}",
                 subtitle_style,
             )
         )
@@ -571,13 +684,19 @@ class OrganizationReportAgent:
                 [Paragraph("Billing Status", label_style), Paragraph(organization["billing_status"], value_style), Paragraph("Payment Status", label_style), Paragraph(organization["payment_status"], value_style)],
                 [Paragraph("Environment", label_style), Paragraph(organization["environment"], value_style), Paragraph("Period End", label_style), Paragraph(str(organization["period_end"] or "N/A"), value_style)],
             ],
-            colWidths=[1.3 * inch, 2.0 * inch, 1.2 * inch, 2.3 * inch],
+            colWidths=width_ratio(1.1, 2.5, 1.1, 2.5),
+            hAlign="LEFT",
         )
         overview_table.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
             ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e2e8f0")),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("PADDING", (0, 0), (-1, -1), 6),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#eef2ff")),
+            ("BACKGROUND", (2, 0), (2, -1), colors.HexColor("#eef2ff")),
         ]))
         story.append(overview_table)
         story.append(Spacer(1, 12))
@@ -585,18 +704,43 @@ class OrganizationReportAgent:
         story.append(Paragraph("Summary Metrics", section_style))
         summary_table = Table(
             [
-                ["Assessments", f"{summary['assessments_in_range']}", "Uploaded Docs", f"{summary['uploaded_documents']}"],
-                ["API Calls", f"{summary['api_calls_in_range']}", "Team Members", f"{summary['team_members']}"],
-                ["Active Loans", f"{summary['active_loans']}", "Default Rate", f"{summary['default_rate']:.1f}%"],
-                ["Disbursed Volume", cls._format_money(summary["disbursed_volume"]), "API Keys", f"{summary['api_keys']}"],
+                [
+                    Paragraph("Assessments", metric_label_style),
+                    Paragraph(f"{summary['assessments_in_range']}", metric_value_style),
+                    Paragraph("Uploaded Docs", metric_label_style),
+                    Paragraph(f"{summary['uploaded_documents']}", metric_value_style),
+                ],
+                [
+                    Paragraph("API Calls", metric_label_style),
+                    Paragraph(f"{summary['api_calls_in_range']}", metric_value_style),
+                    Paragraph("Team Members", metric_label_style),
+                    Paragraph(f"{summary['team_members']}", metric_value_style),
+                ],
+                [
+                    Paragraph("Active Loans", metric_label_style),
+                    Paragraph(f"{summary['active_loans']}", metric_value_style),
+                    Paragraph("Default Rate", metric_label_style),
+                    Paragraph(f"{summary['default_rate']:.1f}%", metric_value_style),
+                ],
+                [
+                    Paragraph("Disbursed Volume", metric_label_style),
+                    Paragraph(cls._format_money(summary["disbursed_volume"]), metric_value_style),
+                    Paragraph("API Keys", metric_label_style),
+                    Paragraph(f"{summary['api_keys']}", metric_value_style),
+                ],
             ],
-            colWidths=[1.4 * inch, 1.6 * inch, 1.5 * inch, 2.2 * inch],
+            colWidths=width_ratio(1.35, 1.75, 1.45, 2.65),
+            hAlign="LEFT",
         )
         summary_table.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
             ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e2e8f0")),
-            ("FONTNAME", (0, 0), (-1, -1), "Helvetica-Bold"),
-            ("PADDING", (0, 0), (-1, -1), 7),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef2ff")),
+            ("BACKGROUND", (0, 2), (-1, 2), colors.HexColor("#eef2ff")),
         ]))
         story.append(summary_table)
         story.append(Spacer(1, 12))
@@ -609,8 +753,14 @@ class OrganizationReportAgent:
         if upload_chart:
             chart_flowables.append(upload_chart)
         if len(chart_flowables) == 2:
-            chart_table = Table([[chart_flowables[0], chart_flowables[1]]], colWidths=[3.3 * inch, 3.3 * inch])
-            chart_table.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
+            chart_table = Table([[chart_flowables[0], chart_flowables[1]]], colWidths=width_ratio(1, 1), hAlign="LEFT")
+            chart_table.setStyle(TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ]))
             story.append(chart_table)
             story.append(Spacer(1, 8))
         elif chart_flowables:
@@ -620,16 +770,37 @@ class OrganizationReportAgent:
         story.append(Paragraph("Billing & Team", section_style))
         billing_team_table = Table(
             [
-                ["Sandbox Usage", f"{billing['sandbox']['usage']} / {billing['sandbox']['limit']}", "Seat Usage", f"{team['seat_used']} / {team['seat_limit'] or 'Unlimited'}"],
-                ["Production Usage", f"{billing['production']['usage']} / {billing['production']['limit']}", "Paid Invoices", f"{billing['paid_invoices']}"],
-                ["Pending Invoices", f"{billing['pending_invoices']}", "Paid Amount", cls._format_money(billing['paid_amount_total'], "ZMW")],
+                [
+                    Paragraph("Sandbox Usage", metric_label_style),
+                    Paragraph(f"{billing['sandbox']['usage']} / {billing['sandbox']['limit']}", metric_value_style),
+                    Paragraph("Seat Usage", metric_label_style),
+                    Paragraph(f"{team['seat_used']} / {team['seat_limit'] or 'Unlimited'}", metric_value_style),
+                ],
+                [
+                    Paragraph("Production Usage", metric_label_style),
+                    Paragraph(f"{billing['production']['usage']} / {billing['production']['limit']}", metric_value_style),
+                    Paragraph("Paid Invoices", metric_label_style),
+                    Paragraph(f"{billing['paid_invoices']}", metric_value_style),
+                ],
+                [
+                    Paragraph("Pending Invoices", metric_label_style),
+                    Paragraph(f"{billing['pending_invoices']}", metric_value_style),
+                    Paragraph("Paid Amount", metric_label_style),
+                    Paragraph(cls._format_money(billing['paid_amount_total'], "ZMW"), metric_value_style),
+                ],
             ],
-            colWidths=[1.6 * inch, 1.7 * inch, 1.5 * inch, 1.8 * inch],
+            colWidths=width_ratio(1.5, 1.85, 1.45, 2.4),
+            hAlign="LEFT",
         )
         billing_team_table.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
             ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e2e8f0")),
-            ("PADDING", (0, 0), (-1, -1), 6),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef2ff")),
+            ("BACKGROUND", (0, 2), (-1, 2), colors.HexColor("#eef2ff")),
         ]))
         story.append(billing_team_table)
         story.append(Spacer(1, 10))
@@ -637,54 +808,42 @@ class OrganizationReportAgent:
         if team["role_breakdown"]:
             story.append(Paragraph("Role Breakdown", section_style))
             role_rows = [["Role", "Count"]] + [[item["name"], str(item["value"])] for item in team["role_breakdown"]]
-            role_table = Table(role_rows, colWidths=[4.8 * inch, 1.2 * inch])
-            role_table.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e2e8f0")),
-                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e2e8f0")),
-                ("PADDING", (0, 0), (-1, -1), 6),
-            ]))
+            role_table = build_table(role_rows, width_ratio(5.8, 1.4), alignments=["left", "right"])
             story.append(role_table)
             story.append(Spacer(1, 10))
 
         if activity["top_endpoints"]:
             story.append(Paragraph("Top Endpoints", section_style))
             endpoint_rows = [["Endpoint", "Calls"]] + [[item["name"], str(item["count"])] for item in activity["top_endpoints"]]
-            endpoint_table = Table(endpoint_rows, colWidths=[5.4 * inch, 0.8 * inch])
-            endpoint_table.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e2e8f0")),
-                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e2e8f0")),
-                ("PADDING", (0, 0), (-1, -1), 6),
-            ]))
+            endpoint_table = build_table(endpoint_rows, width_ratio(6.0, 0.9), alignments=["left", "right"])
             story.append(endpoint_table)
             story.append(Spacer(1, 10))
 
         story.append(Paragraph("Portfolio Snapshot", section_style))
         par = portfolio["par_snapshot"]
-        par_table = Table(
+        par_table = build_table(
             [
+                ["Metric", "Current Position"],
                 ["PAR 30", f"{par['par_30']} ({par['par_30_rate']:.1f}%)"],
                 ["PAR 60", f"{par['par_60']} ({par['par_60_rate']:.1f}%)"],
                 ["PAR 90", f"{par['par_90']} ({par['par_90_rate']:.1f}%)"],
             ],
-            colWidths=[1.5 * inch, 2.0 * inch],
+            width_ratio(2.0, 5.2),
         )
-        par_table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
-            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e2e8f0")),
-            ("PADDING", (0, 0), (-1, -1), 6),
-        ]))
         story.append(par_table)
         story.append(Spacer(1, 10))
 
         if portfolio["alerts"]:
             story.append(Paragraph("Alerts", section_style))
             alert_rows = [["Title", "Message"]] + [[item["title"], item["message"]] for item in portfolio["alerts"]]
-            alert_table = Table(alert_rows, colWidths=[1.7 * inch, 5.1 * inch])
-            alert_table.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#fef3c7")),
-                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#fcd34d")),
-                ("PADDING", (0, 0), (-1, -1), 6),
-            ]))
+            alert_table = build_table(
+                alert_rows,
+                width_ratio(2.0, 5.2),
+                header_fill="#fef3c7",
+                header_text_color="#92400e",
+                grid_color="#fcd34d",
+                stripe_fill="#fffbeb",
+            )
             story.append(alert_table)
             story.append(Spacer(1, 10))
 
@@ -700,12 +859,11 @@ class OrganizationReportAgent:
                     str(item["document_count"]),
                     created_label,
                 ])
-            assessment_table = Table(assessment_rows, colWidths=[2.0 * inch, 1.1 * inch, 0.9 * inch, 0.6 * inch, 1.6 * inch])
-            assessment_table.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e2e8f0")),
-                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e2e8f0")),
-                ("PADDING", (0, 0), (-1, -1), 6),
-            ]))
+            assessment_table = build_table(
+                assessment_rows,
+                width_ratio(2.5, 1.4, 1.1, 0.7, 1.5),
+                alignments=["left", "left", "left", "right", "left"],
+            )
             story.append(assessment_table)
             story.append(Spacer(1, 10))
 
@@ -720,12 +878,11 @@ class OrganizationReportAgent:
                     item["gateway"],
                     (item["timestamp"] or "")[:10],
                 ])
-            payment_table = Table(payment_rows, colWidths=[1.5 * inch, 1.3 * inch, 1.1 * inch, 1.2 * inch, 1.2 * inch])
-            payment_table.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e2e8f0")),
-                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e2e8f0")),
-                ("PADDING", (0, 0), (-1, -1), 6),
-            ]))
+            payment_table = build_table(
+                payment_rows,
+                width_ratio(1.5, 1.55, 1.15, 1.35, 1.65),
+                alignments=["left", "right", "left", "left", "left"],
+            )
             story.append(payment_table)
 
         story.append(Spacer(1, 20))

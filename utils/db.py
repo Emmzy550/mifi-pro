@@ -22,6 +22,7 @@ from models.officer_action import OfficerAction
 from models.sms_log import SMSLog
 from models.follow_up_task import FollowUpTask
 from models.notification import Notification
+from models.demo_request import DemoRequest
 from models.document_insight import DocumentInsightRecord
 import logging
 logger = logging.getLogger(__name__)
@@ -942,6 +943,48 @@ class Database:
             cls.save_notification(notification)
             updated += 1
         return updated
+
+    @classmethod
+    def save_demo_request(cls, demo_request: DemoRequest):
+        db = cls.get_db()
+        db.collection("demo_requests").document(demo_request.request_id).set(demo_request.model_dump(mode="json"))
+        if hasattr(db, "save"):
+            db.save()
+
+    @classmethod
+    def list_demo_requests(
+        cls,
+        limit: int = 100,
+        status: Optional[str] = None
+    ) -> List[DemoRequest]:
+        db = cls.get_db()
+        docs = db.collection("demo_requests").stream()
+        requests = []
+        normalized_status = (status or "").strip().upper() if status else None
+
+        for doc in docs:
+            try:
+                demo_request = DemoRequest(**doc.to_dict())
+                request_status = getattr(demo_request.status, "value", demo_request.status)
+                if normalized_status and str(request_status).upper() != normalized_status:
+                    continue
+                requests.append(demo_request)
+            except Exception as e:
+                logger.info(f"Skipping malformed demo request {doc.id}: {e}")
+
+        def _extract_created_at(request: DemoRequest):
+            created_at = getattr(request, "created_at", None)
+            if isinstance(created_at, str):
+                try:
+                    return datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                except Exception:
+                    return datetime.min.replace(tzinfo=timezone.utc)
+            if isinstance(created_at, datetime):
+                return created_at
+            return datetime.min.replace(tzinfo=timezone.utc)
+
+        requests.sort(key=_extract_created_at, reverse=True)
+        return requests[:limit]
 
     @classmethod
     def save_document_insight(cls, insight: DocumentInsightRecord):

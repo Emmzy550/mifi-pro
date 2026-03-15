@@ -67,7 +67,9 @@ class ProfileBuilder:
         for result in extraction_results:
             if result.bank_statement_summary:
                 bank_summary = result.bank_statement_summary
-                profile.source_documents.append("BANK_STATEMENT")
+                profile.source_documents.append(
+                    "MOBILE_MONEY" if result.document_type == DocumentType.MOBILE_MONEY else "BANK_STATEMENT"
+                )
             if result.payslip_summary:
                 payslip_summary = result.payslip_summary
                 profile.source_documents.append("PAYSLIP")
@@ -252,18 +254,22 @@ class ProfileBuilder:
         coverage = DocumentCoverage()
         
         for result in extraction_results:
-            if result.document_type == DocumentType.BANK_STATEMENT:
+            if result.document_type in {DocumentType.BANK_STATEMENT, DocumentType.MOBILE_MONEY}:
                 if result.bank_statement_summary:
                     has_balance = result.bank_statement_summary.closing_balance is not None
                     has_txns = len(result.transactions) > 0
-                    if has_balance or has_txns:
-                        coverage.bank_statement = DocumentPresence.PRESENT_COMPLETE
-                    else:
-                        coverage.bank_statement = DocumentPresence.PRESENT_INCOMPLETE
-                    coverage.bank_statement_confidence = result.confidence
+                    next_status = (
+                        DocumentPresence.PRESENT_COMPLETE
+                        if (has_balance or has_txns)
+                        else DocumentPresence.PRESENT_INCOMPLETE
+                    )
+                    if coverage.bank_statement != DocumentPresence.PRESENT_COMPLETE or next_status == DocumentPresence.PRESENT_COMPLETE:
+                        coverage.bank_statement = next_status
+                        coverage.bank_statement_confidence = max(coverage.bank_statement_confidence, result.confidence)
                 else:
-                    coverage.bank_statement = DocumentPresence.PRESENT_INCOMPLETE
-                    coverage.bank_statement_confidence = result.confidence
+                    if coverage.bank_statement != DocumentPresence.PRESENT_COMPLETE:
+                        coverage.bank_statement = DocumentPresence.PRESENT_INCOMPLETE
+                        coverage.bank_statement_confidence = max(coverage.bank_statement_confidence, result.confidence)
                     
             elif result.document_type == DocumentType.PAYSLIP:
                 if result.payslip_summary:
@@ -299,14 +305,20 @@ class ProfileBuilder:
         for result in extraction_results:
             if result.bank_statement_summary:
                 summaries.append({
+                    "document_type": "mobile_money" if result.document_type == DocumentType.MOBILE_MONEY else "bank_statement",
                     "summary_profile": result.bank_statement_summary.summary_profile,
+                    "opening_balance": result.bank_statement_summary.opening_balance,
                     "closing_balance": result.bank_statement_summary.closing_balance,
+                    "total_money_in": result.bank_statement_summary.total_money_in,
+                    "total_money_out": result.bank_statement_summary.total_money_out,
+                    "transaction_count": len(result.transactions or []),
                     "statement_period": (
                         result.bank_statement_summary.statement_period.model_dump()
                         if result.bank_statement_summary.statement_period else None
                     ),
                     "bank_name": result.bank_statement_summary.bank_name,
                     "account_holder_name": result.bank_statement_summary.account_holder_name,
+                    "provider": result.bank_statement_summary.bank_name if result.document_type == DocumentType.MOBILE_MONEY else None,
                     "currency": result.bank_statement_summary.currency,
                     "risk_flags": result.bank_statement_summary.risk_flags,
                     "raw_text_preview": result.raw_text_preview
@@ -371,17 +383,17 @@ class ProfileBuilder:
         elif profile.income.net_pay is None and profile.income.gross_pay is None:
             blocking_reasons.append("No income information found in payslip")
         
-        # Check 2: Bank statement required for transaction history
+        # Check 2: Bank or mobile money statement required for transaction history
         if profile.document_coverage.bank_statement == DocumentPresence.MISSING:
-            blocking_reasons.append("Bank statement document is required for transaction analysis")
+            blocking_reasons.append("Bank or mobile money statement document is required for transaction analysis")
         elif profile.document_coverage.bank_statement == DocumentPresence.PRESENT_INCOMPLETE:
-            blocking_reasons.append("Bank statement uploaded but could not be fully extracted")
+            blocking_reasons.append("Statement uploaded but could not be fully extracted")
         elif profile.banking_behavior.transaction_count == 0:
-            blocking_reasons.append("No transactions found in bank statement")
-        
+            blocking_reasons.append("No transactions found in uploaded statement")
+
         # Check 3: Account holder identity required for verification
         if profile.identity.account_holder_name is None:
-            blocking_reasons.append("Account holder name could not be extracted from bank statement - identity verification required")
+            blocking_reasons.append("Account holder name could not be extracted from uploaded statement - identity verification required")
         
         # Check 4: Minimum history requirement
         if (profile.banking_behavior.history_days > 0 and 

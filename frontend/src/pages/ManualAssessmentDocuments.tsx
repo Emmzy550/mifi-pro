@@ -3,6 +3,13 @@ import { useNavigate } from 'react-router-dom';
 import { Upload, FileText, X, ArrowLeft, CheckCircle2, ChevronDown, ChevronUp } from 'lucide-react';
 import { api } from '../context/AuthContext';
 import { requiredColumns, resolveColumnIndex } from '../utils/borrowerUpload';
+import {
+    DOCUMENT_BUNDLE_OPTIONS,
+    DOCUMENT_FIELD_CONFIG,
+    getRequiredFieldsForBundle,
+    ManualDocumentBundle,
+    ManualDocumentField,
+} from '../utils/manualDocumentBundles';
 
 type UploadData = {
     fileName: string;
@@ -11,11 +18,7 @@ type UploadData = {
     createdAt?: string;
 };
 
-type RowDocs = {
-    payslip?: File | null;
-    bank_statement?: File | null;
-    mobile_money_statement?: File | null;
-};
+type RowDocs = Partial<Record<ManualDocumentField, File | null>>;
 
 type RowStatus = {
     state: 'idle' | 'submitting' | 'success' | 'error' | 'skipped';
@@ -23,23 +26,13 @@ type RowStatus = {
     assessmentId?: string;
 };
 
-const REQUIRED_DOCUMENT_FIELDS: Array<{
-    field: keyof RowDocs;
-    label: string;
-    accept: string;
-}> = [
-    { field: 'mobile_money_statement', label: 'Mobile Money Statement', accept: '.pdf,.csv' },
-    { field: 'payslip', label: 'Payslip', accept: '.pdf,.jpg,.jpeg,.png' },
-    { field: 'bank_statement', label: 'Bank Statement', accept: '.pdf' }
-];
-const MANDATORY_DOCUMENT_FIELDS: Array<keyof RowDocs> = ['payslip', 'bank_statement'];
-
 export default function ManualAssessmentDocuments() {
     const navigate = useNavigate();
     const [expandedRow, setExpandedRow] = useState<number | null>(null);
     const [documents, setDocuments] = useState<Record<string, RowDocs>>({});
     const [rowStatus, setRowStatus] = useState<Record<string, RowStatus>>({});
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const [documentBundle, setDocumentBundle] = useState<ManualDocumentBundle>('payslip_bank');
 
     const uploadData = useMemo<UploadData | null>(() => {
         const raw = sessionStorage.getItem('manual_assessment_upload');
@@ -53,6 +46,7 @@ export default function ManualAssessmentDocuments() {
 
     const headers = uploadData?.headers || [];
     const rows = useMemo(() => (uploadData?.rows || []).map((row) => [...row]), [uploadData]);
+    const requiredDocumentFields = useMemo(() => getRequiredFieldsForBundle(documentBundle), [documentBundle]);
     const nameIndex = resolveColumnIndex(headers, 'full_name');
     const phoneIndex = resolveColumnIndex(headers, 'phone');
     const amountIndex = resolveColumnIndex(headers, 'requested_amount');
@@ -61,7 +55,7 @@ export default function ManualAssessmentDocuments() {
         [headers]
     );
 
-    const handleDocChange = (rowKey: string, field: keyof RowDocs, file: File | null) => {
+    const handleDocChange = (rowKey: string, field: ManualDocumentField, file: File | null) => {
         setDocuments((prev) => ({
             ...prev,
             [rowKey]: {
@@ -71,7 +65,7 @@ export default function ManualAssessmentDocuments() {
         }));
     };
 
-    const removeDoc = (rowKey: string, field: keyof RowDocs) => {
+    const removeDoc = (rowKey: string, field: ManualDocumentField) => {
         handleDocChange(rowKey, field, null);
     };
 
@@ -113,8 +107,8 @@ export default function ManualAssessmentDocuments() {
         return rows.map((_, idx) => {
             const rowKey = `${idx}`;
             const rowDocs = documents[rowKey] || {};
-            const uploadedCount = MANDATORY_DOCUMENT_FIELDS.filter((field) => Boolean(rowDocs[field])).length;
-            const requiredCount = MANDATORY_DOCUMENT_FIELDS.length;
+            const uploadedCount = requiredDocumentFields.filter((field) => Boolean(rowDocs[field])).length;
+            const requiredCount = requiredDocumentFields.length;
             const hasRequiredDocs = uploadedCount === requiredCount;
             const hasSubmittedSuccess = rowStatus[rowKey]?.state === 'success';
             return {
@@ -123,7 +117,7 @@ export default function ManualAssessmentDocuments() {
                 isComplete: hasRequiredDocs || hasSubmittedSuccess
             };
         });
-    }, [rows, documents, rowStatus]);
+    }, [rows, documents, rowStatus, requiredDocumentFields]);
 
     const completeBorrowers = borrowerProgress.filter((item) => item.isComplete).length;
     const pendingBorrowers = Math.max(0, rows.length - completeBorrowers);
@@ -152,6 +146,17 @@ export default function ManualAssessmentDocuments() {
             }));
 
             try {
+                const rowDocs = documents[rowKey] || {};
+                const missingDocs = requiredDocumentFields.filter((field) => !rowDocs[field]);
+                if (missingDocs.length > 0) {
+                    const labels = missingDocs.map((field) => DOCUMENT_FIELD_CONFIG[field].label).join(', ');
+                    setRowStatus((prev) => ({
+                        ...prev,
+                        [rowKey]: { state: 'skipped', message: `Missing required documents: ${labels}` }
+                    }));
+                    continue;
+                }
+
                 const payload = new FormData();
                 payload.append('full_name', `${getCell(rows[idx], 'full_name')}`.trim());
                 payload.append('phone', `${getCell(rows[idx], 'phone')}`.trim());
@@ -166,7 +171,6 @@ export default function ManualAssessmentDocuments() {
                 const nationalId = `${getCell(rows[idx], 'national_id')}`.trim();
                 if (nationalId) payload.append('national_id', nationalId);
 
-                const rowDocs = documents[rowKey] || {};
                 if (rowDocs.bank_statement) payload.append('bank_statement', rowDocs.bank_statement);
                 if (rowDocs.mobile_money_statement) payload.append('mobile_money_statement', rowDocs.mobile_money_statement);
                 if (rowDocs.payslip) payload.append('payslip', rowDocs.payslip);
@@ -263,6 +267,44 @@ export default function ManualAssessmentDocuments() {
             </header>
 
             <section className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm space-y-3">
+                <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 space-y-3">
+                    <div>
+                        <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">Choose required document package</p>
+                        <p className="mt-1 text-sm text-slate-500">Payslip remains mandatory in every option.</p>
+                    </div>
+                    <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+                        {DOCUMENT_BUNDLE_OPTIONS.map((option) => (
+                            <button
+                                key={option.key}
+                                type="button"
+                                onClick={() => {
+                                    setDocumentBundle(option.key);
+                                    setDocuments((prev) => {
+                                        const allowed = new Set(getRequiredFieldsForBundle(option.key));
+                                        const next: Record<string, RowDocs> = {};
+                                        Object.entries(prev).forEach(([rowKey, rowDocs]) => {
+                                            next[rowKey] = { ...rowDocs };
+                                            (Object.keys(rowDocs) as ManualDocumentField[]).forEach((field) => {
+                                                if (!allowed.has(field)) {
+                                                    next[rowKey][field] = null;
+                                                }
+                                            });
+                                        });
+                                        return next;
+                                    });
+                                }}
+                                className={`rounded-xl border px-4 py-3 text-left transition ${
+                                    documentBundle === option.key
+                                        ? 'border-primary bg-primary/5 text-primary shadow-sm'
+                                        : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+                                }`}
+                            >
+                                <div className="text-sm font-semibold">{option.label}</div>
+                                <div className="mt-1 text-xs leading-5 text-slate-500">{option.description}</div>
+                            </button>
+                        ))}
+                    </div>
+                </div>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <div className="rounded-xl border border-slate-200 bg-slate-50/60 px-4 py-3">
                         <p className="text-[11px] uppercase tracking-wider text-slate-500">Borrowers detected</p>
@@ -295,7 +337,7 @@ export default function ManualAssessmentDocuments() {
                     const status = rowStatus[rowKey];
                     const progress = borrowerProgress[idx];
                     const uploadedCount = progress?.uploadedCount || 0;
-                    const requiredCount = progress?.requiredCount || REQUIRED_DOCUMENT_FIELDS.length;
+                    const requiredCount = progress?.requiredCount || requiredDocumentFields.length;
                     const documentsComplete = progress?.isComplete || false;
 
                     return (
@@ -340,8 +382,9 @@ export default function ManualAssessmentDocuments() {
                                     )}
                                 </div>
 
-                                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                                    {REQUIRED_DOCUMENT_FIELDS.map(({ field, label, accept }) => {
+                                <div className={`grid grid-cols-1 gap-3 ${requiredDocumentFields.length === 3 ? 'md:grid-cols-3' : 'md:grid-cols-2'}`}>
+                                    {requiredDocumentFields.map((field) => {
+                                        const { label, accept } = DOCUMENT_FIELD_CONFIG[field];
                                         const file = rowDocs[field];
 
                                         return (

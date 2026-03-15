@@ -28,13 +28,21 @@ interface PlanConfig {
     features?: string[];
 }
 
-const PLAN_ORDER = ['STARTER', 'STANDARD', 'GROWTH'];
+const PLAN_ORDER = ['STARTER', 'STANDARD', 'GROWTH', 'ENTERPRISE'];
 const PLAN_META: Record<string, { anchorId: string; highlight?: boolean }> = {
     STARTER: { anchorId: 'plan-starter' },
     STANDARD: { anchorId: 'plan-standard', highlight: true },
-    GROWTH: { anchorId: 'plan-growth' }
+    GROWTH: { anchorId: 'plan-growth' },
+    ENTERPRISE: { anchorId: 'plan-enterprise' }
 };
 const PHONE_INPUT_MAX_LENGTH = 16;
+const ENTERPRISE_FEATURES = [
+    'Custom assessment volumes',
+    'Unlimited officer seats',
+    'Dedicated onboarding support',
+    'SLA-backed support',
+    'Custom policy configuration'
+];
 
 const formatPlanPrice = (amount: number | null, currency: string) => {
     if (amount == null) return 'Custom';
@@ -49,6 +57,7 @@ const formatCurrencyAmount = (amount: number | null | undefined, currency = 'ZMW
 };
 
 const formatPlanLimit = (limit: number | null) => (limit == null ? 'Unlimited' : limit.toLocaleString());
+const prettifyFeature = (feature: string) => feature.includes(' ') ? feature : feature.replace(/[_-]+/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
 
 const COLOR_CLASSES: Record<string, { bar: string, icon: string, badge: string }> = {
     slate: {
@@ -156,6 +165,10 @@ export default function UsageBilling() {
     const handlePlanSelect = (plan: string) => {
         setSelectedPlan(plan);
         setShowPaymentModal(true);
+    };
+
+    const handleCustomPlanInquiry = () => {
+        toast.success('Custom pricing is available. Please contact support to activate a tailored plan.');
     };
 
     const handleUpgrade = async (gateway: string) => {
@@ -344,10 +357,14 @@ export default function UsageBilling() {
                     </div>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6" id="plan-selection">
+                <div className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-4" id="plan-selection">
                     {PLAN_ORDER.map((planKey) => {
                         const plan = plans[planKey];
                         if (!plan) return null;
+                        const isCustomPlan = plan.price == null;
+                        const features = isCustomPlan
+                            ? ENTERPRISE_FEATURES
+                            : (plan.features || []).map(prettifyFeature);
 
                         return (
                             <div id={PLAN_META[planKey].anchorId} key={planKey}>
@@ -355,31 +372,19 @@ export default function UsageBilling() {
                                     name={planKey}
                                     price={formatPlanPrice(plan.price, plan.currency)}
                                     limit={formatPlanLimit(plan.monthly_limit)}
-                                    description={plan.description}
-                                    features={plan.features || []}
+                                    description={plan.description || (isCustomPlan ? 'Tailored pricing, negotiated limits, and direct support for larger institutions.' : undefined)}
+                                    features={features}
                                     currentPlan={usage.current_plan}
                                     paymentStatus={usage.payment_status}
-                                    onUpgrade={() => handlePlanSelect(planKey)}
+                                    onUpgrade={() => isCustomPlan ? handleCustomPlanInquiry() : handlePlanSelect(planKey)}
                                     loading={upgrading}
                                     highlight={PLAN_META[planKey].highlight}
+                                    actionLabel={isCustomPlan ? 'Contact Sales' : undefined}
+                                    customNote={isCustomPlan ? 'Tailored pricing' : undefined}
                                 />
                             </div>
                         );
                     })}
-
-                    {usage.current_plan === 'ENTERPRISE' && (
-                        <PlanCard
-                            name="ENTERPRISE"
-                            price="Custom"
-                            limit="Unlimited"
-                            description="Legacy custom plan for institutions on negotiated billing."
-                            features={["Custom limits", "SLA support", "Dedicated account manager"]}
-                            currentPlan={usage.current_plan}
-                            paymentStatus={usage.payment_status}
-                            onUpgrade={() => toast.success("Please contact sales for Enterprise billing support.")}
-                            loading={false}
-                        />
-                    )}
                 </div>
 
                 <div className="mt-6 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
@@ -682,9 +687,10 @@ const GatewayOption = ({ id, name, icon: Icon, description, selected, onSelect }
     );
 };
 
-const PlanCard = ({ name, price, limit, description, features, currentPlan, paymentStatus, onUpgrade, loading, highlight = false }: any) => {
+const PlanCard = ({ name, price, limit, description, features, currentPlan, paymentStatus, onUpgrade, loading, highlight = false, actionLabel, customNote }: any) => {
     const isSelected = currentPlan === name;
     const isPaid = isSelected && paymentStatus === 'PAID';
+    const isCustomPlan = price === 'Custom';
 
     // Logic: Highlight (Blue) only if it's NOT the current plan.
     // Paid Plan (Green) takes precedence.
@@ -716,7 +722,7 @@ const PlanCard = ({ name, price, limit, description, features, currentPlan, paym
                 </div>
             )}
 
-            {isSelected && !isPaid && (
+            {isSelected && !isPaid && !isCustomPlan && (
                 <div className="absolute -top-3 left-1/2 -translate-x-1/2 bg-yellow-600 text-white text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wider flex items-center gap-1">
                     Pending Payment
                 </div>
@@ -726,12 +732,17 @@ const PlanCard = ({ name, price, limit, description, features, currentPlan, paym
                 <h4 className={`text-lg font-semibold ${isPaid ? 'text-green-900' : isSelected ? 'text-yellow-900' : 'text-slate-900'}`}>{name}</h4>
                 <div className="flex items-baseline gap-1 mt-2">
                     <span className="text-3xl font-bold text-slate-900">{price}</span>
-                    {price !== "Custom" && <span className="text-slate-500">/mo</span>}
+                    {!isCustomPlan && <span className="text-slate-500">/mo</span>}
                 </div>
-                {price !== "Custom" && (
+                {!isCustomPlan ? (
                     <div className="mt-2 text-xs leading-5 text-slate-500">
                         <div>Billed monthly</div>
                         <div>Cancel anytime</div>
+                    </div>
+                ) : (
+                    <div className="mt-2 text-xs leading-5 text-slate-500">
+                        <div>{customNote || 'Tailored pricing'}</div>
+                        <div>Contact sales to activate</div>
                     </div>
                 )}
                 <p className="text-sm text-slate-500 mt-1">{limit} assessments/mo</p>
@@ -752,14 +763,14 @@ const PlanCard = ({ name, price, limit, description, features, currentPlan, paym
                 disabled={isPaid || loading}
                 className={`w-full py-2 rounded-lg font-semibold transition-all ${isPaid
                     ? 'bg-green-100 text-green-700 cursor-default border border-green-200'
-                    : isSelected
+                    : isSelected && !isCustomPlan
                         ? 'bg-yellow-600 text-white hover:bg-yellow-700 shadow-sm'
-                        : showHighlight
+                    : showHighlight
                             ? 'bg-primary text-white hover:bg-primary/90 shadow-sm shadow-primary/20'
                             : 'bg-slate-900 text-white hover:bg-slate-800'
                     }`}
             >
-                {isPaid ? 'Current Plan' : isSelected ? 'Complete Payment' : loading ? 'Processing...' : 'Upgrade'}
+                {isPaid ? 'Current Plan' : isCustomPlan ? (actionLabel || 'Contact Sales') : isSelected ? 'Complete Payment' : loading ? 'Processing...' : (actionLabel || 'Upgrade')}
             </button>
         </div>
     );

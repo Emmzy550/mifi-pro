@@ -2,6 +2,7 @@
 import { Link } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import BrandWordmark from '../components/BrandWordmark';
+import { api } from '../context/AuthContext';
 import './LandingPage.css';
 
 type FormState = {
@@ -357,6 +358,7 @@ function CheckIcon() {
 export default function LandingPage() {
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [showSuccess, setShowSuccess] = useState(false);
+    const [isSubmitting, setIsSubmitting] = useState(false);
     const [riskWidth, setRiskWidth] = useState('0%');
     const [formValues, setFormValues] = useState<FormState>(INITIAL_FORM);
     const [animatedStats, setAnimatedStats] = useState<number[]>(() => STATS.map(() => 0));
@@ -492,15 +494,31 @@ export default function LandingPage() {
             setFormValues((current) => ({ ...current, [field]: event.target.value }));
         };
 
-    const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+    const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
         event.preventDefault();
 
-        if (!formValues.name || !formValues.institution || !formValues.phone) {
+        if (!formValues.name.trim() || !formValues.institution.trim() || !formValues.phone.trim()) {
             toast.error('Please fill in your name, institution, and phone number.');
             return;
         }
 
-        setShowSuccess(true);
+        setIsSubmitting(true);
+        try {
+            await api.post('/lead-requests', {
+                intent: leadIntent,
+                name: formValues.name.trim(),
+                institution: formValues.institution.trim(),
+                phone: formValues.phone.trim(),
+                institution_type: formValues.institutionType || undefined,
+                volume: formValues.volume || undefined
+            });
+            setShowSuccess(true);
+        } catch (error: any) {
+            console.error('Failed to submit lead request', error);
+            toast.error(error?.response?.data?.detail || 'We could not send your request right now. Please try again.');
+        } finally {
+            setIsSubmitting(false);
+        }
     };
 
     return (
@@ -854,7 +872,7 @@ export default function LandingPage() {
                             <div className="form-group"><label htmlFor="fphone">WhatsApp / Phone Number</label><input id="fphone" type="tel" placeholder="e.g. 0978 123 456" value={formValues.phone} onChange={handleFieldChange('phone')} /></div>
                             <div className="form-group"><label htmlFor="ftype">Institution Type</label><select id="ftype" value={formValues.institutionType} onChange={handleFieldChange('institutionType')}><option value="">Select type...</option><option value="SACCO">SACCO</option><option value="Microfinance Institution (MFI)">Microfinance Institution (MFI)</option><option value="Salary-Based Lender">Salary-Based Lender</option><option value="Other">Other</option></select></div>
                             <div className="form-group"><label htmlFor="fvolume">Loans processed per month</label><select id="fvolume" value={formValues.volume} onChange={handleFieldChange('volume')}><option value="">Select range...</option><option value="Under 50">Under 50</option><option value="50 – 200">50 – 200</option><option value="200 – 500">200 – 500</option><option value="500+">500+</option></select></div>
-                            <button className="form-submit" type="submit">{activeLeadCopy.submitLabel}</button>
+                            <button className="form-submit" type="submit" disabled={isSubmitting}>{isSubmitting ? 'Sending...' : activeLeadCopy.submitLabel}</button>
                         </form>
                     ) : (
                         <div className="success-msg">

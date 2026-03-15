@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useAuth, api } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
-import { X, Activity, Shield, BarChart3, AlertTriangle, RefreshCw, Trash2, Building2, Search, Plus, ChevronRight, Sparkles, Cpu, Clock3 } from 'lucide-react';
+import { X, Activity, Shield, BarChart3, AlertTriangle, RefreshCw, Trash2, Building2, Search, Plus, ChevronRight, Sparkles, Cpu, Clock3, Inbox } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 type AdminOrg = {
@@ -32,6 +32,19 @@ type OrgDetails = {
     metrics?: { usage_24h?: number; usage_7d?: number; last_assessment_at?: string | null };
 };
 
+type DemoRequestRow = {
+    request_id: string;
+    intent: string;
+    name: string;
+    institution: string;
+    phone: string;
+    institution_type?: string | null;
+    volume?: string | null;
+    status: string;
+    source?: string;
+    created_at: string;
+};
+
 type AdminActionDialog = {
     action: 'toggle-status' | 'rotate-keys' | 'delete-org';
     title: string;
@@ -45,10 +58,25 @@ type AdminActionDialog = {
     exactMatchLabel?: string;
 };
 
+type BillingPlanConfig = {
+    monthly_limit?: number | null;
+    user_limit?: number | null;
+    price?: number | null;
+    currency?: string;
+};
+
 const PLAN_OPTIONS = ['sandbox', 'starter', 'standard', 'growth', 'enterprise'];
+const PLAN_DEFAULT_LIMITS: Record<string, number | null> = {
+    SANDBOX: 10,
+    STARTER: 30,
+    STANDARD: 100,
+    GROWTH: null,
+    ENTERPRISE: null
+};
 const formatZmwAmount = (amount: number) => `K${Number(amount || 0).toLocaleString()}`;
 const formatLimit = (value?: number | null) => (value === null || value === undefined ? 'Plan default' : value.toLocaleString());
 const planLabel = (org: AdminOrg) => `${org.plan_name || org.plan || 'SANDBOX'}`.toUpperCase();
+const titleCase = (value?: string) => `${value || ''}`.replace(/[_-]+/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase()).trim();
 const heroSurfaceStyle = {
     background: 'radial-gradient(circle at top left, rgba(99,102,241,0.18), transparent 42%), linear-gradient(135deg, #0f172a 0%, #1e293b 48%, #334155 100%)'
 };
@@ -65,8 +93,9 @@ const tone = (value?: string) => {
 export default function AdminDashboard() {
     const { user } = useAuth();
     const navigate = useNavigate();
-    const [activeTab, setActiveTab] = useState<'orgs' | 'audit' | 'governance'>('orgs');
+    const [activeTab, setActiveTab] = useState<'orgs' | 'leads' | 'audit' | 'governance'>('orgs');
     const [orgs, setOrgs] = useState<AdminOrg[]>([]);
+    const [leadRequests, setLeadRequests] = useState<DemoRequestRow[]>([]);
     const [logs, setLogs] = useState<AuditLogRecord[]>([]);
     const [loading, setLoading] = useState(false);
     const [showAddOrg, setShowAddOrg] = useState(false);
@@ -81,7 +110,10 @@ export default function AdminDashboard() {
     const [orgDetails, setOrgDetails] = useState<OrgDetails | null>(null);
     const [detailsLoading, setDetailsLoading] = useState(false);
     const [actionLoading, setActionLoading] = useState(false);
-    const [newLimit, setNewLimit] = useState('');
+    const [billingPlans, setBillingPlans] = useState<Record<string, BillingPlanConfig>>({});
+    const [limitMode, setLimitMode] = useState<'increment' | 'absolute'>('increment');
+    const [limitAdjustment, setLimitAdjustment] = useState('');
+    const [limitTotal, setLimitTotal] = useState('');
     const [rotatedKey, setRotatedKey] = useState<string | null>(null);
     const [adminActionDialog, setAdminActionDialog] = useState<AdminActionDialog | null>(null);
     const [adminActionInput, setAdminActionInput] = useState('');
@@ -92,8 +124,10 @@ export default function AdminDashboard() {
             return;
         }
         if (activeTab === 'orgs') void fetchOrgs();
+        if (activeTab === 'leads') void fetchDemoRequests();
         if (activeTab === 'audit') void fetchLogs();
         if (activeTab === 'governance') void fetchPlatformStats();
+        void fetchBillingPlans();
     }, [user, activeTab, navigate]);
 
     useEffect(() => {
@@ -125,6 +159,16 @@ export default function AdminDashboard() {
             pending: orgs.filter((org) => `${org.payment_status || ''}`.toUpperCase() === 'PENDING').length
         }),
         [orgs]
+    );
+
+    const leadStats = useMemo(
+        () => ({
+            total: leadRequests.length,
+            fresh: leadRequests.filter((request) => `${request.status || ''}`.toUpperCase() === 'NEW').length,
+            demos: leadRequests.filter((request) => `${request.intent || ''}`.toLowerCase() === 'demo').length,
+            trials: leadRequests.filter((request) => `${request.intent || ''}`.toLowerCase() === 'trial').length
+        }),
+        [leadRequests]
     );
 
     const fetchPlatformStats = async () => {
@@ -161,6 +205,43 @@ export default function AdminDashboard() {
         } catch (e) {
             console.error(e);
             toast.error('Failed to load audit logs.');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const fetchBillingPlans = async () => {
+        try {
+            const res = await api.get('/billing/plans');
+            setBillingPlans(res.data || {});
+        } catch (e) {
+            console.error('Failed to fetch billing plans', e);
+        }
+    };
+
+    const getPlanDefaultLimit = (org?: AdminOrg | null) => {
+        const planKey = `${org?.plan_name || org?.plan || 'SANDBOX'}`.toUpperCase();
+        const apiValue = billingPlans[planKey]?.monthly_limit;
+        if (apiValue !== undefined) return apiValue ?? null;
+        if (Object.prototype.hasOwnProperty.call(PLAN_DEFAULT_LIMITS, planKey)) {
+            return PLAN_DEFAULT_LIMITS[planKey];
+        }
+        return PLAN_DEFAULT_LIMITS.SANDBOX;
+    };
+
+    const getEffectiveLimit = (org?: AdminOrg | null) => {
+        if (!org) return null;
+        return org.monthly_limit ?? getPlanDefaultLimit(org);
+    };
+
+    const fetchDemoRequests = async () => {
+        setLoading(true);
+        try {
+            const res = await api.get('/admin/demo-requests?limit=100');
+            setLeadRequests(Array.isArray(res.data) ? res.data : []);
+        } catch (e) {
+            console.error(e);
+            toast.error('Failed to load inbound requests.');
         } finally {
             setLoading(false);
         }
@@ -223,8 +304,9 @@ export default function AdminDashboard() {
         try {
             const res = await api.get(`/admin/organizations/${orgId}/details`);
             setOrgDetails(res.data);
-            const limitValue = res.data.organization.monthly_limit;
-            setNewLimit(limitValue === null || limitValue === undefined ? '' : String(limitValue));
+            setLimitMode(getEffectiveLimit(res.data.organization) === null ? 'absolute' : 'increment');
+            setLimitAdjustment('');
+            setLimitTotal('');
         } catch (e: any) {
             console.error(e);
             if (e?.response?.status === 404) {
@@ -300,21 +382,58 @@ export default function AdminDashboard() {
 
     const handleUpdateLimit = async () => {
         if (!orgDetails) return;
-        const trimmed = newLimit.trim();
-        const parsedLimit = trimmed === '' ? null : Number(trimmed);
-        if (parsedLimit !== null && (!Number.isFinite(parsedLimit) || parsedLimit < 0)) {
-            toast.error('Please enter a valid non-negative limit.');
-            return;
+        const currentEffectiveLimit = getEffectiveLimit(orgDetails.organization);
+        let parsedLimit: number | null;
+
+        if (limitMode === 'increment') {
+            if (currentEffectiveLimit === null) {
+                toast.error('This organization is already unlimited. Use “Set exact total” if you want a fixed cap.');
+                return;
+            }
+            const increment = Number(limitAdjustment.trim());
+            if (!Number.isFinite(increment) || increment <= 0) {
+                toast.error('Please enter how many additional assessments to add.');
+                return;
+            }
+            parsedLimit = currentEffectiveLimit + increment;
+        } else {
+            const trimmedTotal = limitTotal.trim();
+            if (trimmedTotal === '') {
+                toast.error('Enter the exact total monthly cap to save.');
+                return;
+            }
+            parsedLimit = Number(trimmedTotal);
+            if (!Number.isFinite(parsedLimit) || parsedLimit < 0) {
+                toast.error('Please enter a valid non-negative total limit.');
+                return;
+            }
         }
+
         setActionLoading(true);
         try {
             await api.patch(`/admin/organizations/${orgDetails.organization.id}`, { monthly_limit: parsedLimit });
             setOrgs((current) => current.map((org) => org.id === orgDetails.organization.id ? { ...org, monthly_limit: parsedLimit } : org));
             await fetchOrgDetails(orgDetails.organization.id);
-            toast.success('Usage limit updated.');
+            toast.success(`Monthly cap updated to ${parsedLimit.toLocaleString()} assessments.`);
         } catch (e) {
             console.error(e);
             toast.error('Failed to update usage limit.');
+        } finally {
+            setActionLoading(false);
+        }
+    };
+
+    const handleResetLimit = async () => {
+        if (!orgDetails) return;
+        setActionLoading(true);
+        try {
+            await api.patch(`/admin/organizations/${orgDetails.organization.id}`, { monthly_limit: null });
+            setOrgs((current) => current.map((org) => org.id === orgDetails.organization.id ? { ...org, monthly_limit: null } : org));
+            await fetchOrgDetails(orgDetails.organization.id);
+            toast.success('Monthly cap reset to the plan default.');
+        } catch (e) {
+            console.error(e);
+            toast.error('Failed to reset usage limit.');
         } finally {
             setActionLoading(false);
         }
@@ -394,7 +513,16 @@ export default function AdminDashboard() {
         }
     };
 
-    if (loading && orgs.length === 0 && logs.length === 0 && activeTab !== 'governance') {
+    const hasCurrentTabData =
+        activeTab === 'orgs'
+            ? orgs.length > 0
+            : activeTab === 'leads'
+                ? leadRequests.length > 0
+                : activeTab === 'audit'
+                    ? logs.length > 0
+                    : true;
+
+    if (loading && !hasCurrentTabData) {
         return <div className="p-8 text-slate-500">Loading super admin workspace...</div>;
     }
 
@@ -425,6 +553,7 @@ export default function AdminDashboard() {
                 <div className="flex flex-wrap gap-2">
                     {[
                         ['orgs', 'Organizations', Building2],
+                        ['leads', 'Inbound Leads', Inbox],
                         ['audit', 'Audit Trail', Clock3],
                         ['governance', 'AI Governance', Cpu]
                     ].map(([key, label, Icon]: any) => (
@@ -440,6 +569,84 @@ export default function AdminDashboard() {
                     ))}
                 </div>
             </div>
+
+            {activeTab === 'leads' && (
+                <div className="space-y-6">
+                    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
+                        <div className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
+                            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                                <div>
+                                    <h2 className="text-xl font-semibold text-slate-900">Inbound landing page requests</h2>
+                                    <p className="mt-1 text-sm text-slate-500">Demo, trial, pilot, and contact requests submitted from the public site.</p>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => void fetchDemoRequests()}
+                                    className="inline-flex items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                                >
+                                    <RefreshCw size={16} />
+                                    Refresh
+                                </button>
+                            </div>
+                        </div>
+                        <div className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
+                            <h3 className="font-semibold text-slate-900">Lead Snapshot</h3>
+                            <div className="mt-4 space-y-3 text-sm">
+                                <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"><span className="text-slate-500">Total requests</span><span className="font-semibold text-slate-900">{leadStats.total}</span></div>
+                                <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"><span className="text-slate-500">New</span><span className="font-semibold text-slate-900">{leadStats.fresh}</span></div>
+                                <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"><span className="text-slate-500">Demo / Trial</span><span className="font-semibold text-slate-900">{leadStats.demos + leadStats.trials}</span></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="grid gap-4 xl:grid-cols-2">
+                        {leadRequests.map((request) => (
+                            <div key={request.request_id} className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
+                                <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                                    <div>
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            <span className="inline-flex rounded-full bg-slate-900 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-white">
+                                                {titleCase(request.intent)}
+                                            </span>
+                                            <span className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-emerald-700">
+                                                {titleCase(request.status)}
+                                            </span>
+                                        </div>
+                                        <h3 className="mt-4 text-lg font-semibold text-slate-900">{request.name}</h3>
+                                        <p className="mt-1 text-sm text-slate-600">{request.institution}</p>
+                                        <p className="mt-2 font-mono text-xs text-slate-500">{request.request_id}</p>
+                                    </div>
+                                    <div className="text-sm text-slate-500">
+                                        {new Date(request.created_at).toLocaleString()}
+                                    </div>
+                                </div>
+                                <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Phone</div>
+                                        <a href={`tel:${request.phone}`} className="mt-2 block text-sm font-semibold text-slate-900 hover:text-indigo-700">
+                                            {request.phone}
+                                        </a>
+                                    </div>
+                                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Institution type</div>
+                                        <div className="mt-2 text-sm font-semibold text-slate-900">{request.institution_type || 'Not provided'}</div>
+                                    </div>
+                                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Monthly volume</div>
+                                        <div className="mt-2 text-sm font-semibold text-slate-900">{request.volume || 'Not provided'}</div>
+                                    </div>
+                                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Source</div>
+                                        <div className="mt-2 text-sm font-semibold text-slate-900">{titleCase(request.source || 'landing_page')}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+
+                    {leadRequests.length === 0 && !loading && <div className="rounded-[28px] border border-dashed border-slate-300 bg-white px-6 py-12 text-center text-slate-500">No inbound requests yet.</div>}
+                </div>
+            )}
 
             {activeTab === 'orgs' && (
                 <div className="space-y-6">
@@ -654,12 +861,94 @@ export default function AdminDashboard() {
                                             </div>
 
                                             <div className="rounded-3xl border border-slate-200 bg-white p-4">
-                                                <p className="text-sm font-semibold text-slate-900">Monthly limit override</p>
-                                                <p className="mt-1 text-xs text-slate-500">Leave empty to fall back to the organization plan default.</p>
-                                                <div className="mt-4 flex gap-2">
-                                                    <input type="number" value={newLimit} onChange={(e) => setNewLimit(e.target.value)} className="flex-1 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-slate-300 focus:bg-white focus:ring-4 focus:ring-slate-100" placeholder="Leave empty for plan default" />
+                                                <p className="text-sm font-semibold text-slate-900">Assessment limit</p>
+                                                <p className="mt-1 text-xs text-slate-500">Add extra assessments on top of the current allowance, or set an exact monthly cap directly.</p>
+                                                <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                                                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                                                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Plan default</div>
+                                                        <div className="mt-2 text-lg font-semibold text-slate-900">{getPlanDefaultLimit(orgDetails.organization) === null ? 'Unlimited' : `${getPlanDefaultLimit(orgDetails.organization)?.toLocaleString()} /mo`}</div>
+                                                    </div>
+                                                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                                                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Current cap</div>
+                                                        <div className="mt-2 text-lg font-semibold text-slate-900">{getEffectiveLimit(orgDetails.organization) === null ? 'Unlimited' : `${getEffectiveLimit(orgDetails.organization)?.toLocaleString()} /mo`}</div>
+                                                    </div>
+                                                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                                                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Custom override</div>
+                                                        <div className="mt-2 text-lg font-semibold text-slate-900">{orgDetails.organization.monthly_limit === null || orgDetails.organization.monthly_limit === undefined ? 'None' : `${orgDetails.organization.monthly_limit.toLocaleString()} /mo`}</div>
+                                                    </div>
+                                                </div>
+                                                <div className="mt-4 inline-flex rounded-2xl bg-slate-100 p-1">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setLimitMode('increment')}
+                                                        className={`rounded-2xl px-4 py-2 text-sm font-semibold transition ${limitMode === 'increment' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                                                    >
+                                                        Add assessments
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setLimitMode('absolute')}
+                                                        className={`rounded-2xl px-4 py-2 text-sm font-semibold transition ${limitMode === 'absolute' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                                                    >
+                                                        Set exact total
+                                                    </button>
+                                                </div>
+                                                {limitMode === 'increment' ? (
+                                                    <div className="mt-4 space-y-3">
+                                                        <div>
+                                                            <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Additional assessments</label>
+                                                            <input
+                                                                type="number"
+                                                                min="1"
+                                                                value={limitAdjustment}
+                                                                onChange={(e) => setLimitAdjustment(e.target.value)}
+                                                                className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-slate-300 focus:bg-white focus:ring-4 focus:ring-slate-100"
+                                                                placeholder={getEffectiveLimit(orgDetails.organization) === null ? 'Use “Set exact total” for unlimited plans' : 'e.g. 20'}
+                                                                disabled={getEffectiveLimit(orgDetails.organization) === null}
+                                                            />
+                                                        </div>
+                                                        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+                                                            {getEffectiveLimit(orgDetails.organization) === null
+                                                                ? 'This organization already has an unlimited cap.'
+                                                                : `New monthly cap after this change: ${((getEffectiveLimit(orgDetails.organization) || 0) + (Number(limitAdjustment || 0) || 0)).toLocaleString()} assessments/month.`}
+                                                        </div>
+                                                        <div className="flex flex-wrap gap-2">
+                                                            {[10, 20, 50].map((amount) => (
+                                                                <button
+                                                                    key={amount}
+                                                                    type="button"
+                                                                    onClick={() => setLimitAdjustment(String(amount))}
+                                                                    className="rounded-full border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-slate-300 hover:bg-slate-50"
+                                                                >
+                                                                    +{amount}
+                                                                </button>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                ) : (
+                                                    <div className="mt-4 space-y-3">
+                                                        <div>
+                                                            <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Exact monthly cap</label>
+                                                            <input
+                                                                type="number"
+                                                                min="0"
+                                                                value={limitTotal}
+                                                                onChange={(e) => setLimitTotal(e.target.value)}
+                                                                className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-slate-300 focus:bg-white focus:ring-4 focus:ring-slate-100"
+                                                                placeholder={getEffectiveLimit(orgDetails.organization) === null ? 'e.g. 500' : `Current: ${getEffectiveLimit(orgDetails.organization)?.toLocaleString()}`}
+                                                            />
+                                                        </div>
+                                                        <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                                                            Set the exact total number of assessments this organization can use each month.
+                                                        </div>
+                                                    </div>
+                                                )}
+                                                <div className="mt-4 flex flex-wrap gap-2">
                                                     <button onClick={handleUpdateLimit} disabled={actionLoading} className="rounded-2xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-60">
-                                                        Update
+                                                        {limitMode === 'increment' ? 'Add assessments' : 'Save total'}
+                                                    </button>
+                                                    <button onClick={handleResetLimit} disabled={actionLoading} className="rounded-2xl border border-slate-200 px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-60">
+                                                        Reset to plan default
                                                     </button>
                                                 </div>
                                             </div>

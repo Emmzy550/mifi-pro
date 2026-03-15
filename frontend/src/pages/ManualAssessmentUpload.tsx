@@ -121,7 +121,7 @@ export default function ManualAssessmentUpload() {
                 <div>
                     <h1 className="text-2xl font-bold text-slate-900">Upload Excel for Assesments</h1>
                     <p className="text-slate-500">
-                        Upload a spreadsheet, review the parsed borrowers, and then attach payslips or bank statements.
+                        Upload a spreadsheet, review the parsed borrowers, and then attach payslips with bank statements, mobile money statements, or both.
                     </p>
                 </div>
                 <button

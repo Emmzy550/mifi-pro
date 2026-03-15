@@ -14,12 +14,23 @@ class DocumentClassifier:
 
         if any(x in text_upper for x in ["NATIONAL REGISTRATION", "NRC", "REPUBLIC OF ZAMBIA", "ID NUMBER"]):
             return DocumentType.NRC_ID, 0.8
+
+        mobile_money_markers = [
+            "MOBILE MONEY",
+            "M-PESA",
+            "AIRTEL MONEY",
+            "BALANCE STATEMENT FOR THE PERIOD",
+            "TOTAL MONEY DEBITED",
+            "TOTAL MONEY CREDITED",
+            "MONEY SENT TO",
+            "MONEY DEPOSIT TO",
+            "LOAN REPAYMENT TO",
+        ]
+        mobile_hits = sum(1 for marker in mobile_money_markers if marker in text_upper)
+        if mobile_hits >= 2:
+            return DocumentType.MOBILE_MONEY, 0.82
             
         if any(x in text_upper for x in ["BANK STATEMENT", "ACCOUNT STATEMENT", "ZANACO", "_BALANCE AT_", "BALANCE BROUGHT FORWARD"]):
             return DocumentType.BANK_STATEMENT, 0.85
-            
-        if any(x in text_upper for x in ["MOBILE MONEY", "M-PESA", "AIRTEL MONEY"]):
-            # For now, treat Mobile Money as Bank Statement (transaction list)
-            return DocumentType.BANK_STATEMENT, 0.6
             
         return DocumentType.UNKNOWN, 0.0

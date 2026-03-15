@@ -19,6 +19,13 @@ import {
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { resolveColumnIndex } from '../utils/borrowerUpload';
+import {
+  DOCUMENT_BUNDLE_OPTIONS,
+  DOCUMENT_FIELD_CONFIG,
+  getRequiredFieldsForBundle,
+  ManualDocumentBundle,
+  ManualDocumentField
+} from '../utils/manualDocumentBundles';
 
 type ParsedExcelUpload = {
   fileName?: string;
@@ -80,6 +87,7 @@ export default function ManualAssessments() {
   const [uploadedFileName, setUploadedFileName] = useState('');
   const [uploadSummary, setUploadSummary] = useState<UploadSummary | null>(null);
   const [singleSummary, setSingleSummary] = useState<SingleAssessmentSummary | null>(null);
+  const [documentBundle, setDocumentBundle] = useState<ManualDocumentBundle>('payslip_bank');
 
   const [formData, setFormData] = useState({
     full_name: '',
@@ -102,6 +110,8 @@ export default function ManualAssessments() {
     mobile_money_statement: null,
     payslip: null
   });
+  const requiredDocumentFields = getRequiredFieldsForBundle(documentBundle);
+  const requiredDocumentsComplete = requiredDocumentFields.every((field) => Boolean(files[field]));
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
     const { name, value } = e.target;
@@ -274,12 +284,31 @@ export default function ManualAssessments() {
     const required = new Set(pendingDocs.map((d) => d.toUpperCase()));
     const hasPayslip = required.has('PAYSLIP') ? !!files.payslip : true;
     const hasBank = required.has('BANK_STATEMENT') ? !!files.bank_statement : true;
+    const hasMobileMoney =
+      required.has('MOBILE_MONEY') || required.has('MOBILE_MONEY_STATEMENT')
+        ? !!files.mobile_money_statement
+        : true;
 
-    if (hasPayslip && hasBank) {
+    if (hasPayslip && hasBank && hasMobileMoney) {
       console.log('Auto-submitting missing documents...');
       void handleSubmit();
     }
-  }, [intakeMethod, borrowerId, pendingDocs, files.payslip, files.bank_statement, submitting, singleSummary]);
+  }, [intakeMethod, borrowerId, pendingDocs, files.payslip, files.bank_statement, files.mobile_money_statement, submitting, singleSummary]);
+
+  useEffect(() => {
+    setFiles((prev) => {
+      const allowed = new Set(requiredDocumentFields);
+      let changed = false;
+      const next = { ...prev };
+      (Object.keys(prev) as ManualDocumentField[]).forEach((field) => {
+        if (!allowed.has(field) && prev[field]) {
+          next[field] = null;
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [documentBundle]);
 
   useEffect(() => {
     const raw = sessionStorage.getItem('manual_assessment_upload');
@@ -330,7 +359,7 @@ export default function ManualAssessments() {
     helper,
     accept
   }: {
-    keyName: 'bank_statement' | 'mobile_money_statement' | 'payslip';
+    keyName: ManualDocumentField;
     label: string;
     helper: string;
     accept: string;
@@ -453,6 +482,13 @@ export default function ManualAssessments() {
         }
 
         navigate(`/decisions?batch_ids=${encodeURIComponent(successIds.join(','))}`);
+        return;
+      }
+
+      const missingRequiredUploads = requiredDocumentFields.filter((field) => !files[field]);
+      if (missingRequiredUploads.length > 0) {
+        const labels = missingRequiredUploads.map((field) => DOCUMENT_FIELD_CONFIG[field].label).join(', ');
+        toast.error(`Upload the selected required documents first: ${labels}.`);
         return;
       }
 
@@ -672,15 +708,46 @@ export default function ManualAssessments() {
 
           <section className="rounded-xl border border-slate-200 p-6 space-y-4">
             <h3 className="text-base font-semibold text-slate-900">Financial Evidence</h3>
-            <div className="space-y-3">
-              {renderEvidenceRow({ keyName: 'bank_statement', label: 'Bank Statement', helper: 'Upload PDF statement for salaried borrowers or larger facilities.', accept: '.pdf' })}
-              {renderEvidenceRow({ keyName: 'payslip', label: 'Pay Slip', helper: 'Upload latest pay slip (PDF/JPG/PNG).', accept: '.pdf,.jpg,.jpeg,.png' })}
-              {renderEvidenceRow({ keyName: 'mobile_money_statement', label: 'Additional Documents', helper: 'Upload mobile money statement or any supporting document (PDF/CSV).', accept: '.pdf,.csv,.jpg,.jpeg,.png' })}
+            <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 space-y-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">Choose required document package</p>
+                <p className="mt-1 text-sm text-slate-500">Payslip remains mandatory in every option.</p>
+              </div>
+              <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+                {DOCUMENT_BUNDLE_OPTIONS.map((option) => (
+                  <button
+                    key={option.key}
+                    type="button"
+                    onClick={() => setDocumentBundle(option.key)}
+                    className={`rounded-xl border px-4 py-3 text-left transition ${
+                      documentBundle === option.key
+                        ? 'border-primary bg-primary/5 text-primary shadow-sm'
+                        : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+                    }`}
+                  >
+                    <div className="text-sm font-semibold">{option.label}</div>
+                    <div className="mt-1 text-xs leading-5 text-slate-500">{option.description}</div>
+                  </button>
+                ))}
+              </div>
             </div>
+            <div className="space-y-3">
+              {requiredDocumentFields.map((field) => renderEvidenceRow({
+                keyName: field,
+                label: DOCUMENT_FIELD_CONFIG[field].label,
+                helper: DOCUMENT_FIELD_CONFIG[field].helper,
+                accept: DOCUMENT_FIELD_CONFIG[field].accept
+              }))}
+            </div>
+            <p className="text-xs text-slate-500">
+              {requiredDocumentsComplete
+                ? 'All selected documents are attached.'
+                : `${requiredDocumentFields.filter((field) => !files[field]).length} selected document${requiredDocumentFields.filter((field) => !files[field]).length === 1 ? '' : 's'} still missing.`}
+            </p>
           </section>
 
           <div className="pt-1">
-            <button type="submit" disabled={submitting || !canRunAssessment} className={`w-full sm:w-auto min-h-[46px] inline-flex items-center justify-center gap-2 rounded-xl bg-primary px-6 py-3 text-sm font-semibold text-white hover:brightness-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35 focus-visible:ring-offset-2 disabled:opacity-60 disabled:cursor-not-allowed ${INTERACTIVE_TRANSITION}`}>
+            <button type="submit" disabled={submitting || !canRunAssessment || !requiredDocumentsComplete} className={`w-full sm:w-auto min-h-[46px] inline-flex items-center justify-center gap-2 rounded-xl bg-primary px-6 py-3 text-sm font-semibold text-white hover:brightness-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35 focus-visible:ring-offset-2 disabled:opacity-60 disabled:cursor-not-allowed ${INTERACTIVE_TRANSITION}`}>
               {submitting ? <><Loader2 size={16} className="animate-spin" /> Running...</> : <><CheckCircle size={16} /> Run Credit Assessment</>}
             </button>
           </div>

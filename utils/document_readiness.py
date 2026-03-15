@@ -25,7 +25,7 @@ class DocumentReadinessEvaluator:
             if result.document_type == DocumentType.PAYSLIP and result.payslip_summary:
                 present.add(DocumentType.PAYSLIP)
                 payslip_complete = bool(result.payslip_summary.net_pay or result.payslip_summary.gross_pay)
-            if result.document_type == DocumentType.BANK_STATEMENT and result.bank_statement_summary:
+            if result.document_type in {DocumentType.BANK_STATEMENT, DocumentType.MOBILE_MONEY} and result.bank_statement_summary:
                 present.add(DocumentType.BANK_STATEMENT)
                 bank_complete = True
 
@@ -45,7 +45,7 @@ class DocumentReadinessEvaluator:
             reason = "All required documents provided."
         else:
             if DocumentType.BANK_STATEMENT.value.lower() in missing and DocumentType.BANK_STATEMENT in present:
-                reason = "Bank statement uploaded but transaction history could not be verified. Please upload a clearer statement."
+                reason = "Statement uploaded but transaction history could not be verified. Please upload a clearer bank or mobile money statement."
             elif DocumentType.PAYSLIP.value.lower() in missing and DocumentType.PAYSLIP in present:
                 reason = "Payslip uploaded but income details could not be verified. Please upload a clearer payslip."
             else:

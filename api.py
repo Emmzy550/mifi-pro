@@ -53,6 +53,7 @@ from models.unified_profile import UnifiedFinancialProfile, AssessmentReadiness
 from models.sms_log import SMSLog
 from models.follow_up_task import FollowUpTask, FollowUpStatus, FollowUpType, FollowUpPriority
 from models.notification import Notification
+from models.demo_request import DemoRequest, DemoRequestCreate
 from services.sms_service import SMSService
 from services.email_service import EmailService
 from services.webhook_service import WebhookService
@@ -316,6 +317,126 @@ async def update_platform_settings(
     
     AuditAgent.log_event("PLATFORM_SETTINGS_UPDATED", current_user.email, {"updates": global_updates})
     return {"status": "success", "updates": global_updates}
+
+
+def _normalize_public_text(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = re.sub(r"\s+", " ", str(value)).strip()
+    return normalized or None
+
+
+def _list_super_admin_users() -> List[User]:
+    super_admins = []
+    for candidate in Database.list_all_users():
+        role_value = getattr(candidate.role, "value", candidate.role)
+        if str(role_value).upper() == "SUPER_ADMIN":
+            super_admins.append(candidate)
+    return super_admins
+
+
+def _notify_super_admins_of_demo_request(demo_request: DemoRequest) -> int:
+    dashboard_url = os.getenv("DASHBOARD_PUBLIC_URL", "http://localhost:5173").rstrip("/")
+    if dashboard_url.endswith("/login"):
+        dashboard_url = dashboard_url[:-len("/login")]
+    admin_url = dashboard_url + "/admin"
+    notified_count = 0
+
+    for super_admin in _list_super_admin_users():
+        notification = Notification(
+            notification_id=f"NTF-{uuid.uuid4().hex[:12].upper()}",
+            organization_id=super_admin.organization_id or "PLATFORM_OWNER",
+            recipient_user_id=super_admin.id,
+            recipient_email=super_admin.email,
+            created_by_user_id="PUBLIC_LEAD_FORM",
+            type="DEMO_REQUEST_SUBMITTED",
+            title="New landing page request",
+            message=(
+                f"{demo_request.name} from {demo_request.institution} requested a "
+                f"{demo_request.intent.value}."
+            ),
+            metadata={
+                "request_id": demo_request.request_id,
+                "intent": demo_request.intent.value,
+                "name": demo_request.name,
+                "institution": demo_request.institution,
+                "phone": demo_request.phone,
+                "institution_type": demo_request.institution_type,
+                "volume": demo_request.volume,
+                "admin_url": admin_url
+            }
+        )
+        Database.save_notification(notification)
+
+        if super_admin.email:
+            EmailService.send_email(
+                to_email=super_admin.email,
+                subject=f"New {demo_request.intent.value} request from {demo_request.institution}",
+                body_text=(
+                    f"A new landing page request was submitted.\n\n"
+                    f"Request ID: {demo_request.request_id}\n"
+                    f"Intent: {demo_request.intent.value}\n"
+                    f"Name: {demo_request.name}\n"
+                    f"Institution: {demo_request.institution}\n"
+                    f"Phone: {demo_request.phone}\n"
+                    f"Institution type: {demo_request.institution_type or 'Not provided'}\n"
+                    f"Monthly volume: {demo_request.volume or 'Not provided'}\n\n"
+                    f"Open the Super Admin dashboard to review: {admin_url}"
+                )
+            )
+
+        notified_count += 1
+
+    return notified_count
+
+
+@app.post("/lead-requests", response_model=Dict[str, Any], tags=["System"])
+async def submit_demo_request(payload: DemoRequestCreate):
+    """
+    Public landing page endpoint for demo, trial, pilot, and contact requests.
+    """
+    normalized_name = clean_name(payload.name)
+    normalized_institution = _normalize_public_text(payload.institution)
+    normalized_phone = normalize_phone(payload.phone)
+    normalized_institution_type = _normalize_public_text(payload.institution_type)
+    normalized_volume = _normalize_public_text(payload.volume)
+
+    if not normalized_name or not normalized_institution or not normalized_phone:
+        raise HTTPException(status_code=400, detail="Name, institution, and phone are required.")
+
+    if len(normalized_phone) < 7:
+        raise HTTPException(status_code=400, detail="Please enter a valid phone number.")
+
+    demo_request = DemoRequest(
+        request_id=f"DRQ-{uuid.uuid4().hex[:10].upper()}",
+        intent=payload.intent,
+        name=normalized_name,
+        institution=normalized_institution,
+        phone=normalized_phone,
+        institution_type=normalized_institution_type,
+        volume=normalized_volume
+    )
+    Database.save_demo_request(demo_request)
+
+    notified_count = _notify_super_admins_of_demo_request(demo_request)
+    AuditAgent.log_event(
+        "DEMO_REQUEST_RECEIVED",
+        "PUBLIC_LEAD",
+        {
+            "request_id": demo_request.request_id,
+            "intent": demo_request.intent.value,
+            "institution": demo_request.institution,
+            "notification_count": notified_count,
+            "source": demo_request.source,
+            "org": "PLATFORM_OWNER"
+        }
+    )
+
+    return {
+        "status": "received",
+        "request_id": demo_request.request_id,
+        "notified_super_admins": notified_count
+    }
 
 # ============================================================================
 # AUDIT GUARD: RESPONSE INTEGRITY GATE (NO MERCY)
@@ -613,14 +734,21 @@ def build_document_summaries(extraction_results: List[Any]) -> List[Dict[str, An
     summaries = []
     for result in extraction_results:
         if result.bank_statement_summary:
+            is_mobile_money = str(getattr(result, "document_type", "")).upper().endswith("MOBILE_MONEY")
             summaries.append({
-                "document_type": "bank_statement",
+                "document_type": "mobile_money" if is_mobile_money else "bank_statement",
                 "summary_profile": result.bank_statement_summary.summary_profile,
+                "opening_balance": result.bank_statement_summary.opening_balance,
                 "closing_balance": result.bank_statement_summary.closing_balance,
+                "total_money_in": result.bank_statement_summary.total_money_in,
+                "total_money_out": result.bank_statement_summary.total_money_out,
+                "deposit_count": result.bank_statement_summary.deposit_count,
+                "transaction_count": len(getattr(result, "transactions", []) or []),
                 "statement_period": result.bank_statement_summary.statement_period.model_dump()
                 if result.bank_statement_summary.statement_period else None,
                 "bank_name": result.bank_statement_summary.bank_name,
                 "account_holder_name": result.bank_statement_summary.account_holder_name,
+                "provider": result.bank_statement_summary.bank_name if is_mobile_money else None,
                 "currency": result.bank_statement_summary.currency,
                 "risk_flags": result.bank_statement_summary.risk_flags,
                 "confidence": result.confidence,
@@ -753,6 +881,8 @@ def _doc_period(summary: Dict[str, Any]) -> Optional[Any]:
 def _doc_provider(summary: Dict[str, Any], doc_type: str) -> Optional[str]:
     if doc_type == "bank_statement":
         return summary.get("bank_name") or summary.get("account_holder_name")
+    if doc_type == "mobile_money":
+        return summary.get("provider") or summary.get("bank_name") or summary.get("account_holder_name")
     if doc_type == "payslip":
         return summary.get("employer_name") or summary.get("employee_name")
     if doc_type == "nrc_id":
@@ -802,6 +932,13 @@ def _doc_one_liner(summary: Dict[str, Any], doc_type: str, status: DocumentStatu
         if net_pay is not None:
             return f"Net pay extracted at {currency} {net_pay}."
         return "Payslip parsed with partial income extraction."
+    if doc_type == "mobile_money":
+        total_out = summary.get("total_money_out")
+        tx_count = summary.get("transaction_count")
+        currency = summary.get("currency") or ""
+        if total_out is not None and tx_count:
+            return f"{tx_count} mobile money transactions parsed with total outflows of {currency} {total_out}."
+        return "Mobile money statement parsed with partial transaction coverage."
     if doc_type == "nrc_id":
         if summary.get("full_name") or summary.get("id_number"):
             return "Identity attributes extracted for verification."
@@ -899,6 +1036,15 @@ def _build_extracted_metrics(summary: Dict[str, Any], doc_type: str) -> Dict[str
         _put("Total Money In", summary.get("total_money_in"))
         _put("Total Money Out", summary.get("total_money_out"))
         _put("Deposit Count", summary.get("deposit_count"))
+    elif doc_type == "mobile_money":
+        _put("Provider", summary.get("provider") or summary.get("bank_name"))
+        _put("Account Holder", summary.get("account_holder_name"))
+        _put("Currency", summary.get("currency"))
+        _put("Closing Balance", summary.get("closing_balance"))
+        _put("Opening Balance", summary.get("opening_balance"))
+        _put("Total Money In", summary.get("total_money_in"))
+        _put("Total Money Out", summary.get("total_money_out"))
+        _put("Transaction Count", summary.get("transaction_count"))
     elif doc_type == "payslip":
         _put("Employer", summary.get("employer_name"))
         _put("Employee", summary.get("employee_name"))
@@ -3474,11 +3620,11 @@ async def assessment_manual(
     )
     
     # Helper to parse upload files
-    async def parse_upload(file_obj: UploadFile):
+    async def parse_upload(file_obj: UploadFile, document_hint: Optional[str] = None):
         if not file_obj: return []
         content = await file_obj.read()
         try:
-            result = tx_parser.parse(content, file_obj.filename)
+            result = tx_parser.parse(content, file_obj.filename, document_hint=document_hint)
             result.source_filename = file_obj.filename
             result.source_mime_type = file_obj.content_type
             summary_profile = None
@@ -3530,16 +3676,16 @@ async def assessment_manual(
     # Parse primary statements
     extraction_results = []
     
-    res_bank = await parse_upload(bank_statement)
+    res_bank = await parse_upload(bank_statement, document_hint="bank_statement")
     if res_bank: extraction_results.append(res_bank)
     
-    res_momo = await parse_upload(mobile_money_statement)
+    res_momo = await parse_upload(mobile_money_statement, document_hint="mobile_money")
     if res_momo: extraction_results.append(res_momo)
 
-    res_nrc = await parse_upload(nrc_id)
+    res_nrc = await parse_upload(nrc_id, document_hint="nrc_id")
     if res_nrc: extraction_results.append(res_nrc)
 
-    res_payslip = await parse_upload(payslip)
+    res_payslip = await parse_upload(payslip, document_hint="payslip")
     if res_payslip: extraction_results.append(res_payslip)
     
     all_parsed_transactions = []
@@ -3588,6 +3734,8 @@ async def assessment_manual(
         doc_only_keywords = [
             "Payslip",
             "Bank statement",
+            "mobile money",
+            "statement",
             "Account holder",
             "income",
             "transactions",
@@ -3616,7 +3764,7 @@ async def assessment_manual(
                     "missing_documents": unified_profile.document_coverage.missing_required_documents,
                     "incomplete_documents": unified_profile.document_coverage.incomplete_documents,
                     "borrower_id": borrower_id,
-                    "suggestion": "Upload a payslip and bank statement, or correct missing data before retrying."
+                    "suggestion": "Upload a payslip and a bank or mobile money statement, or correct missing data before retrying."
                 }
             )
     
