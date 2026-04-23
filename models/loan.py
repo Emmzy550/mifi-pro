@@ -1,7 +1,9 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import List, Optional
 from enum import Enum
 from datetime import datetime
+
+from models.loan_tracking import LoanCollectionEvent, LoanInstallment, LoanTrackingProfile
 
 class LoanStatus(str, Enum):
     PENDING_DISBURSEMENT = "PENDING_DISBURSEMENT"
@@ -17,6 +19,7 @@ class Loan(BaseModel):
     organization_id: str = Field("DEFAULT_ORG", description="MFI Organization ID")
     amount: float = Field(..., description="Disbursed amount")
     interest_rate: float = Field(..., description="Annual interest rate applied")
+    currency: str = Field("ZMW", description="Local currency for the loan")
     status: LoanStatus = Field(LoanStatus.PENDING_DISBURSEMENT, description="Current status of the loan")
     disbursed_at: Optional[datetime] = None
     closed_at: Optional[datetime] = None
@@ -25,4 +28,20 @@ class Loan(BaseModel):
     disbursement_method: Optional[str] = Field(None, description="e.g., BANK_TRANSFER, CASH, MOBILE_MONEY")
     disbursement_reference: Optional[str] = Field(None, description="Transaction ID or receipt number")
     disbursed_by: Optional[str] = Field(None, description="Email or ID of the officer who confirmed disbursement")
+
+    # Tracking Layer
+    term_days: Optional[int] = Field(None, description="Approved tenor in days")
+    tracking_profile: Optional[LoanTrackingProfile] = Field(
+        None,
+        description="Collection playbook and cash-flow-aware tracking configuration"
+    )
+    repayment_schedule: List[LoanInstallment] = Field(
+        default_factory=list,
+        description="Generated installment schedule with collection progress"
+    )
+    collection_history: List[LoanCollectionEvent] = Field(
+        default_factory=list,
+        description="Ledger of repayment and recovery interactions"
+    )
+    tracking_last_updated_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=datetime.now)

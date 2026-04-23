@@ -19,6 +19,7 @@ import {
     Bell,
     Moon,
     Sun,
+    Waypoints,
     type LucideIcon
 } from 'lucide-react';
 import { api, useAuth } from '../context/AuthContext';
@@ -56,6 +57,8 @@ const NAV_SECTIONS: NavSection[] = [
         items: [
             { label: 'Overview', href: '/dashboard', icon: LayoutDashboard },
             { label: 'Manual Assessments', href: '/manual-assessments', icon: ClipboardList },
+            { label: 'Loan Tracker', href: '/loan-tracker', icon: Waypoints },
+            { label: 'Borrowers', href: '/borrowers', icon: Users },
             { label: 'Decisions', href: '/decisions', icon: FileText },
             { label: 'Notifications', href: '/notifications', icon: Bell }
         ]
@@ -184,7 +187,11 @@ export default function Layout() {
     const [unreadNotificationCount, setUnreadNotificationCount] = useState(0);
 
     const role = (user?.role || '').toUpperCase();
-    const isWideContentRoute = location.pathname === '/admin' || location.pathname.startsWith('/admin/');
+    const isWideContentRoute =
+        location.pathname === '/admin' ||
+        location.pathname.startsWith('/admin/') ||
+        location.pathname === '/borrowers' ||
+        location.pathname.startsWith('/borrowers/');
     const visibleSections = useMemo(
         () =>
             NAV_SECTIONS.filter((section) =>

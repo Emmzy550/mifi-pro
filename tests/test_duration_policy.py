@@ -118,6 +118,48 @@ def test_assessment_model_validation():
             policy_version="v1.5.0"
         )
 
+
+def test_affordability_cap_uses_requested_duration():
+    borrower = Borrower(
+        id="BOR-AFFORD",
+        organization_id="ORG-TEST",
+        name="Budget Borrower",
+        phone="+260000000000",
+        employment_type="salaried",
+        monthly_income=6100.0,
+        monthly_expenses=0.0,
+        existing_debt=0.0,
+        loan_amount_requested=5000.0,
+        loan_purpose="Emergency",
+    )
+    risk_data = {
+        "risk_level": "LOW",
+        "flags": ["WARNING: AFFORDABILITY_CAP_REQUIRED"],
+        "risk_score": 0.2,
+        "metrics": {
+            "affordable_amount": 1830.0,
+            "affordability_ratio": 0.8197,
+            "affordability_cap_required": True,
+            "affordability_term_months": 1.0,
+        },
+        "capacity_validation": {
+            "capacity_based_max": 7000.0,
+            "starter_loan_applied": False,
+            "observed_deposit_volume": 7000.0,
+            "audit_trail": {},
+        },
+    }
+
+    result = DecisionAgent.recommend(risk_data, borrower, 30)
+
+    assert result["decision"] == Decision.APPROVE
+    assert result["recommended_amount"] == 1830.0
+    assert result["decision_metadata"]["policy_cap_reason"] == "AFFORDABILITY_CAP_30_DAYS"
+    assert any(
+        adjustment["type"] == "AFFORDABILITY_CAP"
+        for adjustment in result["decision_metadata"]["adjustments_applied"]
+    )
+
     # 3. Invalid Reject (With Duration)
     with pytest.raises(ValueError, match="REJECT must have recommended_duration_days = None"):
         Assessment(

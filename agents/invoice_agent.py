@@ -131,9 +131,13 @@ class InvoiceAgent:
         content.append(HRFlowable(width="100%", thickness=1.5, color=accent_color, spaceAfter=20))
         
         # 2. Invoice Meta Details (ID, Date, Due, Status)
-        status_color = colors.green if payment.status == PaymentStatus.PAID else colors.orange
-        due_label = "Paid Date" if payment.status == PaymentStatus.PAID else "Due Date"
-        due_value = issue_date.strftime("%b %d, %Y") if payment.status == PaymentStatus.PAID else due_date.strftime("%b %d, %Y")
+        status_color = colors.green if payment.status == PaymentStatus.SUCCESS else colors.orange
+        if payment.status == PaymentStatus.CANCELLED:
+            status_color = colors.grey
+        elif payment.status == PaymentStatus.FAILED:
+            status_color = colors.red
+        due_label = "Paid Date" if payment.status == PaymentStatus.SUCCESS else "Due Date"
+        due_value = issue_date.strftime("%b %d, %Y") if payment.status == PaymentStatus.SUCCESS else due_date.strftime("%b %d, %Y")
         meta_data = [
             [Paragraph("Invoice Number", label_style), Paragraph("Issue Date", label_style), Paragraph(due_label, label_style), Paragraph("Payment Status", label_style)],
             [
@@ -223,7 +227,7 @@ class InvoiceAgent:
         content.append(Spacer(1, 40))
         
         # 6. Payment Instructions / Receipt
-        if payment.status != PaymentStatus.PAID:
+        if payment.status != PaymentStatus.SUCCESS:
             content.append(Paragraph("Payment Instructions", section_header_style))
             content.append(Spacer(1, 6))
             

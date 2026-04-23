@@ -54,9 +54,23 @@ from models.sms_log import SMSLog
 from models.follow_up_task import FollowUpTask, FollowUpStatus, FollowUpType, FollowUpPriority
 from models.notification import Notification
 from models.demo_request import DemoRequest, DemoRequestCreate
+from models.loan_tracking import LoanTrackingEventCreate, LoanTrackingSetupRequest
+from models.borrower_communication import (
+    BorrowerCommunicationRecord,
+    BorrowerContactPreference,
+    ReminderPreviewRequest,
+    ReminderPreviewResponse,
+    ReminderScheduleItem,
+    ReminderSendRequest,
+)
+from models.borrower_note import BorrowerNote, BorrowerNoteCreate
+from models.borrower_profile import BorrowerDirectoryItem, BorrowerProfileOverview
 from services.sms_service import SMSService
 from services.email_service import EmailService
 from services.webhook_service import WebhookService
+from services.loan_tracking_service import LoanTrackingService
+from services.reminder_service import ReminderService
+from services.borrower_profile_service import BorrowerProfileService
 from utils.validators import normalize_phone, clean_name
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -224,6 +238,7 @@ async def strip_api_prefix(request: Request, call_next):
     This allows local dev (sending /api/...) to work with the app (expecting /...)
     """
     if request.url.path.startswith("/api"):
+        request.scope.setdefault("state", {})["api_prefixed"] = True
         request.scope["path"] = request.url.path.replace("/api", "", 1)
     response = await call_next(request)
     return response
@@ -2620,23 +2635,16 @@ async def get_org_metrics(
     par_30 = 0
     par_60 = 0
     par_90 = 0
+    tracked_loan_count = 0
+    recovery_count = 0
     
     for doc in loan_docs:
         try:
-            l_data = doc.to_dict()
-            status = l_data.get("status")
-            amount = l_data.get("amount", 0.0)
-            disbursed_at_val = l_data.get("disbursed_at")
-            
-            # Parse disbursed_at
-            disbursed_dt = None
-            if disbursed_at_val:
-                if isinstance(disbursed_at_val, datetime):
-                    disbursed_dt = disbursed_at_val
-                elif isinstance(disbursed_at_val, str):
-                    try:
-                        disbursed_dt = datetime.fromisoformat(disbursed_at_val.replace('Z', '+00:00'))
-                    except: pass
+            loan = Loan(**doc.to_dict())
+            status = getattr(loan.status, "value", loan.status)
+            amount = float(loan.amount or 0.0)
+            disbursed_dt = loan.disbursed_at
+            tracking_summary = LoanTrackingService.summarize(loan)
             
             # Exclusion: PENDING_DISBURSEMENT is not considered "disbursed" yet
             if status == "PENDING_DISBURSEMENT":
@@ -2644,10 +2652,22 @@ async def get_org_metrics(
 
             # KPI 1: Lifetime Disbursed Volume (Actual Full Amount)
             # KPI 2: Current Active Snapshot
-            disbursed_volume += float(amount)
+            disbursed_volume += amount
+            if loan.tracking_profile:
+                tracked_loan_count += 1
             if status in ["DISBURSED", "ACTIVE"]:
                 active_count += 1
-                if disbursed_dt:
+                dpd = int(tracking_summary.get("days_past_due") or 0)
+                if loan.tracking_profile:
+                    if dpd >= 30:
+                        par_30 += 1
+                    if dpd >= 60:
+                        par_60 += 1
+                    if dpd >= 90:
+                        par_90 += 1
+                    if tracking_summary.get("tracker_state") == "RECOVERY":
+                        recovery_count += 1
+                elif disbursed_dt:
                     age_days = (datetime.utcnow().date() - disbursed_dt.date()).days
                     if age_days > 30:
                         par_30 += 1
@@ -2682,6 +2702,12 @@ async def get_org_metrics(
                 "severity": "WARNING",
                 "message": f"Negative outcome rate ({negative_rate*100:.1f}%) exceeds safety threshold. Review policy strictness."
             })
+    if active_count > 0 and tracked_loan_count < active_count:
+        alerts.append({
+            "type": "TRACKING_GAP",
+            "severity": "INFO",
+            "message": f"{active_count - tracked_loan_count} active loans still need repayment tracking setup."
+        })
     
     par_base = active_count if active_count > 0 else 1
     return {
@@ -2689,6 +2715,8 @@ async def get_org_metrics(
         "active_loans": active_count,
         "disbursed_volume": round(disbursed_volume, 2),
         "default_rate": round(default_rate, 1),
+        "tracker_coverage": round((tracked_loan_count / active_count) * 100, 1) if active_count > 0 else 0.0,
+        "recovery_loans": recovery_count,
         "par_snapshot": {
             "par_30": par_30,
             "par_60": par_60,
@@ -2765,6 +2793,16 @@ async def get_org_watchlist(
 
             # Loan status flags
             if loan:
+                tracking_summary = LoanTrackingService.summarize(loan)
+                if tracking_summary.get("broken_promise"):
+                    add_alert("BROKEN_PROMISE", "HIGH", "Promise-to-pay date has expired without a matching repayment.")
+                if tracking_summary.get("cadence_fit") == "LOW":
+                    add_alert("CADENCE_MISMATCH", "MEDIUM", "Repayment cadence does not match the borrower's income rhythm.")
+                if tracking_summary.get("tracker_state") == "RECOVERY":
+                    add_alert("RECOVERY_LANE", "HIGH", str(tracking_summary.get("recommended_action")))
+                elif tracking_summary.get("tracker_state") == "AT_RISK":
+                    add_alert("COLLECTION_SLIPPAGE", "MEDIUM", str(tracking_summary.get("recommended_action")))
+
                 status = str(getattr(loan, "status", "")).upper()
                 if "DEFAULT" in status:
                     add_alert("LOAN_DEFAULTED", "CRITICAL", "Loan marked as defaulted; immediate action required.")
@@ -3118,7 +3156,11 @@ async def _run_assessment_core(
                 external_results["verified_income_source"] = verified_income_source
 
         # 1. Evaluate Risk
-        risk_results = RiskAgent.evaluate(borrower, external_behavioral_results=external_results)
+        risk_results = RiskAgent.evaluate(
+            borrower,
+            external_behavioral_results=external_results,
+            requested_duration_days=requested_duration_days,
+        )
 
         # 2. Recommmend Decision
         decision_results = DecisionAgent.recommend(risk_results, borrower, requested_duration_days)
@@ -4442,6 +4484,7 @@ async def upgrade_billing_plan(
     plan: str = Body(..., embed=True),
     gateway: str = Body("LIPILA", embed=True),
     phone_number: Optional[str] = Body(None, embed=True),
+    replace_active: bool = Body(False, embed=True),
     current_user: User = Depends(AuthAgent.get_current_user)
 ):
     """
@@ -4465,9 +4508,18 @@ async def upgrade_billing_plan(
             org=org,
             plan_name=plan,
             gateway=gateway,
-            extra_data={"phone_number": phone_number}
+            extra_data={"phone_number": phone_number, "replace_active": replace_active}
         )
         return payment_init
+    except PaymentAgent.DuplicateActivePaymentError as e:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "ACTIVE_PAYMENT_EXISTS",
+                "message": str(e),
+                "payment": PaymentAgent._serialize_payment(e.payment),
+            },
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except PaymentAgent.GatewayError as e:
@@ -4523,8 +4575,10 @@ async def list_org_payments(current_user: User = Depends(AuthAgent.get_current_u
     """
     List all payment attempts and invoices for the organization.
     """
-    payments = Database.list_payments(current_user.organization_id)
-    return sorted(payments, key=lambda x: x.timestamp, reverse=True)
+    from agents.payment_agent import PaymentAgent
+
+    ordered = PaymentAgent.list_payments_for_org(current_user.organization_id)
+    return [PaymentAgent._serialize_payment(payment) for payment in ordered]
 
 @app.get("/billing/payment/{payment_id}/status", tags=["Billing"])
 async def get_payment_status(
@@ -4548,6 +4602,27 @@ async def get_payment_status(
         raise HTTPException(status_code=502, detail=f"Payment Gateway Error: {str(exc)}")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to refresh payment status: {str(exc)}")
+
+@app.post("/billing/payment/{payment_id}/cancel", tags=["Billing"])
+async def cancel_payment_request(
+    payment_id: str,
+    current_user: User = Depends(AuthAgent.get_current_user)
+):
+    """
+    Cancels an active payment request and invalidates any queued retry state.
+    """
+    payment = Database.get_payment(payment_id)
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment record not found")
+
+    if payment.org_id != current_user.organization_id:
+        raise HTTPException(status_code=403, detail="Unauthorized to access this payment")
+
+    from agents.payment_agent import PaymentAgent
+    try:
+        return PaymentAgent.cancel_payment(payment, requested_by=current_user.email or current_user.id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to cancel payment request: {str(exc)}")
 
 @app.get("/billing/invoice/{payment_id}", tags=["Billing"])
 async def download_invoice(
@@ -4635,6 +4710,103 @@ async def assessment_retrain(user: AuthUser = Depends(AuthAgent.get_api_key)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Retraining failed: {str(e)}")
 
+
+def _resolve_loan_context(loan: Loan) -> Tuple[Optional[Assessment], Optional[Borrower]]:
+    assessment = Database.get_assessment(loan.assessment_id)
+    borrower = Database.get_borrower(loan.borrower_id)
+    return assessment, borrower
+
+
+def _ensure_loan_access(loan: Loan, user: User):
+    if loan.organization_id != user.organization_id and user.organization_id != "PLATFORM_OWNER":
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+
+def _loan_tracker_payload(loan: Loan, assessment: Optional[Assessment], borrower: Optional[Borrower]) -> Dict[str, Any]:
+    return {
+        "loan": loan.model_dump(mode="json"),
+        "assessment": (
+            {
+                "assessment_id": assessment.assessment_id,
+                "borrower_id": assessment.borrower_id,
+                "borrower_name": assessment.borrower_name,
+                "decision": getattr(assessment.decision, "value", assessment.decision),
+                "risk_score": assessment.risk_score,
+                "risk_level": getattr(assessment.risk_level, "value", assessment.risk_level),
+                "recommended_amount": assessment.recommended_amount,
+                "recommended_duration_days": assessment.recommended_duration_days,
+            }
+            if assessment
+            else None
+        ),
+        "borrower": (
+            {
+                "id": borrower.id,
+                "name": borrower.name,
+                "phone": borrower.phone,
+                "employment_type": getattr(borrower.employment_type, "value", borrower.employment_type),
+                "monthly_income": borrower.monthly_income,
+                "monthly_expenses": borrower.monthly_expenses,
+                "existing_debt": borrower.existing_debt,
+                "loan_amount_requested": borrower.loan_amount_requested,
+                "loan_purpose": borrower.loan_purpose,
+            }
+            if borrower
+            else None
+        ),
+        "tracking_profile": loan.tracking_profile.model_dump(mode="json") if loan.tracking_profile else None,
+        "tracking_summary": LoanTrackingService.summarize(loan, borrower=borrower, assessment=assessment),
+        "schedule": [item.model_dump(mode="json") for item in loan.repayment_schedule],
+        "events": [
+            item.model_dump(mode="json")
+            for item in sorted(loan.collection_history, key=lambda event: event.occurred_at, reverse=True)
+        ],
+        "differentiators": LoanTrackingService.differentiators(loan),
+    }
+
+
+def _ensure_borrower_dashboard_access(borrower: Borrower, user: User):
+    if user.organization_id != "PLATFORM_OWNER" and borrower.organization_id != user.organization_id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+
+def _ensure_borrower_edit_access(user: User):
+    allowed_roles = {"OFFICER", "ORG_ADMIN", "SUPER_ADMIN", "DEVELOPER"}
+    role_value = str(getattr(user.role, "value", user.role)).upper()
+    if role_value not in allowed_roles:
+        raise HTTPException(status_code=403, detail="Officer or admin access required")
+
+
+def _resolve_org_display_name(organization_id: str) -> str:
+    organization = Database.get_organization(organization_id)
+    if organization and getattr(organization, "name", None):
+        return organization.name
+    return "MiFi Pro"
+
+
+def _resolve_borrower_context(
+    borrower_id: str,
+    user: User,
+) -> Tuple[Borrower, List[Assessment], List[Loan], Optional[BorrowerContactPreference]]:
+    organization_id = None if user.organization_id == "PLATFORM_OWNER" else user.organization_id
+    borrower = BorrowerProfileService.resolve_borrower(borrower_id, organization_id=organization_id)
+    if not borrower:
+        raise HTTPException(status_code=404, detail="Borrower not found")
+    _ensure_borrower_dashboard_access(borrower, user)
+    assessments = Database.list_assessments_by_borrower(
+        borrower_id=borrower_id,
+        organization_id=borrower.organization_id,
+    )
+    loans = Database.list_loans_by_borrower(
+        borrower_id=borrower_id,
+        organization_id=borrower.organization_id,
+    )
+    preference = Database.get_borrower_contact_preference(
+        borrower_id=borrower_id,
+        organization_id=borrower.organization_id,
+    )
+    return borrower, assessments, loans, preference
+
 @app.post("/loan/disburse", response_model=Loan)
 async def loan_disburse(assessment_id: str = Body(..., embed=True), user: User = Depends(get_dashboard_user)):
     if user.role not in ["OFFICER", "ORG_ADMIN"]:
@@ -4660,6 +4832,7 @@ async def loan_disburse(assessment_id: str = Body(..., embed=True), user: User =
         organization_id=assessment.organization_id,
         amount=assessment.recommended_amount,
         interest_rate=assessment.recommended_interest_rate,
+        term_days=assessment.recommended_duration_days or assessment.requested_duration_days,
         status=LoanStatus.PENDING_DISBURSEMENT
     )
     
@@ -4673,6 +4846,7 @@ async def confirm_disbursement(
     amount: float = Body(..., embed=True),
     method: str = Body(..., embed=True),
     reference: Optional[str] = Body(None, embed=True),
+    tracking: Optional[LoanTrackingSetupRequest] = Body(None, embed=True),
     user: User = Depends(get_dashboard_user)
 ):
     if user.role not in ["OFFICER", "ORG_ADMIN"]:
@@ -4681,26 +4855,28 @@ async def confirm_disbursement(
     loan = Database.get_loan(loan_id)
     if not loan:
         raise HTTPException(status_code=404, detail="Loan not found")
-    
-    if loan.organization_id != user.organization_id and user.organization_id != "PLATFORM_OWNER":
-        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    _ensure_loan_access(loan, user)
     
     if loan.status != LoanStatus.PENDING_DISBURSEMENT:
         raise HTTPException(status_code=400, detail=f"Loan is in {loan.status} state, cannot disburse.")
 
     loan.status = LoanStatus.DISBURSED
-    loan.disbursed_at = datetime.now()
+    loan.disbursed_at = datetime.now(timezone.utc)
     loan.amount = amount # Allow slight adjustment if needed at point of sale
     loan.disbursement_method = method
     loan.disbursement_reference = reference
     loan.disbursed_by = user.email
+    assessment, borrower = _resolve_loan_context(loan)
+    LoanTrackingService.ensure_tracking(loan, assessment, borrower, tracking)
     
     Database.save_loan(loan)
     AuditAgent.log_event("LOAN_DISBURSED_MANUAL", user.role, {
         "loan_id": loan.loan_id, 
         "amount": amount, 
         "method": method,
-        "ref": reference
+        "ref": reference,
+        "tracking_lane": getattr(getattr(getattr(loan, "tracking_profile", None), "tracking_lane", None), "value", None)
     })
     
     return {"status": "SUCCESS", "loan_id": loan_id}
@@ -4807,6 +4983,7 @@ async def get_loan_by_assessment(assessment_id: str, user: User = Depends(get_da
                 organization_id=assessment.organization_id,
                 amount=float(amount) if amount else 0.0,
                 interest_rate=float(rate) if rate else 0.0,
+                term_days=assessment.recommended_duration_days or assessment.requested_duration_days,
                 status=LoanStatus.PENDING_DISBURSEMENT
             )
             Database.save_loan(new_loan)
@@ -4817,9 +4994,314 @@ async def get_loan_by_assessment(assessment_id: str, user: User = Depends(get_da
                  
             return new_loan
         except Exception as e:
-            logger.error(f"DEBUG: Self-healing creation failed for {assessment_id}: {e}")
+                logger.error(f"DEBUG: Self-healing creation failed for {assessment_id}: {e}")
                 
     return None
+
+
+@app.get("/loans/tracker", tags=["Loan Tracking"])
+async def get_loan_tracker_workspace(user: User = Depends(get_dashboard_user)):
+    if user.role not in ["OFFICER", "ORG_ADMIN", "AUDITOR", "SUPER_ADMIN", "DEVELOPER"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    org_id = user.organization_id if user.organization_id != "PLATFORM_OWNER" else None
+    loans = Database.list_loans(organization_id=org_id) if org_id else Database.list_loans()
+    borrowers = Database.list_borrowers(organization_id=org_id) if org_id else Database.list_borrowers()
+    assessments = Database.list_assessments(organization_id=org_id) if org_id else Database.list_assessments()
+
+    borrower_lookup = {borrower.id: borrower for borrower in borrowers if borrower.id}
+    assessment_lookup = {
+        assessment.assessment_id: assessment
+        for assessment in assessments
+        if getattr(assessment, "assessment_id", None)
+    }
+    return LoanTrackingService.portfolio_snapshot(
+        loans,
+        borrower_lookup=borrower_lookup,
+        assessment_lookup=assessment_lookup,
+    )
+
+
+@app.get("/loans/{loan_id}/tracker", tags=["Loan Tracking"])
+async def get_loan_tracker_detail(loan_id: str, user: User = Depends(get_dashboard_user)):
+    if user.role not in ["OFFICER", "ORG_ADMIN", "AUDITOR", "SUPER_ADMIN", "DEVELOPER"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    loan = Database.get_loan(loan_id)
+    if not loan:
+        raise HTTPException(status_code=404, detail="Loan not found")
+    _ensure_loan_access(loan, user)
+    assessment, borrower = _resolve_loan_context(loan)
+    return _loan_tracker_payload(loan, assessment, borrower)
+
+
+@app.post("/loans/{loan_id}/tracking/setup", tags=["Loan Tracking"])
+async def setup_loan_tracking(
+    loan_id: str,
+    payload: LoanTrackingSetupRequest,
+    user: User = Depends(get_dashboard_user)
+):
+    if user.role not in ["OFFICER", "ORG_ADMIN"]:
+        raise HTTPException(status_code=403, detail="Officer or Admin access required")
+
+    loan = Database.get_loan(loan_id)
+    if not loan:
+        raise HTTPException(status_code=404, detail="Loan not found")
+    _ensure_loan_access(loan, user)
+
+    assessment, borrower = _resolve_loan_context(loan)
+    LoanTrackingService.ensure_tracking(loan, assessment, borrower, payload)
+    Database.save_loan(loan)
+    AuditAgent.log_event(
+        "LOAN_TRACKING_CONFIGURED",
+        user.email,
+        {
+            "loan_id": loan.loan_id,
+            "tracking_lane": getattr(getattr(loan.tracking_profile, "tracking_lane", None), "value", None),
+            "org": loan.organization_id,
+        },
+    )
+    return _loan_tracker_payload(loan, assessment, borrower)
+
+
+@app.post("/loans/{loan_id}/tracking/events", tags=["Loan Tracking"])
+async def record_loan_tracking_event(
+    loan_id: str,
+    payload: LoanTrackingEventCreate,
+    user: User = Depends(get_dashboard_user)
+):
+    if user.role not in ["OFFICER", "ORG_ADMIN"]:
+        raise HTTPException(status_code=403, detail="Officer or Admin access required")
+
+    loan = Database.get_loan(loan_id)
+    if not loan:
+        raise HTTPException(status_code=404, detail="Loan not found")
+    _ensure_loan_access(loan, user)
+
+    assessment, borrower = _resolve_loan_context(loan)
+    if not loan.tracking_profile:
+        raise HTTPException(status_code=400, detail="Configure loan tracking before recording events.")
+
+    previous_status = loan.status
+    event = LoanTrackingService.record_event(loan, payload, user.email)
+    Database.save_loan(loan)
+    if previous_status != LoanStatus.PAID and loan.status == LoanStatus.PAID:
+        SelfHealingAgent.register_outcome(loan.loan_id, loan.status)
+    AuditAgent.log_event(
+        "LOAN_TRACKING_EVENT_RECORDED",
+        user.email,
+        {
+            "loan_id": loan.loan_id,
+            "event_id": event.event_id,
+            "event_type": getattr(event.event_type, "value", event.event_type),
+            "amount": event.amount,
+            "org": loan.organization_id,
+        },
+    )
+    return _loan_tracker_payload(loan, assessment, borrower)
+
+
+@app.get("/org/borrowers", response_model=List[BorrowerDirectoryItem], tags=["Borrower 360"])
+async def list_borrower_directory(user: User = Depends(get_dashboard_user)):
+    if str(getattr(user.role, "value", user.role)).upper() not in {"OFFICER", "ORG_ADMIN", "AUDITOR", "SUPER_ADMIN", "DEVELOPER", "VIEWER"}:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    organization_id = None if user.organization_id == "PLATFORM_OWNER" else user.organization_id
+    return BorrowerProfileService.list_directory(organization_id=organization_id)
+
+
+@app.get("/org/borrowers/{borrower_id}/profile", response_model=BorrowerProfileOverview, tags=["Borrower 360"])
+async def get_borrower_profile(borrower_id: str, user: User = Depends(get_dashboard_user)):
+    if str(getattr(user.role, "value", user.role)).upper() not in {"OFFICER", "ORG_ADMIN", "AUDITOR", "SUPER_ADMIN", "DEVELOPER", "VIEWER"}:
+        raise HTTPException(status_code=403, detail="Access denied")
+    borrower, _, _, _ = _resolve_borrower_context(borrower_id, user)
+    return BorrowerProfileService.build_profile(borrower=borrower, organization_id=borrower.organization_id)
+
+
+@app.get("/org/borrowers/{borrower_id}/communications", response_model=List[BorrowerCommunicationRecord], tags=["Borrower 360"])
+async def list_borrower_communications(
+    borrower_id: str,
+    loan_id: Optional[str] = None,
+    user: User = Depends(get_dashboard_user),
+):
+    if str(getattr(user.role, "value", user.role)).upper() not in {"OFFICER", "ORG_ADMIN", "AUDITOR", "SUPER_ADMIN", "DEVELOPER", "VIEWER"}:
+        raise HTTPException(status_code=403, detail="Access denied")
+    borrower, _, _, _ = _resolve_borrower_context(borrower_id, user)
+    profile = BorrowerProfileService.build_profile(borrower=borrower, organization_id=borrower.organization_id)
+    if loan_id:
+        return [item for item in profile.communications if item.loan_id == loan_id]
+    return profile.communications
+
+
+@app.get("/org/borrowers/{borrower_id}/reminder-schedule", response_model=List[ReminderScheduleItem], tags=["Borrower 360"])
+async def get_borrower_reminder_schedule(
+    borrower_id: str,
+    user: User = Depends(get_dashboard_user),
+):
+    if str(getattr(user.role, "value", user.role)).upper() not in {"OFFICER", "ORG_ADMIN", "AUDITOR", "SUPER_ADMIN", "DEVELOPER", "VIEWER"}:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    borrower, assessments, loans, preference = _resolve_borrower_context(borrower_id, user)
+    return ReminderService.build_schedule(
+        borrower=borrower,
+        organization_id=borrower.organization_id,
+        loans=loans,
+        assessments=assessments,
+        preference=preference,
+    )
+
+
+@app.post("/org/borrowers/{borrower_id}/communications/preview", response_model=ReminderPreviewResponse, tags=["Borrower 360"])
+async def preview_borrower_reminder(
+    borrower_id: str,
+    payload: ReminderPreviewRequest,
+    user: User = Depends(get_dashboard_user),
+):
+    borrower, assessments, loans, preference = _resolve_borrower_context(borrower_id, user)
+    org_name = _resolve_org_display_name(borrower.organization_id)
+    return ReminderService.preview_message(
+        borrower=borrower,
+        institution_name=org_name,
+        officer_name=user.full_name or user.email or "Loan Officer",
+        contact_number=user.email or borrower.phone,
+        request=payload,
+        loans=loans,
+        assessments=assessments,
+        preference=preference,
+    )
+
+
+@app.post("/org/borrowers/{borrower_id}/communications/send", response_model=BorrowerCommunicationRecord, tags=["Borrower 360"])
+async def send_borrower_reminder(
+    borrower_id: str,
+    payload: ReminderSendRequest,
+    user: User = Depends(get_dashboard_user),
+):
+    _ensure_borrower_edit_access(user)
+    borrower, assessments, loans, preference = _resolve_borrower_context(borrower_id, user)
+    org_name = _resolve_org_display_name(borrower.organization_id)
+    record = ReminderService.send_reminder(
+        communication_id=f"COM-{uuid.uuid4().hex[:10].upper()}",
+        borrower=borrower,
+        institution_name=org_name,
+        officer_name=user.full_name or user.email or "Loan Officer",
+        contact_number=user.email or borrower.phone,
+        request=payload,
+        loans=loans,
+        assessments=assessments,
+        preference=preference,
+        organization_id=borrower.organization_id,
+        triggered_by={
+            "user_id": user.id,
+            "name": user.full_name,
+            "email": user.email,
+        },
+    )
+    Database.save_borrower_communication(record)
+
+    if record.channel.value == "SMS" and record.assessment_id:
+        legacy_sms_log = SMSLog(
+            id=f"SMS-{uuid.uuid4().hex[:8].upper()}",
+            assessment_id=record.assessment_id,
+            borrower_id=borrower_id,
+            phone_number=record.recipient_number,
+            message=record.message_body,
+            sent_by=user.id,
+            provider=record.provider or "TWILIO",
+            provider_id=record.provider_message_id,
+            status=record.delivery_status.value,
+            environment=os.getenv("MESSAGING_PROVIDER_MODE", "mock"),
+        )
+        Database.save_sms_log(legacy_sms_log)
+
+    AuditAgent.log_event(
+        "BORROWER_REMINDER_SENT",
+        user.email,
+        {
+            "borrower_id": borrower_id,
+            "loan_id": record.loan_id,
+            "assessment_id": record.assessment_id,
+            "channel": record.channel.value,
+            "reminder_type": record.reminder_type.value,
+            "status": record.delivery_status.value,
+            "org": borrower.organization_id,
+        },
+    )
+    return record
+
+
+@app.put("/org/borrowers/{borrower_id}/contact-preferences", response_model=BorrowerContactPreference, tags=["Borrower 360"])
+async def update_borrower_contact_preferences(
+    borrower_id: str,
+    payload: Dict[str, Any] = Body(...),
+    user: User = Depends(get_dashboard_user),
+):
+    _ensure_borrower_edit_access(user)
+    borrower, _, _, _ = _resolve_borrower_context(borrower_id, user)
+
+    preference = BorrowerContactPreference(
+        borrower_id=borrower_id,
+        organization_id=borrower.organization_id,
+        preferred_channel=payload.get("preferred_channel"),
+        preferred_number=(payload.get("preferred_number") or borrower.phone or "").strip() or None,
+        best_contact_time=(payload.get("best_contact_time") or "").strip() or None,
+        communication_language=payload.get("communication_language"),
+        consent_opt_in=payload.get("consent_opt_in"),
+        updated_by=user.email,
+    )
+    Database.save_borrower_contact_preference(preference)
+    AuditAgent.log_event(
+        "BORROWER_CONTACT_PREFERENCES_UPDATED",
+        user.email,
+        {"borrower_id": borrower_id, "org": borrower.organization_id},
+    )
+    return preference
+
+
+@app.get("/org/borrowers/{borrower_id}/notes", response_model=List[BorrowerNote], tags=["Borrower 360"])
+async def list_borrower_notes(
+    borrower_id: str,
+    user: User = Depends(get_dashboard_user),
+):
+    if str(getattr(user.role, "value", user.role)).upper() not in {"OFFICER", "ORG_ADMIN", "AUDITOR", "SUPER_ADMIN", "DEVELOPER", "VIEWER"}:
+        raise HTTPException(status_code=403, detail="Access denied")
+    borrower, _, _, _ = _resolve_borrower_context(borrower_id, user)
+    return Database.list_borrower_notes(borrower_id=borrower_id, organization_id=borrower.organization_id)
+
+
+@app.post("/org/borrowers/{borrower_id}/notes", response_model=BorrowerNote, tags=["Borrower 360"])
+async def create_borrower_note(
+    borrower_id: str,
+    payload: BorrowerNoteCreate,
+    user: User = Depends(get_dashboard_user),
+):
+    _ensure_borrower_edit_access(user)
+    borrower, _, _, _ = _resolve_borrower_context(borrower_id, user)
+
+    note = BorrowerNote(
+        note_id=f"NOTE-{uuid.uuid4().hex[:10].upper()}",
+        borrower_id=borrower_id,
+        organization_id=borrower.organization_id,
+        note_type=payload.note_type,
+        text=payload.text.strip(),
+        related_loan_id=payload.related_loan_id,
+        related_assessment_id=payload.related_assessment_id,
+        created_by_user_id=user.id,
+        created_by_name=user.full_name,
+        created_by_email=user.email,
+    )
+    Database.save_borrower_note(note)
+    AuditAgent.log_event(
+        "BORROWER_NOTE_ADDED",
+        user.email,
+        {
+            "borrower_id": borrower_id,
+            "note_id": note.note_id,
+            "note_type": note.note_type.value,
+            "org": borrower.organization_id,
+        },
+    )
+    return note
 
 @app.get("/platform/admin")
 async def get_platform_admin():
@@ -4973,6 +5455,23 @@ async def list_policy_versions(
     }
 
 
+def _raise_policy_http_error(exc: ValueError) -> None:
+    detail = str(exc)
+    status_code = 400
+    if detail == "Policy version not found":
+        status_code = 404
+    elif detail == "Cross-organization access denied":
+        status_code = 403
+    elif detail in {
+        "Only draft versions can be updated",
+        "Only draft versions can be submitted",
+        "Only submitted versions can be approved",
+        "Only approved versions can be activated",
+    }:
+        status_code = 409
+    raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
 @app.post("/policy/versions/draft")
 async def create_policy_draft(
     payload: Dict[str, Any] = Body(default=None),
@@ -4986,9 +5485,12 @@ async def create_policy_draft(
 
     from utils.policy_config import create_policy_draft, validate_policy_values
     values = (payload or {}).get("values") or {}
-    if values:
-        validate_policy_values(values)
-    draft = create_policy_draft(current_user.organization_id, current_user.email, values)
+    try:
+        if values:
+            validate_policy_values(values)
+        draft = create_policy_draft(current_user.organization_id, current_user.email, values)
+    except ValueError as exc:
+        _raise_policy_http_error(exc)
     AuditAgent.log_event("POLICY_DRAFT_CREATED", current_user.email, {
         "org": current_user.organization_id,
         "policy_version_id": draft.get("id")
@@ -5010,9 +5512,12 @@ async def update_policy_draft(
 
     from utils.policy_config import update_policy_draft, validate_policy_values
     values = payload.get("values") or {}
-    if values:
-        validate_policy_values(values)
-    version = update_policy_draft(version_id, current_user.organization_id, current_user.email, values)
+    try:
+        if values:
+            validate_policy_values(values)
+        version = update_policy_draft(version_id, current_user.organization_id, current_user.email, values)
+    except ValueError as exc:
+        _raise_policy_http_error(exc)
     AuditAgent.log_event("POLICY_DRAFT_UPDATED", current_user.email, {
         "org": current_user.organization_id,
         "policy_version_id": version_id,
@@ -5032,7 +5537,10 @@ async def submit_policy_version(
     if current_user.role not in ["ORG_ADMIN", "SUPER_ADMIN", "DEVELOPER"]:
         raise HTTPException(status_code=403, detail="Organization Admin access required.")
     from utils.policy_config import set_policy_status
-    version = set_policy_status(version_id, current_user.organization_id, "SUBMITTED", current_user.email)
+    try:
+        version = set_policy_status(version_id, current_user.organization_id, "SUBMITTED", current_user.email)
+    except ValueError as exc:
+        _raise_policy_http_error(exc)
     AuditAgent.log_event("POLICY_VERSION_SUBMITTED", current_user.email, {
         "org": current_user.organization_id,
         "policy_version_id": version_id
@@ -5051,7 +5559,10 @@ async def approve_policy_version(
     if current_user.role not in ["ORG_ADMIN", "SUPER_ADMIN", "DEVELOPER"]:
         raise HTTPException(status_code=403, detail="Organization Admin access required.")
     from utils.policy_config import set_policy_status
-    version = set_policy_status(version_id, current_user.organization_id, "APPROVED", current_user.email)
+    try:
+        version = set_policy_status(version_id, current_user.organization_id, "APPROVED", current_user.email)
+    except ValueError as exc:
+        _raise_policy_http_error(exc)
     AuditAgent.log_event("POLICY_VERSION_APPROVED", current_user.email, {
         "org": current_user.organization_id,
         "policy_version_id": version_id
@@ -5070,7 +5581,10 @@ async def activate_policy_version(
     if current_user.role not in ["ORG_ADMIN", "SUPER_ADMIN", "DEVELOPER"]:
         raise HTTPException(status_code=403, detail="Organization Admin access required.")
     from utils.policy_config import activate_policy_version
-    version = activate_policy_version(version_id, current_user.organization_id, current_user.email)
+    try:
+        version = activate_policy_version(version_id, current_user.organization_id, current_user.email)
+    except ValueError as exc:
+        _raise_policy_http_error(exc)
     AuditAgent.log_event("POLICY_VERSION_ACTIVATED", current_user.email, {
         "org": current_user.organization_id,
         "policy_version_id": version_id
@@ -6102,10 +6616,17 @@ async def upload_transaction_document(
         
         # Run behavioral analysis (Using NEW Logic via list of transactions)
         from agents.behavioral_agent_v2 import BehavioralAgentV2
-        behavioral_results = BehavioralAgentV2.analyze_transactions(extraction_result.transactions)
+        behavioral_results = BehavioralAgentV2.analyze_transactions(
+            extraction_result.transactions,
+            statement_summary=extraction_result.bank_statement_summary
+        )
         
         # Run full risk assessment
-        risk_results = RiskAgent.evaluate(borrower, external_behavioral_results=behavioral_results)
+        risk_results = RiskAgent.evaluate(
+            borrower,
+            external_behavioral_results=behavioral_results,
+            requested_duration_days=30,
+        )
         decision_results = DecisionAgent.recommend(risk_results, borrower, 30)
         explanation = ExplanationAgent.generate(risk_results, decision_results, borrower)
         
@@ -6219,10 +6740,17 @@ async def process_document_upload(borrower_id: str, file: UploadFile):
 
         # 3. Behavioral Analysis (With Confidence Weights)
         from agents.behavioral_agent_v2 import BehavioralAgentV2
-        behavioral_results = BehavioralAgentV2.analyze_transactions(transactions)
+        behavioral_results = BehavioralAgentV2.analyze_transactions(
+            transactions,
+            statement_summary=extraction_result.bank_statement_summary
+        )
         
         # 4. Risk Assessment (With Impact Caps)
-        risk_results = RiskAgent.evaluate(borrower, external_behavioral_results=behavioral_results)
+        risk_results = RiskAgent.evaluate(
+            borrower,
+            external_behavioral_results=behavioral_results,
+            requested_duration_days=30,
+        )
         decision_results = DecisionAgent.recommend(risk_results, borrower, 30) # Default duration for pilot
         explanation = ExplanationAgent.generate(risk_results, decision_results, borrower)
         
@@ -6593,7 +7121,10 @@ async def _run_document_ingestion_job(
 
         # Behavioral analysis + full assessment
         from agents.behavioral_agent_v2 import BehavioralAgentV2
-        behavioral_results = BehavioralAgentV2.analyze_transactions(transactions)
+        behavioral_results = BehavioralAgentV2.analyze_transactions(
+            transactions,
+            statement_summary=extraction_result.bank_statement_summary
+        )
 
         doc_info = {
             "document_type": str(extraction_result.document_type),
@@ -7144,30 +7675,44 @@ async def view_documentation(doc_name: str):
     
     return HTMLResponse(content=html)
 
+def _should_serve_spa_fallback(request: Request) -> bool:
+    if request.scope.get("state", {}).get("api_prefixed"):
+        return False
+
+    accept_header = request.headers.get("accept", "")
+    fetch_destination = request.headers.get("sec-fetch-dest", "")
+    return "text/html" in accept_header or fetch_destination == "document"
+
+
 # Catch-all for React Router (must be at the bottom)
 @app.get("/{full_path:path}")
-async def catch_all(full_path: str):
+async def catch_all(full_path: str, request: Request):
     # Prevent API typos (e.g. /api/api/...) from silently returning index.html.
     # Those should fail as API 404s so the client can surface a real error.
     if full_path.startswith("api/"):
         raise HTTPException(status_code=404, detail="Not Found")
-    
+
     # 1. Try serving from frontend/dist
     if os.path.exists(frontend_dist):
         file_path = os.path.join(frontend_dist, full_path)
         if os.path.isfile(file_path):
             return FileResponse(file_path)
-        return FileResponse(os.path.join(frontend_dist, "index.html"))
-    
+        if _should_serve_spa_fallback(request):
+            return FileResponse(os.path.join(frontend_dist, "index.html"))
+        raise HTTPException(status_code=404, detail="Not Found")
+
     # 2. Try serving from project root (Legacy)
     file_path = os.path.join(static_path, full_path)
     if os.path.isfile(file_path):
         return FileResponse(file_path)
-    
+
     index_path = os.path.join(static_path, "index.html")
-    if os.path.exists(index_path):
+    if os.path.exists(index_path) and _should_serve_spa_fallback(request):
         return FileResponse(index_path)
-        
+
+    if index_path and os.path.exists(index_path):
+        raise HTTPException(status_code=404, detail="Not Found")
+
     return {"message": "Frontend not deployed. Please run 'npm run build' in the frontend directory."}
 
 if __name__ == "__main__":

@@ -1,8 +1,10 @@
 import secrets
 import hashlib
+import os
 from datetime import datetime, timedelta
 from typing import Optional
 import logging
+from contextlib import contextmanager
 logger = logging.getLogger(__name__)
 
 from fastapi import HTTPException, Security, Depends
@@ -27,6 +29,43 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login", auto_error=False)
+
+_PROXY_ENV_KEYS = [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+]
+
+
+@contextmanager
+def _without_broken_local_proxy():
+    """
+    Some local environments export a dead proxy like http://127.0.0.1:9,
+    which breaks Firebase public-key fetches during ID token verification.
+    Temporarily remove only those obviously invalid loopback proxy values.
+    """
+    removed = {}
+    try:
+        for key in _PROXY_ENV_KEYS:
+            value = os.environ.get(key)
+            if not value:
+                continue
+            normalized = value.strip().lower()
+            if normalized in {
+                "http://127.0.0.1:9",
+                "http://localhost:9",
+                "https://127.0.0.1:9",
+                "https://localhost:9",
+            }:
+                removed[key] = value
+                os.environ.pop(key, None)
+        yield
+    finally:
+        for key, value in removed.items():
+            os.environ[key] = value
 
 class AuthAgent:
     """
@@ -191,7 +230,8 @@ class AuthAgent:
             try:
                 # Decodes and verifies the token using Firebase Public Keys
                 app = firebase_admin.get_app()
-                decoded_token = firebase_auth.verify_id_token(token, app=app)
+                with _without_broken_local_proxy():
+                    decoded_token = firebase_auth.verify_id_token(token, app=app)
                 email = decoded_token.get("email")
                 if email:
                      logger.debug(f"[AUTH DEBUG] Valid Firebase ID token found for: {email}")

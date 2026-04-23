@@ -38,7 +38,8 @@ class CapacityAgent:
         requested_amount: float = 0.0,
         external_transactions: Optional[List] = None,
         verified_monthly_income: Optional[float] = None,  # NEW: from payslip net_pay
-        verified_income_source: Optional[str] = None  # NEW: "PAYSLIP", "SALARY_CREDIT", etc.
+        verified_income_source: Optional[str] = None,  # NEW: "PAYSLIP", "SALARY_CREDIT", etc.
+        statement_summary: Optional[Any] = None
     ) -> Dict[str, Any]:
         """
         Calculates the maximum loanable amount based on demonstrated capacity.
@@ -77,6 +78,13 @@ class CapacityAgent:
                 data_source = "DATABASE"
         
         result["data_source"] = data_source
+
+        def get_summary_field(field: str) -> Any:
+            if not statement_summary:
+                return None
+            if isinstance(statement_summary, dict):
+                return statement_summary.get(field)
+            return getattr(statement_summary, field, None)
         
         # STEP 2: CALCULATE OBSERVED DEPOSIT VOLUME
         deposit_result = CapacityAgent._calculate_observed_deposit_volume(transactions)
@@ -108,6 +116,31 @@ class CapacityAgent:
             result["history_days"] = 0
             if not isinstance(validation_result, dict) or "is_valid" not in validation_result:
                  validation_result = {"is_valid": False, "reason": f"Internal validation data missing: {e}"}
+
+        summary_period = get_summary_field("statement_period")
+        summary_start = None
+        summary_end = None
+        if summary_period:
+            if isinstance(summary_period, dict):
+                summary_start = summary_period.get("start")
+                summary_end = summary_period.get("end")
+            else:
+                summary_start = getattr(summary_period, "start", None)
+                summary_end = getattr(summary_period, "end", None)
+
+        if summary_start and summary_end:
+            try:
+                start_dt = datetime.fromisoformat(str(summary_start))
+                end_dt = datetime.fromisoformat(str(summary_end))
+                summary_days = max((end_dt - start_dt).days, 1) if end_dt >= start_dt else 0
+                if summary_days > 0:
+                    result["history_days"] = summary_days
+                    result["observation_window_days"] = summary_days
+                    result["statement_period_start"] = start_dt.isoformat()
+                    result["statement_period_end"] = end_dt.isoformat()
+                    result["statement_period_days"] = summary_days
+            except ValueError:
+                pass
         
         # POLICY BYPASS: Lack of time ≠ Bad behavior
         if not validation_result["is_valid"] and result["transaction_count"] > 0:

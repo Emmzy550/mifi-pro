@@ -21,6 +21,8 @@ import LandingPage from './pages/LandingPage';
 import Notifications from './pages/Notifications';
 import FollowUps from './pages/FollowUps';
 import OrganizationReport from './pages/OrganizationReport';
+import LoanTracker from './pages/LoanTracker';
+import Borrower360 from './pages/Borrower360';
 import { Toaster } from 'react-hot-toast';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -87,6 +89,9 @@ export default function App() {
                         <Route path="decisions/:assessmentId" element={<DecisionReview />} />
                         <Route path="policy-studio" element={<PolicyStudio />} />
                         <Route path="team" element={<Team />} />
+                        <Route path="loan-tracker" element={<LoanTracker />} />
+                        <Route path="borrowers" element={<Borrower360 />} />
+                        <Route path="borrowers/:borrowerId" element={<Borrower360 />} />
                         <Route path="follow-ups" element={<FollowUps />} />
                         <Route path="notifications" element={<Notifications />} />
                         <Route path="organization-report" element={<OrganizationReport />} />

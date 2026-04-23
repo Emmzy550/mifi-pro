@@ -32,6 +32,37 @@ def _affordability_target() -> float:
 MIN_BUSINESS_STABILITY_MONTHS = config.MIN_BUSINESS_STABILITY_MONTHS
 
 
+def loan_term_months_from_days(requested_duration_days: int) -> float:
+    """
+    Converts a requested tenor in days into an equivalent month fraction.
+
+    We use a simple 30-day month so short-tenor products keep their intended
+    repayment pressure instead of being diluted across a default annual term.
+    """
+    try:
+        days = float(requested_duration_days)
+    except (TypeError, ValueError):
+        return 12.0
+
+    if days <= 0:
+        return 12.0
+
+    return max(days / 30.0, 1.0 / 30.0)
+
+
+def calculate_affordable_amount(borrower: Borrower, loan_term_months: float = 12.0) -> float:
+    """
+    Computes the maximum principal supportable within the affordability target.
+    """
+    net_income = borrower.monthly_income - borrower.monthly_expenses
+    if net_income <= 0:
+        return 0.0
+
+    safe_term_months = max(float(loan_term_months), 1.0 / 30.0)
+    affordable_amount = net_income * _affordability_target() * safe_term_months
+    return max(0.0, affordable_amount)
+
+
 def check_income_stability(borrower: Borrower) -> bool:
     """
     Verifies borrower meets minimum income threshold.
@@ -101,7 +132,7 @@ def check_dti_ratio(borrower: Borrower) -> float:
     return borrower.existing_debt / borrower.monthly_income
 
 
-def check_affordability(borrower: Borrower, loan_term_months: int = 12) -> Tuple[bool, float]:
+def check_affordability(borrower: Borrower, loan_term_months: float = 12.0) -> Tuple[bool, float]:
     """
     Assesses whether borrower can afford the requested loan.
     
@@ -154,7 +185,8 @@ def check_affordability(borrower: Borrower, loan_term_months: int = 12) -> Tuple
     # Estimate monthly payment (simple amortization)
     # NOTE: This is a simplified calculation. Production systems should use
     # proper amortization formulas accounting for interest rates.
-    estimated_monthly_payment = borrower.loan_amount_requested / loan_term_months
+    safe_term_months = max(float(loan_term_months), 1.0 / 30.0)
+    estimated_monthly_payment = borrower.loan_amount_requested / safe_term_months
     
     # Calculate affordability ratio
     affordability_ratio = estimated_monthly_payment / net_income
@@ -165,7 +197,11 @@ def check_affordability(borrower: Borrower, loan_term_months: int = 12) -> Tuple
     return passes, affordability_ratio
 
 
-def check_critical_flags(borrower: Borrower) -> Tuple[bool, list]:
+def check_critical_flags(
+    borrower: Borrower,
+    loan_term_months: float = 12.0,
+    allow_affordability_cap: bool = False,
+) -> Tuple[bool, list]:
     """
     Checks for critical red flags that trigger automatic rejection.
     
@@ -204,9 +240,16 @@ def check_critical_flags(borrower: Borrower) -> Tuple[bool, list]:
         flags.append("CRITICAL: HIGH_DEBT_TO_INCOME")
     
     # Check 3: Affordability
-    affordable, ratio = check_affordability(borrower)
+    affordable, _ = check_affordability(borrower, loan_term_months=loan_term_months)
     if not affordable:
-        flags.append("CRITICAL: INSUFFICIENT_AFFORDABILITY")
-    
+        affordable_amount = calculate_affordable_amount(
+            borrower,
+            loan_term_months=loan_term_months,
+        )
+        if allow_affordability_cap and affordable_amount > 0:
+            flags.append("WARNING: AFFORDABILITY_CAP_REQUIRED")
+        else:
+            flags.append("CRITICAL: INSUFFICIENT_AFFORDABILITY")
+
     return len(flags) > 0, flags
 

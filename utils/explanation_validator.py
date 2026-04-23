@@ -253,7 +253,11 @@ class ExplanationValidator:
         if rec_amt < req_amt:
             # PRINCIPAL RISK: Only add affordability notes if the user is actually getting a loan
             if assessment.decision != "REJECT" and (assessment.recommended_amount or 0.0) > 0:
-                if assessment.starter_loan_applied:
+                if assessment.policy_cap_reason and "AFFORDABILITY_CAP" in assessment.policy_cap_reason:
+                    addon = (
+                        f" [AUDIT_SYSTEM_NOTE: Capped to {assessment.recommended_amount} to fit the approved repayment window.]"
+                    )
+                elif assessment.starter_loan_applied:
                     addon = (
                         f" [AUDIT_SYSTEM_NOTE: Capped per Starter Loan policy at {assessment.recommended_amount}.]"
                     )

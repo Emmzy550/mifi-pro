@@ -123,20 +123,33 @@ export default function PolicyStudio() {
         setSaving(true);
         setMessage(null);
         try {
+            let version = null;
             if (!currentVersionId || currentStatus !== 'DRAFT') {
                 const draftRes = await api.post('/policy/versions/draft', { values: policy });
-                const draft = draftRes.data?.version;
-                setCurrentVersionId(draft?.id || null);
-                setCurrentStatus(draft?.status || 'DRAFT');
-            }
-            if (currentVersionId) {
+                version = draftRes.data?.version || null;
+            } else {
                 const res = await api.patch(`/policy/versions/${currentVersionId}`, { values: policy });
-                setPolicy(res.data?.version?.values || policy);
-                setCurrentStatus(res.data?.version?.status || currentStatus);
+                version = res.data?.version || null;
             }
+
+            if (!version) {
+                throw new Error('Policy draft could not be saved.');
+            }
+
+            setPolicy(version.values || policy);
+            setCurrentVersionId(version.id || null);
+            setCurrentStatus(version.status || 'DRAFT');
+            setMeta((prev) => ({
+                ...prev,
+                updated_at: version.updated_at || prev.updated_at,
+                updated_by: version.updated_by || prev.updated_by,
+                source: 'versioned',
+                policy_version_id: version.id || prev.policy_version_id,
+                status: version.status || prev.status
+            }));
             setMessage({ type: 'success', text: 'Draft policy saved.' });
         } catch (err: any) {
-            const detail = err?.response?.data?.detail || 'Failed to save policy updates.';
+            const detail = err?.response?.data?.detail || err?.message || 'Failed to save policy updates.';
             setMessage({ type: 'error', text: detail });
         } finally {
             setSaving(false);

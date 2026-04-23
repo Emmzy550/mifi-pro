@@ -25,6 +25,7 @@ import {
 import toast from 'react-hot-toast';
 import { api } from '../context/AuthContext';
 import { auth } from '../firebase';
+import { buildApiUrl } from '../utils/apiBaseUrl';
 
 const StatCard = ({ title, value, icon: Icon, color }: any) => (
     <div className="card">
@@ -47,27 +48,6 @@ const formatCurrency = (val: number, currency = 'ZMW') =>
 
 const formatLimit = (limit: number) => (limit >= 1000000000 ? 'Unlimited' : limit);
 const PDF_SIGNATURE = '%PDF-';
-const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
-
-const resolveReportApiBaseUrl = () => {
-    const configuredBaseUrl = import.meta.env.VITE_API_URL?.trim();
-    if (typeof window !== 'undefined' && LOCAL_HOSTS.has(window.location.hostname)) {
-        if (!configuredBaseUrl || configuredBaseUrl === '/api') {
-            return 'http://localhost:8000';
-        }
-    }
-
-    if (configuredBaseUrl) {
-        if (/^https?:\/\//i.test(configuredBaseUrl)) {
-            return configuredBaseUrl.replace(/\/$/, '');
-        }
-        if (typeof window !== 'undefined') {
-            return `${window.location.origin}${configuredBaseUrl.startsWith('/') ? '' : '/'}${configuredBaseUrl}`.replace(/\/$/, '');
-        }
-    }
-
-    return 'http://localhost:8000';
-};
 
 const isPdfPayload = (bytes: Uint8Array) => {
     if (bytes.length < PDF_SIGNATURE.length) return false;
@@ -117,7 +97,7 @@ export default function OrganizationReport() {
                 throw new Error('You need to be signed in before downloading the report.');
             }
 
-            const pdfUrl = `${resolveReportApiBaseUrl()}/org/report/pdf?days=${timeRange}&ts=${Date.now()}`;
+            const pdfUrl = buildApiUrl(`/org/report/pdf?days=${timeRange}&ts=${Date.now()}`);
             const res = await fetch(pdfUrl, {
                 method: 'GET',
                 cache: 'no-store',

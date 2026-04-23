@@ -16,6 +16,7 @@ This ensures regulatory compliance and protects against ML errors.
 
 import sys
 import os
+import math
 from typing import Dict, Any
 
 # Fix for direct execution: ensure project root is in path
@@ -32,7 +33,9 @@ from rules.lending_rules import (
     check_income_stability, 
     check_dti_ratio, 
     check_affordability,
-    check_critical_flags
+    check_critical_flags,
+    calculate_affordable_amount,
+    loan_term_months_from_days,
 )
 from utils.scoring import calculate_risk_score, derive_risk_level
 from utils.policy_context import policy_value
@@ -64,7 +67,11 @@ class RiskAgent:
     """
     
     @staticmethod
-    def evaluate(borrower: Borrower, external_behavioral_results: Dict[str, Any] = None) -> dict:
+    def evaluate(
+        borrower: Borrower,
+        external_behavioral_results: Dict[str, Any] = None,
+        requested_duration_days: int | None = None,
+    ) -> dict:
         """
         Runs the complete risk evaluation suite.
         ...
@@ -74,6 +81,28 @@ class RiskAgent:
         """
         flags = []
         data_source = "INTERNAL_HISTORY" # Default
+        underwriting_borrower = borrower
+        verified_monthly_income = None
+        verified_income_source = None
+        if external_behavioral_results:
+            verified_monthly_income = external_behavioral_results.get("verified_monthly_income")
+            verified_income_source = external_behavioral_results.get("verified_income_source", "PAYSLIP")
+            if verified_monthly_income is not None:
+                try:
+                    verified_monthly_income = float(verified_monthly_income)
+                except (TypeError, ValueError):
+                    verified_monthly_income = None
+            if verified_monthly_income is not None and verified_monthly_income > 0:
+                underwriting_borrower = borrower.model_copy(update={"monthly_income": verified_monthly_income})
+                logger.info(
+                    f"INFO: Using verified income for foundational risk rules: "
+                    f"{verified_monthly_income} from {verified_income_source}"
+                )
+
+        affordability_term_months = (
+            loan_term_months_from_days(requested_duration_days)
+            if requested_duration_days is not None else 12.0
+        )
         
         # ... (Step 1 Rules same) ...
         # [OMITTED for brevity in tool call, relying on Context matches]
@@ -81,27 +110,57 @@ class RiskAgent:
         # STEP 1: DETERMINISTIC RULES (Foundational Risk)
         # ====================================================================
         # Check basic financial health
-        if not check_income_stability(borrower):
+        if not check_income_stability(underwriting_borrower):
             flags.append("Warning: Income instability detected")
             
-        if check_dti_ratio(borrower) > policy_value("max_debt_to_income_ratio", config.MAX_DEBT_TO_INCOME_RATIO):
+        if check_dti_ratio(underwriting_borrower) > policy_value("max_debt_to_income_ratio", config.MAX_DEBT_TO_INCOME_RATIO):
             flags.append("High Risk: Debt-to-Income ratio exceeds 50%")
             
-        is_affordable, _ = check_affordability(borrower)
+        is_affordable, affordability_ratio = check_affordability(
+            underwriting_borrower,
+            loan_term_months=affordability_term_months,
+        )
+        affordable_amount = calculate_affordable_amount(
+            underwriting_borrower,
+            loan_term_months=affordability_term_months,
+        )
+        affordability_cap_required = (not is_affordable and affordable_amount > 0)
         if not is_affordable:
-            flags.append("Critical: Estimated inability to repay")
+            if affordability_cap_required:
+                flags.append("WARNING: AFFORDABILITY_CAP_REQUIRED")
+            else:
+                flags.append("CRITICAL: INSUFFICIENT_AFFORDABILITY")
             
         # Check specific regulatory/policy flags
-        _, critical_flags_list = check_critical_flags(borrower)
+        _, critical_flags_list = check_critical_flags(
+            underwriting_borrower,
+            loan_term_months=affordability_term_months,
+            allow_affordability_cap=True,
+        )
         flags.extend(critical_flags_list)
         
         # Calculate Base Score
-        rule_score = calculate_risk_score(borrower, flags)
+        rule_score = calculate_risk_score(underwriting_borrower, flags)
         
-        # Base metrics for display (Using stated income for DTI/Expense Context)
+        affordability_ratio_value = (
+            round(affordability_ratio, 4) if math.isfinite(affordability_ratio) else None
+        )
+        net_disposable_income = underwriting_borrower.monthly_income - underwriting_borrower.monthly_expenses
+
+        # Base metrics for display
         metrics = {
-            "dti_ratio": round(borrower.existing_debt / borrower.monthly_income, 2) if borrower.monthly_income > 0 else 1.0,
-            "expense_ratio": round(borrower.monthly_expenses / borrower.monthly_income, 2) if borrower.monthly_income > 0 else 1.0,
+            "dti_ratio": round(underwriting_borrower.existing_debt / underwriting_borrower.monthly_income, 2) if underwriting_borrower.monthly_income > 0 else 1.0,
+            "expense_ratio": round(underwriting_borrower.monthly_expenses / underwriting_borrower.monthly_income, 2) if underwriting_borrower.monthly_income > 0 else 1.0,
+            "net_disposable_income": round(net_disposable_income, 2),
+            "affordability_ratio": affordability_ratio_value,
+            "affordable_amount": round(affordable_amount, 2),
+            "affordability_cap_required": affordability_cap_required,
+            "affordability_term_months": round(affordability_term_months, 4),
+            "requested_duration_days": requested_duration_days,
+            "stated_monthly_income": borrower.monthly_income,
+            "verified_monthly_income": verified_monthly_income,
+            "verified_income_source": verified_income_source,
+            "risk_income_source": verified_income_source if verified_monthly_income is not None else "STATED",
         }
 
         # ====================================================================
@@ -116,7 +175,7 @@ class RiskAgent:
                 # unless passed in external_behavioral_results. 
                 # For now, we pass None to ML or fetching it from DB if needed.
                 # Simplified: Just pass borrower for V1.
-                ml_result = MLRiskAgent.predict(borrower)
+                ml_result = MLRiskAgent.predict(underwriting_borrower)
                 if "error" not in ml_result:
                     # STRICT: Rename to raw_score
                     ml_score = ml_result.get("prob_default", 0.0) # Assume agent still returns prob_default key internally
@@ -204,19 +263,14 @@ class RiskAgent:
         from agents.capacity_agent import CapacityAgent
         
         # Extract verified income if available (from payslip via unified profile)
-        verified_monthly_income = None
-        verified_income_source = None
-        if external_behavioral_results:
-            verified_monthly_income = external_behavioral_results.get("verified_monthly_income")
-            verified_income_source = external_behavioral_results.get("verified_income_source", "PAYSLIP")
-        
         capacity_results = CapacityAgent.calculate_demonstrated_capacity(
             borrower_id=borrower.id,
             risk_level=final_level,
             requested_amount=borrower.loan_amount_requested,
             external_transactions=external_behavioral_results.get("transactions") if external_behavioral_results else None,
             verified_monthly_income=verified_monthly_income,  # NEW: Pass verified income
-            verified_income_source=verified_income_source  # NEW: Pass source
+            verified_income_source=verified_income_source,  # NEW: Pass source
+            statement_summary=external_behavioral_results.get("statement_summary") if external_behavioral_results else None
         )
 
         statement_summary = external_behavioral_results.get("statement_summary") if external_behavioral_results else None

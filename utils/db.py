@@ -24,6 +24,8 @@ from models.follow_up_task import FollowUpTask
 from models.notification import Notification
 from models.demo_request import DemoRequest
 from models.document_insight import DocumentInsightRecord
+from models.borrower_communication import BorrowerCommunicationRecord, BorrowerContactPreference
+from models.borrower_note import BorrowerNote
 import logging
 logger = logging.getLogger(__name__)
 
@@ -211,6 +213,24 @@ class Database:
                 data["national_id"] = EncryptionAgent.decrypt(data["national_id"])
             results.append(Borrower(**data))
         return results
+
+    @classmethod
+    def list_assessments_by_borrower(
+        cls,
+        borrower_id: str,
+        organization_id: Optional[str] = None,
+    ) -> List[Assessment]:
+        assessments = cls.list_assessments(organization_id=organization_id)
+        return [assessment for assessment in assessments if assessment.borrower_id == borrower_id]
+
+    @classmethod
+    def list_loans_by_borrower(
+        cls,
+        borrower_id: str,
+        organization_id: Optional[str] = None,
+    ) -> List[Loan]:
+        loans = cls.list_loans(organization_id=organization_id)
+        return [loan for loan in loans if loan.borrower_id == borrower_id]
 
     @classmethod
     def save_assessment(cls, assessment: Assessment):
@@ -665,6 +685,19 @@ class Database:
         return [Payment(**doc.to_dict()) for doc in docs]
 
     @classmethod
+    def get_latest_active_payment(cls, org_id: str) -> Optional[Payment]:
+        from models.payment import ACTIVE_PAYMENT_STATUSES
+
+        active_payments = [
+            payment
+            for payment in cls.list_payments(org_id)
+            if payment.status in ACTIVE_PAYMENT_STATUSES
+        ]
+        if not active_payments:
+            return None
+        return sorted(active_payments, key=lambda item: item.timestamp, reverse=True)[0]
+
+    @classmethod
     def save_decision_export(cls, export: DecisionExport):
         db = cls.get_db()
         db.collection("decision_exports").document(export.id).set(export.model_dump(mode='json'))
@@ -752,6 +785,29 @@ class Database:
         return [SMSLog(**doc.to_dict()) for doc in docs]
 
     @classmethod
+    def list_sms_logs_for_borrower(
+        cls,
+        borrower_id: str,
+        organization_id: Optional[str] = None,
+    ) -> List[SMSLog]:
+        db = cls.get_db()
+        query = db.collection("sms_logs").where("borrower_id", "==", borrower_id)
+        docs = query.stream()
+        logs: List[SMSLog] = []
+        for doc in docs:
+            try:
+                log = SMSLog(**doc.to_dict())
+                if organization_id:
+                    assessment = cls.get_assessment(log.assessment_id)
+                    if not assessment or assessment.organization_id != organization_id:
+                        continue
+                logs.append(log)
+            except Exception as e:
+                logger.info(f"Skipping malformed sms log {doc.id}: {e}")
+        logs.sort(key=lambda item: item.sent_at, reverse=True)
+        return logs
+
+    @classmethod
     def delete_sms_logs(cls, assessment_id: str):
         db = cls.get_db()
         docs = db.collection("sms_logs").where("assessment_id", "==", assessment_id).stream()
@@ -765,6 +821,86 @@ class Database:
                 pass
         if hasattr(db, "save"):
             db.save()
+
+    @classmethod
+    def save_borrower_communication(cls, record: BorrowerCommunicationRecord):
+        db = cls.get_db()
+        db.collection("borrower_communications").document(record.communication_id).set(record.model_dump(mode="json"))
+        if hasattr(db, "save"):
+            db.save()
+
+    @classmethod
+    def list_borrower_communications(
+        cls,
+        borrower_id: str,
+        organization_id: Optional[str] = None,
+        loan_id: Optional[str] = None,
+    ) -> List[BorrowerCommunicationRecord]:
+        db = cls.get_db()
+        query = db.collection("borrower_communications").where("borrower_id", "==", borrower_id)
+        docs = query.stream()
+        records: List[BorrowerCommunicationRecord] = []
+        for doc in docs:
+            try:
+                record = BorrowerCommunicationRecord(**doc.to_dict())
+                if organization_id and record.organization_id != organization_id:
+                    continue
+                if loan_id and record.loan_id != loan_id:
+                    continue
+                records.append(record)
+            except Exception as e:
+                logger.info(f"Skipping malformed borrower communication {doc.id}: {e}")
+        records.sort(key=lambda item: item.sent_at or item.created_at, reverse=True)
+        return records
+
+    @classmethod
+    def save_borrower_contact_preference(cls, preference: BorrowerContactPreference):
+        db = cls.get_db()
+        doc_id = f"{preference.organization_id}:{preference.borrower_id}"
+        db.collection("borrower_contact_preferences").document(doc_id).set(preference.model_dump(mode="json"))
+        if hasattr(db, "save"):
+            db.save()
+
+    @classmethod
+    def get_borrower_contact_preference(
+        cls,
+        borrower_id: str,
+        organization_id: str,
+    ) -> Optional[BorrowerContactPreference]:
+        db = cls.get_db()
+        doc_id = f"{organization_id}:{borrower_id}"
+        doc = db.collection("borrower_contact_preferences").document(doc_id).get()
+        if doc.exists:
+            return BorrowerContactPreference(**doc.to_dict())
+        return None
+
+    @classmethod
+    def save_borrower_note(cls, note: BorrowerNote):
+        db = cls.get_db()
+        db.collection("borrower_notes").document(note.note_id).set(note.model_dump(mode="json"))
+        if hasattr(db, "save"):
+            db.save()
+
+    @classmethod
+    def list_borrower_notes(
+        cls,
+        borrower_id: str,
+        organization_id: Optional[str] = None,
+    ) -> List[BorrowerNote]:
+        db = cls.get_db()
+        query = db.collection("borrower_notes").where("borrower_id", "==", borrower_id)
+        docs = query.stream()
+        notes: List[BorrowerNote] = []
+        for doc in docs:
+            try:
+                note = BorrowerNote(**doc.to_dict())
+                if organization_id and note.organization_id != organization_id:
+                    continue
+                notes.append(note)
+            except Exception as e:
+                logger.info(f"Skipping malformed borrower note {doc.id}: {e}")
+        notes.sort(key=lambda item: item.created_at, reverse=True)
+        return notes
 
     # ------------------------------------------------------------------
     # Follow-up Tasks (Officer Workflow)

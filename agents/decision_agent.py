@@ -61,15 +61,24 @@ class DecisionAgent:
         risk_level = risk_data["risk_level"]
         flags = risk_data["flags"]
         capacity_validation = risk_data["capacity_validation"]
+        metrics = risk_data.get("metrics", {}) or {}
         
         # Extract capacity metrics
         capacity_based_max = capacity_validation["capacity_based_max"]
         starter_loan_applied = capacity_validation["starter_loan_applied"]
         observed_deposit_volume = capacity_validation["observed_deposit_volume"]
+        affordable_amount = float(metrics.get("affordable_amount") or 0.0)
+        affordability_ratio = metrics.get("affordability_ratio")
+        affordability_cap_required = bool(metrics.get("affordability_cap_required"))
+        affordability_term_months = metrics.get("affordability_term_months")
         
         # Start with optimistic defaults
         decision = Decision.APPROVE
         recommended_amount = borrower.loan_amount_requested
+        non_affordability_warnings = [
+            flag for flag in flags
+            if "WARNING" in str(flag).upper() and "AFFORDABILITY_CAP_REQUIRED" not in str(flag).upper()
+        ]
         
         # Track decision metadata for audit trail
         decision_metadata = {
@@ -80,6 +89,10 @@ class DecisionAgent:
             "policy_cap_reason": None,
             "starter_loan_applied": starter_loan_applied,
             "observed_deposit_volume": observed_deposit_volume,
+            "affordable_amount": affordable_amount,
+            "affordability_ratio": affordability_ratio,
+            "affordability_cap_required": affordability_cap_required,
+            "affordability_term_months": affordability_term_months,
             "transaction_count": capacity_validation.get("transaction_count", 0),
             "deposit_transaction_count": capacity_validation.get("audit_trail", {}).get("deposit_volume_calculation", {}).get("deposit_count", 0),
             "deposit_source": "MOBILE_MONEY_DEPOSITS_ONLY",
@@ -97,6 +110,32 @@ class DecisionAgent:
         min_duration_days = int(policy_value("min_duration_days", cap_config.MIN_DURATION_DAYS))
         max_duration_days = int(policy_value("max_duration_days", cap_config.MAX_DURATION_DAYS))
         starter_max_duration = int(policy_value("starter_loan_max_duration_days", cap_config.STARTER_LOAN_MAX_DURATION_DAYS))
+        starter_history_threshold_days = int(
+            policy_value("starter_history_threshold_days", cap_config.STARTER_HISTORY_THRESHOLD_DAYS)
+        )
+        starter_deposit_threshold = float(
+            policy_value("starter_deposit_threshold", cap_config.STARTER_DEPOSIT_THRESHOLD)
+        )
+        starter_loan_cap = float(
+            policy_value("starter_loan_cap", cap_config.STARTER_LOAN_CAP)
+        )
+        starter_policy_reasons = []
+        history_days = int(capacity_validation.get("history_days", 0) or 0)
+        if starter_loan_applied:
+            if history_days < starter_history_threshold_days:
+                starter_policy_reasons.append(
+                    f"verified history spans {history_days} days, below the {starter_history_threshold_days}-day starter threshold"
+                )
+            if observed_deposit_volume < starter_deposit_threshold:
+                starter_policy_reasons.append(
+                    f"observed deposit volume of {observed_deposit_volume:.2f} is below the {starter_deposit_threshold:.2f} starter-volume threshold"
+                )
+        decision_metadata.update({
+            "starter_history_threshold_days": starter_history_threshold_days,
+            "starter_deposit_threshold": starter_deposit_threshold,
+            "starter_loan_cap": starter_loan_cap,
+            "starter_policy_reasons": starter_policy_reasons,
+        })
 
         if requested_duration_days < min_duration_days:
             decision = Decision.REJECT
@@ -185,16 +224,41 @@ class DecisionAgent:
         if capacity_based_max > 0:
             # Apply hard cap to requested amount
             if recommended_amount > capacity_based_max:
+                cap_reason = "Exceeded safety limit based on observed transaction activity"
+                cap_type = "CAPACITY_CAP"
+                if starter_loan_applied:
+                    cap_type = "STARTER_POLICY_CAP"
+                    if starter_policy_reasons:
+                        cap_reason = "Starter loan policy applied because " + "; ".join(starter_policy_reasons)
+                    else:
+                        cap_reason = (
+                            f"Starter loan policy limited exposure to {starter_loan_cap:,.0f}"
+                        )
                 decision_metadata["adjustments_applied"].append({
-                    "type": "CAPACITY_CAP",
+                    "type": cap_type,
                     "original": recommended_amount,
                     "capped_to": capacity_based_max,
-                    "reason": "Exceeded safety limit based on observed transaction activity"
+                    "reason": cap_reason
                 })
                 recommended_amount = capacity_based_max
+
+            if affordability_cap_required and affordable_amount > 0 and recommended_amount > affordable_amount:
+                affordability_reason = (
+                    f"Requested duration of {requested_duration_days} days supports an affordable amount of "
+                    f"{affordable_amount:,.2f}"
+                )
+                decision_metadata["adjustments_applied"].append({
+                    "type": "AFFORDABILITY_CAP",
+                    "original": recommended_amount,
+                    "capped_to": affordable_amount,
+                    "reason": affordability_reason
+                })
+                recommended_amount = affordable_amount
+                decision_metadata["policy_cap_amount"] = recommended_amount
+                decision_metadata["policy_cap_reason"] = f"AFFORDABILITY_CAP_{requested_duration_days}_DAYS"
             
             # Risk Haircut for Medium Risk
-            if any("WARNING" in f.upper() for f in flags) or risk_level == "MEDIUM":
+            if non_affordability_warnings or risk_level == "MEDIUM":
                 risk_adjusted_amount = recommended_amount * config.CONDITIONAL_AMOUNT_MULTIPLIER
                 if risk_adjusted_amount < recommended_amount:
                     decision_metadata["adjustments_applied"].append({
@@ -232,7 +296,7 @@ class DecisionAgent:
         final_rate = config.BASE_INTEREST_RATE
 
         # Risk-based adjustment
-        if any("WARNING" in f.upper() for f in flags) or risk_level == "MEDIUM":
+        if non_affordability_warnings or risk_level == "MEDIUM":
             premium = config.CONDITIONAL_INTEREST_RATE - config.BASE_INTEREST_RATE
             rate_adjustments.append({"type": "MEDIUM_RISK_PREMIUM", "value": premium})
             final_rate += premium

@@ -111,7 +111,7 @@ def update_policy_draft(version_id: str, org_id: str, updated_by: str, values: D
     stored = doc.to_dict() or {}
     if stored.get("organization_id") != org_id:
         raise ValueError("Cross-organization access denied")
-    if stored.get("status") not in ["DRAFT", "SUBMITTED"]:
+    if stored.get("status") != "DRAFT":
         raise ValueError("Only draft versions can be updated")
     merged = {**(stored.get("values") or {}), **values}
     stored["values"] = merged
@@ -128,6 +128,11 @@ def set_policy_status(version_id: str, org_id: str, status: str, actor: str) -> 
     stored = doc.to_dict() or {}
     if stored.get("organization_id") != org_id:
         raise ValueError("Cross-organization access denied")
+    current_status = stored.get("status")
+    if status == "SUBMITTED" and current_status != "DRAFT":
+        raise ValueError("Only draft versions can be submitted")
+    if status == "APPROVED" and current_status != "SUBMITTED":
+        raise ValueError("Only submitted versions can be approved")
     stored["status"] = status
     stored["updated_at"] = _now_iso()
     stored["updated_by"] = actor
@@ -149,6 +154,8 @@ def activate_policy_version(version_id: str, org_id: str, actor: str) -> Dict[st
     stored = doc.to_dict() or {}
     if stored.get("organization_id") != org_id:
         raise ValueError("Cross-organization access denied")
+    if stored.get("status") != "APPROVED":
+        raise ValueError("Only approved versions can be activated")
 
     # Archive existing active versions
     for v in list_policy_versions(org_id):

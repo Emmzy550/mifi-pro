@@ -1,9 +1,9 @@
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@900&family=DM+Sans:wght@200;300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,600;6..72,700&family=Sora:wght@400;500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-
-@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@900&family=DM+Sans:wght@200;300;400;500;600;700&display=swap');
-@import url('https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,600;6..72,700&family=Sora:wght@400;500;600;700&display=swap');
 
 :root {
     --ui-bg: #f6f8fb;
@@ -30,6 +30,13 @@
     --foreground: var(--dc-text-primary);
     --muted-foreground: var(--dc-text-secondary);
     --border: var(--dc-border-subtle);
+    --workspace-gap-sm: 0.75rem;
+    --workspace-gap-md: 1rem;
+    --workspace-gap-lg: 1.5rem;
+    --workspace-gap-xl: 2rem;
+    --workspace-radius-md: 1rem;
+    --workspace-radius-lg: 1.25rem;
+    --workspace-radius-xl: 1.75rem;
 }
 
 @layer base {
@@ -67,6 +74,37 @@
 
     .border-border {
         border-color: var(--border);
+    }
+}
+
+@layer components {
+    .workspace-field {
+        @apply w-full rounded-2xl border border-subtle bg-surface-2 px-3 py-3 text-sm text-ui-primary outline-none focus:ring-2 focus:ring-primary/20;
+    }
+
+    .workspace-field-muted {
+        @apply w-full rounded-2xl border border-subtle bg-card px-3 py-3 text-sm text-ui-primary outline-none focus:ring-2 focus:ring-primary/20;
+    }
+
+    .workspace-table {
+        @apply min-w-full text-sm;
+    }
+
+    .workspace-table thead tr {
+        @apply border-b border-subtle text-left text-[11px] uppercase tracking-[0.16em] text-muted-foreground;
+    }
+
+    .workspace-table th {
+        @apply pb-3 pr-4 font-semibold;
+    }
+
+    .workspace-table td {
+        @apply py-4 pr-4 align-top;
+    }
+
+    .workspace-table tbody tr {
+        @apply border-b last:border-b-0;
+        border-color: var(--dc-border-subtle);
     }
 }
 

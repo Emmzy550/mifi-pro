@@ -1,24 +1,40 @@
-import React, { useState, useEffect } from 'react';
-import { CreditCard, TrendingUp, Calendar, AlertCircle, Shield, Rocket, X, Globe, Smartphone, Landmark, CheckCircle2, Download, FileText } from 'lucide-react';
-import { useAuth, api } from '../context/AuthContext';
+import React, { useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { AlertCircle, CreditCard, Download, Shield, TrendingUp } from 'lucide-react';
 import toast from 'react-hot-toast';
+import PaymentFlowModal from '../components/billing/PaymentFlowModal';
+import {
+    PaymentFlowStage,
+    PaymentGatewayChoice,
+    PaymentResult,
+    ACTIVE_STATUSES,
+    TERMINAL_STATUSES,
+    deriveFlowStageFromPayment,
+    flowDescription,
+    flowTitle,
+    isActivePayment,
+    isResumablePayment,
+    normalizePayment,
+    statusLabel,
+    statusTone,
+} from '../components/billing/paymentFlow';
+import { api, useAuth } from '../context/AuthContext';
 
-interface UsageRecord {
+type UsageRecord = {
     usage: number;
     limit: number;
     status: string;
-}
+};
 
-interface UsageSummary {
+type UsageSummary = {
     sandbox: UsageRecord;
     production: UsageRecord;
     current_plan: string;
     billing_status: string;
     payment_status: string;
     period_end: string;
-}
+};
 
-interface PlanConfig {
+type PlanConfig = {
     name: string;
     price: number | null;
     currency: string;
@@ -26,222 +42,464 @@ interface PlanConfig {
     user_limit: number | null;
     description?: string;
     features?: string[];
-}
+};
+
+type FlowState = {
+    modalOpen: boolean;
+    stage: PaymentFlowStage;
+    selectedPlan: string | null;
+    selectedGateway: PaymentGatewayChoice;
+    phoneNumber: string;
+    payment: PaymentResult | null;
+};
+
+type FlowAction =
+    | { type: 'OPEN_CHECKOUT'; plan: string; gateway?: PaymentGatewayChoice; phoneNumber?: string }
+    | { type: 'RESUME_PAYMENT'; payment: PaymentResult; source?: 'resume' | 'poll' | 'cancel'; modalOpen?: boolean }
+    | { type: 'SET_GATEWAY'; gateway: PaymentGatewayChoice }
+    | { type: 'SET_PHONE'; phoneNumber: string }
+    | { type: 'START_REQUEST' }
+    | { type: 'REQUEST_CREATED'; payment: PaymentResult }
+    | { type: 'ADVANCE_TO_WAITING' }
+    | { type: 'HIDE_MODAL' }
+    | { type: 'PREPARE_RETRY' }
+    | { type: 'CLOSE_AND_RESET' };
 
 const PLAN_ORDER = ['STARTER', 'STANDARD', 'GROWTH', 'ENTERPRISE'];
 const PLAN_META: Record<string, { anchorId: string; highlight?: boolean }> = {
     STARTER: { anchorId: 'plan-starter' },
     STANDARD: { anchorId: 'plan-standard', highlight: true },
     GROWTH: { anchorId: 'plan-growth' },
-    ENTERPRISE: { anchorId: 'plan-enterprise' }
+    ENTERPRISE: { anchorId: 'plan-enterprise' },
 };
-const PHONE_INPUT_MAX_LENGTH = 16;
 const ENTERPRISE_FEATURES = [
     'Custom assessment volumes',
     'Unlimited officer seats',
     'Dedicated onboarding support',
     'SLA-backed support',
-    'Custom policy configuration'
+    'Custom policy configuration',
 ];
 
-const formatPlanPrice = (amount: number | null, currency: string) => {
-    if (amount == null) return 'Custom';
-    if (currency === 'ZMW') return `K${amount.toLocaleString()}`;
-    return `${currency} ${amount.toLocaleString()}`;
+const initialFlowState: FlowState = {
+    modalOpen: false,
+    stage: 'idle',
+    selectedPlan: null,
+    selectedGateway: 'LIPILA',
+    phoneNumber: '',
+    payment: null,
 };
 
-const formatCurrencyAmount = (amount: number | null | undefined, currency = 'ZMW') => {
-    if (amount == null) return `${currency === 'ZMW' ? 'K' : `${currency} `}0`;
-    if (currency === 'ZMW') return `K${Number(amount).toLocaleString()}`;
-    return `${currency} ${Number(amount).toLocaleString()}`;
-};
-
-const formatPlanLimit = (limit: number | null) => (limit == null ? 'Unlimited' : limit.toLocaleString());
-const prettifyFeature = (feature: string) => feature.includes(' ') ? feature : feature.replace(/[_-]+/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
-
-const COLOR_CLASSES: Record<string, { bar: string, icon: string, badge: string }> = {
-    slate: {
-        bar: 'bg-indigo-600',
-        icon: 'text-indigo-600',
-        badge: 'bg-indigo-50 text-indigo-700'
-    },
-    blue: {
-        bar: 'bg-blue-600',
-        icon: 'text-blue-600',
-        badge: 'bg-blue-50 text-blue-700'
+function paymentFlowReducer(state: FlowState, action: FlowAction): FlowState {
+    switch (action.type) {
+        case 'OPEN_CHECKOUT':
+            return {
+                modalOpen: true,
+                stage: 'checkout',
+                selectedPlan: action.plan,
+                selectedGateway: action.gateway || state.selectedGateway || 'LIPILA',
+                phoneNumber: action.phoneNumber ?? state.phoneNumber,
+                payment: null,
+            };
+        case 'RESUME_PAYMENT':
+            return {
+                ...state,
+                modalOpen: action.modalOpen ?? true,
+                stage: deriveFlowStageFromPayment(action.payment, action.source || 'resume'),
+                selectedPlan: action.payment.plan || state.selectedPlan,
+                selectedGateway: action.payment.gateway || state.selectedGateway,
+                phoneNumber: action.payment.phone_number || state.phoneNumber,
+                payment: action.payment,
+            };
+        case 'SET_GATEWAY':
+            return { ...state, selectedGateway: action.gateway };
+        case 'SET_PHONE':
+            return { ...state, phoneNumber: action.phoneNumber };
+        case 'START_REQUEST':
+            return { ...state, modalOpen: true, stage: 'creating_request', payment: null };
+        case 'REQUEST_CREATED':
+            return {
+                ...state,
+                modalOpen: true,
+                stage: deriveFlowStageFromPayment(action.payment, 'init'),
+                selectedPlan: action.payment.plan || state.selectedPlan,
+                selectedGateway: action.payment.gateway || state.selectedGateway,
+                phoneNumber: action.payment.phone_number || state.phoneNumber,
+                payment: action.payment,
+            };
+        case 'ADVANCE_TO_WAITING':
+            if (state.stage !== 'prompt_sent' || !state.payment || !ACTIVE_STATUSES.has(state.payment.status)) {
+                return state;
+            }
+            return { ...state, stage: 'awaiting_approval' };
+        case 'HIDE_MODAL':
+            return { ...state, modalOpen: false };
+        case 'PREPARE_RETRY':
+            return { ...state, modalOpen: true, stage: 'checkout', payment: null };
+        case 'CLOSE_AND_RESET':
+            return initialFlowState;
+        default:
+            return state;
     }
-};
+}
 
-const UsageCard = ({ title, record, icon: Icon, color }: { title: string, record?: UsageRecord, icon: any, color: string }) => {
+const fmtMoney = (amount?: number | null, currency = 'ZMW') =>
+    currency === 'ZMW' ? `K${Number(amount || 0).toLocaleString()}` : `${currency} ${Number(amount || 0).toLocaleString()}`;
+const fmtPrice = (amount: number | null, currency: string) => (amount == null ? 'Custom' : fmtMoney(amount, currency));
+const fmtLimit = (limit: number | null) => (limit == null ? 'Unlimited' : limit.toLocaleString());
+const prettify = (value: string) =>
+    value.includes(' ') ? value : value.replace(/[_-]+/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+const extractError = (err: any) =>
+    err?.response?.data?.detail?.message ||
+    err?.response?.data?.detail ||
+    err?.response?.data?.message ||
+    err?.message ||
+    'Something went wrong.';
+const extractConflict = (err: any) =>
+    err?.response?.status === 409 && err?.response?.data?.detail?.payment
+        ? normalizePayment(err.response.data.detail.payment)
+        : null;
+const sortPayments = (items: PaymentResult[]) =>
+    [...items].sort((left, right) => new Date(right.timestamp || 0).getTime() - new Date(left.timestamp || 0).getTime());
+
+function UsageCard({ title, record, icon: Icon }: { title: string; record?: UsageRecord; icon: any }) {
     if (!record) return null;
-    const percent = (record.usage / record.limit) * 100;
-    const theme = COLOR_CLASSES[color] || COLOR_CLASSES.blue;
+    const safeLimit = record.limit > 0 ? record.limit : record.usage || 1;
+    const pct = (record.usage / safeLimit) * 100;
 
     return (
-        <div className="bg-white rounded-lg border border-slate-200 p-6">
-            <div className="flex items-center justify-between mb-4">
+        <div className="rounded-lg border border-slate-200 bg-white p-6">
+            <div className="mb-4 flex items-center justify-between">
                 <div className="flex items-center gap-3">
-                    <Icon className={theme.icon} size={24} />
+                    <Icon className="text-primary" size={22} />
                     <h3 className="font-semibold text-slate-900">{title}</h3>
                 </div>
-                <span className={`px-2 py-1 rounded-md text-xs font-bold uppercase tracking-wider ${theme.badge}`}>
+                <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-bold uppercase tracking-wider text-slate-700">
                     {record.status}
                 </span>
             </div>
-
             <div className="mb-4">
                 <p className="text-3xl font-bold text-slate-900">{record.usage.toLocaleString()}</p>
-                <p className="text-sm text-slate-500">of {record.limit >= 1000000 ? 'Unlimited' : record.limit.toLocaleString()} assessments</p>
-            </div>
-
-            <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden mb-2">
-                <div
-                    className={`h-full transition-all duration-1000 ${percent >= 100 ? 'bg-red-600' : percent >= 90 ? 'bg-red-500' : percent >= 75 ? 'bg-yellow-500' : theme.bar}`}
-                    style={{ width: `${Math.min(percent, 100)}%` }}
-                />
-            </div>
-            <div className="flex justify-between items-center text-xs">
-                <p className={`${percent >= 100 ? 'text-red-600 font-semibold' : 'text-slate-400'}`}>
-                    {percent >= 100 ? 'Limit Exhausted' : `${percent.toFixed(0)}% of ${title.toLowerCase().includes('sandbox') ? 'sandbox' : 'production'} limit used`}
+                <p className="text-sm text-slate-500">
+                    of {record.limit >= 1000000 ? 'Unlimited' : record.limit.toLocaleString()} assessments
                 </p>
-                {percent >= 100 && record.status === 'Free' && (
-                    <span className="text-red-600 font-medium">Upgrade Required</span>
-                )}
+            </div>
+            <div className="mb-2 h-2 w-full overflow-hidden rounded-full bg-slate-100">
+                <div
+                    className={`h-full ${pct >= 100 ? 'bg-red-600' : pct >= 75 ? 'bg-yellow-500' : 'bg-primary'}`}
+                    style={{ width: `${Math.min(pct, 100)}%` }}
+                />
             </div>
         </div>
     );
-};
+}
+
+function Pill({ status }: { status: PaymentResult['status'] }) {
+    return (
+        <span className={`rounded-md px-2 py-1 text-[10px] font-bold uppercase tracking-wider ${statusTone(status)}`}>
+            {statusLabel(status)}
+        </span>
+    );
+}
 
 export default function UsageBilling() {
     const { user } = useAuth();
     const [usage, setUsage] = useState<UsageSummary | null>(null);
     const [plans, setPlans] = useState<Record<string, PlanConfig>>({});
+    const [payments, setPayments] = useState<PaymentResult[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
-    const [showPaymentModal, setShowPaymentModal] = useState(false);
-    const [selectedPlan, setSelectedPlan] = useState<string | null>(null);
-    const [selectedGateway, setSelectedGateway] = useState<string>('LIPILA');
-    const [phoneNumber, setPhoneNumber] = useState('');
-    const [upgrading, setUpgrading] = useState(false);
-    const [paymentResult, setPaymentResult] = useState<any>(null);
-    const [payments, setPayments] = useState<any[]>([]);
-    const [refreshingPaymentStatus, setRefreshingPaymentStatus] = useState(false);
-
-    useEffect(() => {
-        fetchUsage();
-        fetchPayments();
-        fetchPlans();
-    }, []);
+    const [startingRequest, setStartingRequest] = useState(false);
+    const [cancellingRequest, setCancellingRequest] = useState(false);
+    const [flow, dispatch] = useReducer(paymentFlowReducer, initialFlowState);
+    const pollAbortRef = useRef<AbortController | null>(null);
+    const announcedTerminalRef = useRef<Set<string>>(new Set());
+    const startRequestLockRef = useRef(false);
 
     const fetchUsage = async () => {
-        try {
-            const response = await api.get('/billing/usage');
-            setUsage(response.data);
-        } catch (err: any) {
-            setError(err.response?.data?.detail || err.message);
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    const fetchPayments = async () => {
-        try {
-            const response = await api.get('/billing/payments');
-            setPayments(response.data);
-        } catch (err) {
-            console.error('Failed to fetch payments', err);
-        }
+        const res = await api.get('/billing/usage');
+        setUsage(res.data);
+        return res.data as UsageSummary;
     };
 
     const fetchPlans = async () => {
-        try {
-            const response = await api.get('/billing/plans');
-            setPlans(response.data || {});
-        } catch (err) {
-            console.error('Failed to fetch billing plans', err);
+        const res = await api.get('/billing/plans');
+        setPlans(res.data || {});
+        return res.data || {};
+    };
+
+    const fetchPayments = async () => {
+        const res = await api.get('/billing/payments');
+        const next = Array.isArray(res.data) ? res.data.map(normalizePayment) : [];
+        setPayments(sortPayments(next));
+        return next;
+    };
+
+    const upsertPayment = (payment: PaymentResult) => {
+        if (!payment.payment_id) return;
+        setPayments((current) => {
+            const index = current.findIndex((item) => item.payment_id === payment.payment_id);
+            if (index === -1) return sortPayments([payment, ...current]);
+            const next = [...current];
+            next[index] = { ...next[index], ...payment };
+            return sortPayments(next);
+        });
+    };
+
+    useEffect(() => {
+        let cancelled = false;
+
+        const bootstrap = async () => {
+            setLoading(true);
+            try {
+                await fetchUsage();
+            } catch (err: any) {
+                if (!cancelled) setError(extractError(err));
+            }
+
+            await Promise.all([
+                fetchPlans().catch((err) => console.error('Failed to fetch plans', err)),
+                fetchPayments().catch((err) => console.error('Failed to fetch payments', err)),
+            ]);
+
+            if (!cancelled) setLoading(false);
+        };
+
+        void bootstrap();
+
+        return () => {
+            cancelled = true;
+            pollAbortRef.current?.abort();
+            pollAbortRef.current = null;
+        };
+    }, []);
+
+    const monitoredPayment = useMemo(() => {
+        if (isActivePayment(flow.payment)) return flow.payment;
+        return payments.find((item) => isActivePayment(item)) || null;
+    }, [flow.payment, payments]);
+
+    const resumablePayment = useMemo(() => {
+        if (isResumablePayment(flow.payment)) return flow.payment;
+        return payments.find((item) => isResumablePayment(item)) || null;
+    }, [flow.payment, payments]);
+
+    useEffect(() => {
+        const currentPayment = flow.payment;
+        if (!currentPayment?.payment_id) return;
+        const latest = payments.find((item) => item.payment_id === currentPayment.payment_id);
+        if (!latest) return;
+        const hasChanged =
+            latest.status !== currentPayment.status ||
+            latest.message !== currentPayment.message ||
+            latest.gateway_status !== currentPayment.gateway_status ||
+            latest.cancelled_at !== currentPayment.cancelled_at ||
+            latest.cancel_deadline_at !== currentPayment.cancel_deadline_at;
+        if (hasChanged) {
+            dispatch({ type: 'RESUME_PAYMENT', payment: latest, source: 'poll', modalOpen: flow.modalOpen });
+        }
+    }, [
+        payments,
+        flow.modalOpen,
+        flow.payment?.payment_id,
+        flow.payment?.status,
+        flow.payment?.message,
+        flow.payment?.gateway_status,
+        flow.payment?.cancelled_at,
+        flow.payment?.cancel_deadline_at,
+    ]);
+
+    useEffect(() => {
+        if (!flow.modalOpen || flow.stage !== 'prompt_sent') return;
+        const handle = window.setTimeout(() => dispatch({ type: 'ADVANCE_TO_WAITING' }), 1500);
+        return () => window.clearTimeout(handle);
+    }, [flow.modalOpen, flow.stage, flow.payment?.payment_id]);
+
+    const syncTerminalSideEffects = async (payment: PaymentResult) => {
+        const signature = `${payment.payment_id}:${payment.status}`;
+        if (announcedTerminalRef.current.has(signature)) return;
+        announcedTerminalRef.current.add(signature);
+
+        await fetchPayments().catch((err) => console.error('Failed to refresh payment history', err));
+
+        if (payment.status === 'SUCCESS') {
+            await fetchUsage().catch((err) => console.error('Failed to refresh usage after payment success', err));
+            toast.success('Payment approved. Subscription updated.');
+            return;
+        }
+
+        if (payment.status === 'CANCELLED') {
+            toast.success('Payment request cancelled.');
+            return;
+        }
+
+        if (payment.status === 'FAILED') {
+            toast.error(payment.message || 'Payment failed. You can try again.');
+            return;
+        }
+
+        if (payment.status === 'EXPIRED') {
+            toast.error(payment.message || 'Payment request expired. Create a new one to continue.');
         }
     };
 
-    const handlePlanSelect = (plan: string) => {
-        setSelectedPlan(plan);
-        setShowPaymentModal(true);
-    };
-
-    const handleCustomPlanInquiry = () => {
-        toast.success('Custom pricing is available. Please contact support to activate a tailored plan.');
-    };
-
-    const handleUpgrade = async (gateway: string) => {
-        if (!selectedPlan) return;
-
-        setUpgrading(true);
-        setError('');
-        try {
-            const response = await api.post('/billing/upgrade', {
-                plan: selectedPlan,
-                gateway,
-                phone_number: phoneNumber.trim()
+    const applyPaymentSnapshot = async (
+        payment: PaymentResult,
+        source: 'init' | 'resume' | 'poll' | 'cancel',
+        options: { openModal?: boolean } = {}
+    ) => {
+        upsertPayment(payment);
+        if (source === 'init') {
+            dispatch({ type: 'REQUEST_CREATED', payment });
+        } else {
+            dispatch({
+                type: 'RESUME_PAYMENT',
+                payment,
+                source,
+                modalOpen: options.openModal ?? flow.modalOpen,
             });
+        }
 
-            const result = response.data;
-            setPaymentResult(result);
+        if (TERMINAL_STATUSES.has(payment.status)) {
+            await syncTerminalSideEffects(payment);
+        }
+    };
 
-            if (gateway === 'LIPILA') {
-                // Keep modal open to show instructions
-            } else if (gateway === 'BANK') {
-                // Keep modal open to show invoice
-            } else {
-                // Redirect for Stripe/Card
-                if (result.status === 'PAID') {
-                    // Simulation success - just show the modal success state
-                    fetchUsage();
-                } else if (result.checkout_url) {
-                    window.location.href = result.checkout_url;
+    const refreshStatus = async (paymentId: string, signal?: AbortSignal) => {
+        const res = await api.get(`/billing/payment/${paymentId}/status`, { signal });
+        const latest = normalizePayment(res.data);
+        await applyPaymentSnapshot(latest, 'poll');
+    };
+
+    useEffect(() => {
+        if (!monitoredPayment?.payment_id) {
+            pollAbortRef.current?.abort();
+            pollAbortRef.current = null;
+            return;
+        }
+
+        let disposed = false;
+        console.info('[billing] payment status polling started', {
+            paymentId: monitoredPayment.payment_id,
+            status: monitoredPayment.status,
+        });
+
+        const tick = async () => {
+            if (disposed) return;
+            const controller = new AbortController();
+            pollAbortRef.current?.abort();
+            pollAbortRef.current = controller;
+            try {
+                await refreshStatus(monitoredPayment.payment_id, controller.signal);
+            } catch (err: any) {
+                if (err?.name !== 'CanceledError' && err?.code !== 'ERR_CANCELED') {
+                    console.error('Failed to refresh payment status', err);
                 }
             }
+        };
 
-            fetchUsage();
-            fetchPayments();
-        } catch (err: any) {
-            toast.error(err.response?.data?.detail || err.message);
-        } finally {
-            setUpgrading(false);
-        }
-    };
+        void tick();
+        const handle = window.setInterval(() => void tick(), monitoredPayment.recommended_poll_interval_ms || 4000);
 
-    const refreshPaymentStatus = async (paymentId: string, silent = false) => {
-        if (!paymentId) return;
-
-        if (!silent) setRefreshingPaymentStatus(true);
-        try {
-            const response = await api.get(`/billing/payment/${paymentId}/status`);
-            const latest = response.data;
-            setPaymentResult((current: any) => current ? { ...current, ...latest } : latest);
-            if (!silent || latest.status !== 'PENDING') {
-                fetchPayments();
-            }
-            if (latest.status === 'PAID') {
-                fetchUsage();
-                fetchPayments();
-                if (!silent) toast.success('Payment confirmed.');
-            } else if (latest.status === 'FAILED' && !silent) {
-                toast.error(latest.gateway_message || 'Payment failed.');
-            }
-        } catch (err: any) {
-            if (!silent) {
-                toast.error(err.response?.data?.detail || err.message);
-            }
-        } finally {
-            if (!silent) setRefreshingPaymentStatus(false);
-        }
-    };
-
-    const handleDownloadInvoice = async (paymentId: string) => {
-        try {
-            const response = await api.get(`/billing/invoice/${paymentId}`, {
-                responseType: 'blob'
+        return () => {
+            disposed = true;
+            console.info('[billing] payment status polling stopped', {
+                paymentId: monitoredPayment.payment_id,
             });
-            const blob = new Blob([response.data], { type: 'application/pdf' });
+            window.clearInterval(handle);
+            pollAbortRef.current?.abort();
+            pollAbortRef.current = null;
+        };
+    }, [monitoredPayment?.payment_id, monitoredPayment?.recommended_poll_interval_ms, monitoredPayment?.status]);
+
+    const startPayment = async () => {
+        if (!flow.selectedPlan || startRequestLockRef.current) return;
+        if (monitoredPayment) {
+            dispatch({
+                type: 'RESUME_PAYMENT',
+                payment: monitoredPayment,
+                source: 'resume',
+                modalOpen: true,
+            });
+            toast.error(
+                monitoredPayment.status === 'CANCELLING'
+                    ? 'A cancellation is still being confirmed. Wait for it to finish before starting a new request.'
+                    : 'A payment request is already active. Resume it or cancel it before starting another.'
+            );
+            return;
+        }
+
+        startRequestLockRef.current = true;
+        dispatch({ type: 'START_REQUEST' });
+        setStartingRequest(true);
+        console.info('[billing] payment request creation started', {
+            plan: flow.selectedPlan,
+            gateway: flow.selectedGateway,
+        });
+
+        try {
+            const res = await api.post('/billing/upgrade', {
+                plan: flow.selectedPlan,
+                gateway: flow.selectedGateway,
+                phone_number: flow.phoneNumber.trim(),
+            });
+            const next = normalizePayment(res.data);
+            await applyPaymentSnapshot(next, 'init', { openModal: true });
+            if (next.checkout_url) window.location.href = next.checkout_url;
+        } catch (err: any) {
+            const existing = extractConflict(err);
+            if (existing) {
+                await applyPaymentSnapshot(existing, 'resume', { openModal: true });
+                toast.error(
+                    existing.status === 'CANCELLING'
+                        ? 'A cancellation is still being confirmed. Wait for it to finish before starting a new request.'
+                        : 'A payment request is already active. Resume it or cancel it before starting another.'
+                );
+            } else {
+                toast.error(extractError(err));
+                dispatch({
+                    type: 'OPEN_CHECKOUT',
+                    plan: flow.selectedPlan,
+                    gateway: flow.selectedGateway,
+                    phoneNumber: flow.phoneNumber,
+                });
+            }
+        } finally {
+            setStartingRequest(false);
+            startRequestLockRef.current = false;
+        }
+    };
+
+    const cancelPayment = async (payment = monitoredPayment) => {
+        if (!payment?.payment_id) return;
+        if (payment.status === 'CANCELLING') return;
+
+        setCancellingRequest(true);
+        dispatch({
+            type: 'RESUME_PAYMENT',
+            payment: { ...payment, status: 'CANCELLING', message: 'Cancelling payment request...' },
+            source: 'cancel',
+            modalOpen: true,
+        });
+        console.info('[billing] payment cancellation requested', { paymentId: payment.payment_id });
+
+        try {
+            pollAbortRef.current?.abort();
+            const res = await api.post(`/billing/payment/${payment.payment_id}/cancel`);
+            const next = normalizePayment(res.data);
+            await applyPaymentSnapshot(next, 'cancel', { openModal: true });
+            toast.success('Cancellation requested. Waiting for final confirmation.');
+        } catch (err: any) {
+            toast.error(extractError(err));
+            dispatch({ type: 'RESUME_PAYMENT', payment, source: 'resume', modalOpen: flow.modalOpen });
+        } finally {
+            setCancellingRequest(false);
+        }
+    };
+
+    const downloadInvoice = async (paymentId: string) => {
+        try {
+            const res = await api.get(`/billing/invoice/${paymentId}`, { responseType: 'blob' });
+            const blob = new Blob([res.data], { type: 'application/pdf' });
             const url = window.URL.createObjectURL(blob);
             const link = document.createElement('a');
             link.href = url;
@@ -250,105 +508,128 @@ export default function UsageBilling() {
             link.click();
             link.remove();
             window.URL.revokeObjectURL(url);
-        } catch (err: any) {
-            console.error('Failed to download invoice', err);
-            toast.error('Failed to download invoice. Please verify your session.');
+        } catch (err) {
+            toast.error('Failed to download invoice.');
         }
     };
 
-    if (loading) return <div className="p-8 text-center text-slate-500">Loading billing data...</div>;
-    if (error) return <div className="p-8 bg-red-50 text-red-600 rounded-lg">{error}</div>;
-    if (!usage) return null;
+    const dismissModal = () => {
+        if (flow.payment && isActivePayment(flow.payment)) {
+            dispatch({ type: 'HIDE_MODAL' });
+            return;
+        }
+        dispatch({ type: 'CLOSE_AND_RESET' });
+    };
 
-    const isAdmin = user?.role === 'ORG_ADMIN' || user?.role === 'SUPER_ADMIN';
-    const isLipilaPending = selectedGateway === 'LIPILA' && paymentResult?.status === 'PENDING';
-    const paymentTitle = selectedGateway === 'BANK'
-        ? 'Invoice Generated'
-        : isLipilaPending
-            ? 'Request Pending'
-            : paymentResult?.status === 'PAID'
-                ? 'Payment Confirmed'
-                : paymentResult?.status === 'FAILED'
-                    ? 'Payment Failed'
-                    : 'Payment Update';
+    const openPlan = (plan: string) => {
+        if (monitoredPayment) {
+            dispatch({ type: 'RESUME_PAYMENT', payment: monitoredPayment, source: 'resume', modalOpen: true });
+            return;
+        }
+        dispatch({ type: 'OPEN_CHECKOUT', plan, gateway: 'LIPILA' });
+    };
+
+    const activeFlowStage = monitoredPayment ? deriveFlowStageFromPayment(monitoredPayment, 'poll') : null;
+    const requestInProgress = Boolean(monitoredPayment);
+    const requestActionLabel =
+        monitoredPayment?.status === 'CANCELLING'
+            ? 'Cancellation pending'
+            : resumablePayment
+              ? 'Resume active request'
+              : requestInProgress
+                ? 'Payment in progress'
+                : startingRequest
+                  ? 'Creating request...'
+                  : 'Upgrade';
+
+    if (loading) return <div className="p-8 text-center text-slate-500">Loading billing data...</div>;
+    if (error) return <div className="rounded-lg bg-red-50 p-8 text-red-600">{error}</div>;
+    if (!usage) return null;
 
     return (
         <div className="space-y-8">
             <div className="flex items-center justify-between">
                 <div>
-                    <h1 className="text-3xl font-bold text-slate-900">Usage & Billing</h1>
-                    <p className="text-slate-500 mt-1">Reflects organization-wide usage across all environments</p>
+                    <h1 className="text-3xl font-bold text-slate-900">Usage &amp; Billing</h1>
+                    <p className="mt-1 text-slate-500">Reflects organization-wide usage across all environments</p>
                 </div>
                 {usage.payment_status === 'PAID' ? (
-                    <div className="flex items-center gap-2 bg-green-50 text-green-700 px-4 py-2 rounded-full text-sm font-bold border border-green-100">
+                    <div className="flex items-center gap-2 rounded-full border border-green-100 bg-green-50 px-4 py-2 text-sm font-bold text-green-700">
                         <Shield size={16} />
                         Live Account Active
                     </div>
                 ) : (
-                    <div className="flex items-center gap-2 bg-orange-50 text-orange-700 px-4 py-2 rounded-full text-sm font-bold border border-orange-100">
+                    <div className="flex items-center gap-2 rounded-full border border-orange-100 bg-orange-50 px-4 py-2 text-sm font-bold text-orange-700">
                         <AlertCircle size={16} />
                         Sandbox Mode
                     </div>
                 )}
             </div>
 
-            {usage.payment_status !== 'PAID' && (
-                <div className="bg-slate-900 text-white p-6 rounded-lg flex items-center justify-between gap-6 relative overflow-hidden group">
-                    <div className="relative z-10">
-                        <h3 className="text-xl font-semibold mb-2">Unlock Production API Access</h3>
-                        <p className="text-slate-400 text-sm max-w-xl leading-relaxed">
-                            You’re currently using the sandbox. Complete payment to unlock live decision processing for your MFI.
-                            Our production engine is strictly conservative and rationally consistent.
-                        </p>
+            {monitoredPayment && activeFlowStage && (
+                <div className="rounded-2xl border border-sky-200 bg-sky-50/80 px-5 py-4">
+                    <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                        <div>
+                            <div className="text-sm font-semibold text-sky-900">{flowTitle(activeFlowStage, monitoredPayment)}</div>
+                            <p className="mt-1 text-sm text-sky-800">{flowDescription(activeFlowStage, monitoredPayment)}</p>
+                            <p className="mt-1 text-xs text-sky-700">
+                                {monitoredPayment.status === 'CANCELLING'
+                                    ? 'MiFi Pro is waiting for the provider to confirm cancellation.'
+                                    : 'Closing this window will not cancel the payment request.'}
+                            </p>
+                        </div>
+                        <div className="flex flex-wrap gap-3">
+                            {resumablePayment ? (
+                                <>
+                                    <button
+                                        onClick={() =>
+                                            dispatch({
+                                                type: 'RESUME_PAYMENT',
+                                                payment: resumablePayment,
+                                                source: 'resume',
+                                                modalOpen: true,
+                                            })
+                                        }
+                                        className="rounded-xl bg-sky-700 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-800"
+                                    >
+                                        Resume active request
+                                    </button>
+                                    <button
+                                        onClick={() => void cancelPayment(resumablePayment)}
+                                        disabled={cancellingRequest}
+                                        className="rounded-xl border border-sky-300 bg-white px-4 py-2 text-sm font-semibold text-sky-900 hover:bg-sky-100 disabled:opacity-60"
+                                    >
+                                        {cancellingRequest ? 'Cancelling...' : 'Cancel payment request'}
+                                    </button>
+                                </>
+                            ) : (
+                                <button
+                                    onClick={() =>
+                                        dispatch({
+                                            type: 'RESUME_PAYMENT',
+                                            payment: monitoredPayment,
+                                            source: 'resume',
+                                            modalOpen: true,
+                                        })
+                                    }
+                                    className="rounded-xl border border-sky-300 bg-white px-4 py-2 text-sm font-semibold text-sky-900 hover:bg-sky-100"
+                                >
+                                    {monitoredPayment.status === 'CANCELLING' ? 'View cancellation status' : 'View payment state'}
+                                </button>
+                            )}
+                        </div>
                     </div>
-                    <button
-                        onClick={() => {
-                            const starter = document.getElementById('plan-starter');
-                            starter?.scrollIntoView({ behavior: 'smooth' });
-                        }}
-                        className="bg-white text-slate-900 px-6 py-2 rounded-lg font-semibold shrink-0 hover:bg-slate-100 transition-all relative z-10 active:scale-95"
-                    >
-                        Activate Now
-                    </button>
                 </div>
             )}
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                <UsageCard
-                    title="Sandbox Environment"
-                    record={usage.sandbox}
-                    icon={Shield}
-                    color="slate"
-                />
-                <div className="relative">
-                    <UsageCard
-                        title="Production Environment"
-                        record={usage.production}
-                        icon={TrendingUp}
-                        color="blue"
-                    />
-                    {usage.payment_status !== 'PAID' && (
-                        <div className="absolute inset-0 bg-white/60 rounded-lg flex flex-col items-center justify-center text-center p-6 border-2 border-dashed border-slate-200">
-                            <div className="w-12 h-12 bg-slate-100 rounded-full flex items-center justify-center mb-3 text-slate-400">
-                                <Shield size={24} />
-                            </div>
-                            <h4 className="font-semibold text-slate-900">Production API Locked</h4>
-                            <p className="text-[10px] text-slate-500 mt-1 max-w-[200px]">
-                                Payment {usage.payment_status.toLowerCase()} for {usage.current_plan}.
-                                Complete payment to enable live requests.
-                            </p>
-                            <p className="text-[9px] text-slate-400 mt-2 font-medium">
-                                Rest assured: No live traffic is processed until activation.
-                            </p>
-                        </div>
-                    )}
-                </div>
+            <div className="grid grid-cols-1 gap-8 md:grid-cols-2">
+                <UsageCard title="Sandbox Environment" record={usage.sandbox} icon={Shield} />
+                <UsageCard title="Production Environment" record={usage.production} icon={TrendingUp} />
             </div>
 
-            {/* Plan Selection Section */}
-            <div className="bg-white rounded-lg border border-slate-200 p-8">
-                <div className="flex items-center gap-4 mb-6">
-                    <div className="w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center text-primary">
+            <div className="rounded-lg border border-slate-200 bg-white p-8">
+                <div className="mb-6 flex items-center gap-4">
+                    <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 text-primary">
                         <CreditCard size={24} />
                     </div>
                     <div>
@@ -357,93 +638,135 @@ export default function UsageBilling() {
                     </div>
                 </div>
 
-                <div className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-4" id="plan-selection">
+                <div className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-4">
                     {PLAN_ORDER.map((planKey) => {
                         const plan = plans[planKey];
                         if (!plan) return null;
-                        const isCustomPlan = plan.price == null;
-                        const features = isCustomPlan
-                            ? ENTERPRISE_FEATURES
-                            : (plan.features || []).map(prettifyFeature);
+
+                        const features = plan.price == null ? ENTERPRISE_FEATURES : (plan.features || []).map(prettify);
+                        const paid = usage.current_plan === planKey && usage.payment_status === 'PAID';
 
                         return (
-                            <div id={PLAN_META[planKey].anchorId} key={planKey}>
-                                <PlanCard
-                                    name={planKey}
-                                    price={formatPlanPrice(plan.price, plan.currency)}
-                                    limit={formatPlanLimit(plan.monthly_limit)}
-                                    description={plan.description || (isCustomPlan ? 'Tailored pricing, negotiated limits, and direct support for larger institutions.' : undefined)}
-                                    features={features}
-                                    currentPlan={usage.current_plan}
-                                    paymentStatus={usage.payment_status}
-                                    onUpgrade={() => isCustomPlan ? handleCustomPlanInquiry() : handlePlanSelect(planKey)}
-                                    loading={upgrading}
-                                    highlight={PLAN_META[planKey].highlight}
-                                    actionLabel={isCustomPlan ? 'Contact Sales' : undefined}
-                                    customNote={isCustomPlan ? 'Tailored pricing' : undefined}
-                                />
+                            <div
+                                key={planKey}
+                                id={PLAN_META[planKey].anchorId}
+                                className={`rounded-2xl border p-5 ${
+                                    paid
+                                        ? 'border-green-300 bg-green-50/40'
+                                        : PLAN_META[planKey].highlight
+                                          ? 'border-primary/30 bg-primary/5'
+                                          : 'border-slate-200'
+                                }`}
+                            >
+                                <div className="flex items-start justify-between gap-3">
+                                    <div>
+                                        <h4 className="text-lg font-semibold text-slate-900">{planKey}</h4>
+                                        <div className="mt-2 text-3xl font-bold text-slate-900">
+                                            {fmtPrice(plan.price, plan.currency)}
+                                        </div>
+                                        <p className="mt-1 text-sm text-slate-500">
+                                            {fmtLimit(plan.monthly_limit)} assessments/mo
+                                        </p>
+                                    </div>
+                                    {PLAN_META[planKey].highlight && !paid && (
+                                        <span className="rounded-full bg-primary px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-white">
+                                            Recommended
+                                        </span>
+                                    )}
+                                </div>
+
+                                <ul className="mt-5 space-y-2 text-sm text-slate-600">
+                                    {features.slice(0, 4).map((feature) => (
+                                        <li key={feature} className="flex gap-2">
+                                            <span className="mt-2 h-1.5 w-1.5 rounded-full bg-primary" />
+                                            {feature}
+                                        </li>
+                                    ))}
+                                </ul>
+
+                                <button
+                                    onClick={() => {
+                                        if (plan.price == null) {
+                                            toast.success('Custom pricing is available. Please contact support to activate a tailored plan.');
+                                            return;
+                                        }
+                                        if (!['ORG_ADMIN', 'SUPER_ADMIN'].includes(String(user?.role || '').toUpperCase())) {
+                                            toast.error('Only organization admins can initiate a payment.');
+                                            return;
+                                        }
+                                        openPlan(planKey);
+                                    }}
+                                    className={`mt-6 w-full rounded-xl px-4 py-2.5 text-sm font-semibold ${
+                                        paid
+                                            ? 'bg-green-100 text-green-700'
+                                            : requestInProgress
+                                              ? 'bg-slate-800 text-white hover:bg-slate-700'
+                                              : 'bg-slate-900 text-white hover:bg-slate-800'
+                                    }`}
+                                    disabled={paid || startingRequest}
+                                >
+                                    {paid
+                                        ? 'Current Plan'
+                                        : plan.price == null
+                                          ? 'Contact Sales'
+                                          : requestActionLabel}
+                                </button>
                             </div>
                         );
                     })}
                 </div>
-
-                <div className="mt-6 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
-                    Additional assessments above your monthly plan are billed at <span className="font-semibold text-slate-900">K15 each</span>. You’ll be notified when you reach <span className="font-semibold text-slate-900">80%</span> of your monthly limit.
-                </div>
             </div>
 
-            {/* Payment History Section */}
-            <div className="bg-white rounded-lg border border-slate-200 overflow-hidden">
-                <div className="px-8 py-6 border-b border-slate-100 flex items-center justify-between">
-                    <div>
-                        <h3 className="text-lg font-bold text-slate-900">Payment History</h3>
-                        <p className="text-xs text-slate-500">View and download your invoices</p>
-                    </div>
+            <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+                <div className="border-b border-slate-100 px-8 py-6">
+                    <h3 className="text-lg font-bold text-slate-900">Payment History</h3>
+                    <p className="text-xs text-slate-500">View and download your invoices</p>
                 </div>
                 <div className="overflow-x-auto">
-                    <table className="w-full text-left border-collapse">
+                    <table className="w-full border-collapse text-left">
                         <thead>
                             <tr className="bg-slate-50/50">
-                                <th className="px-8 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Date</th>
-                                <th className="px-8 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Plan</th>
-                                <th className="px-8 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Amount</th>
-                                <th className="px-8 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Status</th>
-                                <th className="px-8 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Gateway</th>
-                                <th className="px-8 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">Action</th>
+                                <th className="px-8 py-4 text-xs font-bold uppercase tracking-wider text-slate-500">Date</th>
+                                <th className="px-8 py-4 text-xs font-bold uppercase tracking-wider text-slate-500">Plan</th>
+                                <th className="px-8 py-4 text-xs font-bold uppercase tracking-wider text-slate-500">Amount</th>
+                                <th className="px-8 py-4 text-xs font-bold uppercase tracking-wider text-slate-500">Status</th>
+                                <th className="px-8 py-4 text-xs font-bold uppercase tracking-wider text-slate-500">Gateway</th>
+                                <th className="px-8 py-4 text-right text-xs font-bold uppercase tracking-wider text-slate-500">
+                                    Action
+                                </th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
-                            {payments.length > 0 ? payments.map((p: any) => (
-                                <tr key={p.payment_id} className="hover:bg-slate-50/50 transition-colors">
-                                    <td className="px-8 py-4 text-sm text-slate-600">
-                                        {new Date(p.timestamp).toLocaleDateString()}
-                                    </td>
-                                    <td className="px-8 py-4 text-sm font-bold text-slate-900">{p.plan}</td>
-                                    <td className="px-8 py-4 text-sm text-slate-900 font-mono">{p.currency || '$'} {p.amount}</td>
-                                    <td className="px-8 py-4">
-                                        <span className={`px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider 
-                                            ${p.status === 'PAID' ? 'bg-green-50 text-green-700' :
-                                                p.status === 'PENDING' ? 'bg-blue-50 text-blue-700' :
-                                                    'bg-red-50 text-red-700'}`}
-                                        >
-                                            {p.status}
-                                        </span>
-                                    </td>
-                                    <td className="px-8 py-4 text-sm text-slate-500">{p.gateway}</td>
-                                    <td className="px-8 py-4 text-right">
-                                        <button
-                                            onClick={() => handleDownloadInvoice(p.payment_id)}
-                                            className="inline-flex items-center gap-1 text-xs font-bold text-primary hover:text-primary/80 transition-colors"
-                                            title="Download PDF Invoice"
-                                        >
-                                            <Download size={14} />
-                                            PDF
-                                        </button>
-                                    </td>
-                                </tr>
-                            )) : (
+                            {payments.length ? (
+                                payments.map((payment) => (
+                                    <tr key={payment.payment_id} className="hover:bg-slate-50/50">
+                                        <td className="px-8 py-4 text-sm text-slate-600">
+                                            {payment.timestamp ? new Date(payment.timestamp).toLocaleDateString() : 'Unknown'}
+                                        </td>
+                                        <td className="px-8 py-4 text-sm font-bold text-slate-900">{payment.plan}</td>
+                                        <td className="px-8 py-4 font-mono text-sm text-slate-900">
+                                            {fmtMoney(payment.amount, payment.currency || 'ZMW')}
+                                        </td>
+                                        <td className="px-8 py-4">
+                                            <Pill status={payment.status} />
+                                        </td>
+                                        <td className="px-8 py-4 text-sm text-slate-500">
+                                            {payment.gateway === 'BANK' ? 'Bank Transfer' : payment.gateway}
+                                        </td>
+                                        <td className="px-8 py-4 text-right">
+                                            <button
+                                                onClick={() => void downloadInvoice(payment.payment_id)}
+                                                className="inline-flex items-center gap-1 text-xs font-bold text-primary hover:text-primary/80"
+                                            >
+                                                <Download size={14} />
+                                                PDF
+                                            </button>
+                                        </td>
+                                    </tr>
+                                ))
+                            ) : (
                                 <tr>
-                                    <td colSpan={5} className="px-8 py-12 text-center text-slate-400 text-sm italic">
+                                    <td colSpan={6} className="px-8 py-12 text-center text-sm italic text-slate-400">
                                         No payment history found.
                                     </td>
                                 </tr>
@@ -453,325 +776,23 @@ export default function UsageBilling() {
                 </div>
             </div>
 
-            {/* Payment Gateway Modal */}
-            {showPaymentModal && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60">
-                    <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-200">
-                        {/* Modal Header */}
-                        <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
-                            <div>
-                                <h3 className="text-lg font-bold text-slate-900">Secure Checkout</h3>
-                                <p className="text-xs text-slate-500">Upgrading to {selectedPlan} Plan</p>
-                            </div>
-                            <button
-                                onClick={() => {
-                                    setShowPaymentModal(false);
-                                    setPaymentResult(null);
-                                }}
-                                className="p-2 hover:bg-slate-200 rounded-full transition-colors text-slate-400 hover:text-slate-600"
-                            >
-                                <X size={20} />
-                            </button>
-                        </div>
-
-                        {/* Modal Body */}
-                        <div className="p-6">
-                            {!paymentResult ? (
-                                <>
-                                    <h4 className="text-sm font-bold text-slate-700 mb-4 uppercase tracking-wider">Payment Method</h4>
-
-                                    <div className="space-y-3">
-                                        <GatewayOption
-                                            id="LIPILA"
-                                            name="Mobile Money (Recommended)"
-                                            icon={Smartphone}
-                                            description="Airtel, MTN, Zamtel STK Push"
-                                            selected={selectedGateway === 'LIPILA'}
-                                            onSelect={() => setSelectedGateway('LIPILA')}
-                                        />
-                                        <GatewayOption
-                                            id="BANK"
-                                            name="Bank Transfer / Invoice"
-                                            icon={Landmark}
-                                            description="Best for enterprise & finance teams"
-                                            selected={selectedGateway === 'BANK'}
-                                            onSelect={() => setSelectedGateway('BANK')}
-                                        />
-                                        <GatewayOption
-                                            id="STRIPE"
-                                            name="Cards (Visa, Mastercard)"
-                                            icon={CreditCard}
-                                            description="International payments"
-                                            selected={selectedGateway === 'STRIPE'}
-                                            onSelect={() => setSelectedGateway('STRIPE')}
-                                        />
-                                    </div>
-
-                                    {selectedGateway === 'LIPILA' && (
-                                        <div className="mt-6 animate-in slide-in-from-top-2 duration-300">
-                                            <label
-                                                htmlFor="phone-number-field"
-                                                className="block text-sm font-medium text-slate-700 mb-2"
-                                            >
-                                                Phone Number (Zambia)
-                                            </label>
-                                            <div className="relative">
-                                                <input
-                                                    id="phone-number-field"
-                                                    type="text"
-                                                    inputMode="tel"
-                                                    autoComplete="tel"
-                                                    autoFocus
-                                                    placeholder="0961234567 or 260961234567"
-                                                    className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none transition-all pr-12 bg-white text-slate-900 relative z-10"
-                                                    value={phoneNumber}
-                                                    maxLength={PHONE_INPUT_MAX_LENGTH}
-                                                    onChange={(e) => setPhoneNumber(e.target.value.replace(/[^\d+\-\s]/g, ''))}
-                                                />
-                                                <Smartphone className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 z-20 pointer-events-none" size={20} />
-                                            </div>
-                                            <p className="text-[10px] text-slate-500 mt-2">
-                                                Accepted format: <span className="font-medium">0961234567</span>, <span className="font-medium">0971234567</span>, or <span className="font-medium">260961234567</span>. Spaces, <span className="font-medium">+</span>, and dashes are cleaned automatically.
-                                            </p>
-                                            <p className="text-[10px] text-slate-500 mt-1">
-                                                You will receive a prompt on your phone to confirm the transaction.
-                                            </p>
-                                        </div>
-                                    )}
-
-                                    <button
-                                        onClick={() => handleUpgrade(selectedGateway)}
-                                        disabled={upgrading || (selectedGateway === 'LIPILA' && !phoneNumber)}
-                                        className="w-full mt-8 bg-slate-900 text-white py-3 rounded-lg font-semibold flex items-center justify-center gap-2 hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-sm"
-                                    >
-                                        {upgrading ? (
-                                            <>
-                                                <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                                                Processing...
-                                            </>
-                                        ) : (
-                                            <>
-                                                Pay Now
-                                            </>
-                                        )}
-                                    </button>
-                                </>
-                            ) : (
-                                <div className="text-center py-4 animate-in zoom-in-95 duration-300">
-                                    <div className="w-16 h-16 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-4">
-                                        {selectedGateway === 'BANK' ? <Landmark size={32} /> : <CheckCircle2 size={32} />}
-                                    </div>
-
-                                    <h4 className="text-xl font-bold text-slate-900 mb-2">
-                                        {paymentTitle}
-                                    </h4>
-
-                                    <p className="text-slate-600 text-sm mb-6 px-4">
-                                        {paymentResult.message}
-                                    </p>
-
-                                    {paymentResult.invoice && (
-                                        <div className="bg-slate-50 rounded-xl p-6 border border-slate-200 text-left mb-6">
-                                            <div className="flex justify-between mb-2">
-                                                <span className="text-xs text-slate-500">Invoice ID</span>
-                                                <span className="text-xs font-mono font-bold text-slate-900">{paymentResult.invoice.id}</span>
-                                            </div>
-                                            <div className="flex justify-between mb-2">
-                                                <span className="text-xs text-slate-500">Reference Code</span>
-                                                <span className="text-xs font-mono font-bold text-primary bg-primary/5 px-1">{paymentResult.invoice.reference}</span>
-                                            </div>
-                                            <div className="flex justify-between mb-4 border-b border-slate-200 pb-2">
-                                                <span className="text-xs text-slate-500">Amount Due</span>
-                                                <span className="text-xs font-bold text-slate-900">
-                                                    {formatCurrencyAmount(paymentResult.amount || paymentResult.invoice?.amount, paymentResult.currency || 'ZMW')}
-                                                </span>
-                                            </div>
-                                            <div className="pt-2">
-                                                <p className="text-[10px] font-bold text-slate-400 mb-1 uppercase">Bank Details</p>
-                                                <p className="text-xs text-slate-700 leading-relaxed font-mono">
-                                                    {paymentResult.invoice.bank_details}
-                                                </p>
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    {selectedGateway === 'LIPILA' && (
-                                        <>
-                                            <div className="bg-blue-50 text-blue-800 p-4 rounded-xl text-sm mb-4 flex items-start gap-3 text-left border border-blue-100">
-                                                <AlertCircle size={20} className="shrink-0 mt-0.5" />
-                                                <div className="space-y-2">
-                                                    {paymentResult.instructions && <p>{paymentResult.instructions}</p>}
-                                                    {paymentResult.phone_number && (
-                                                        <p className="text-xs text-blue-700">
-                                                            Request phone: <span className="font-mono">{paymentResult.phone_number}</span>
-                                                        </p>
-                                                    )}
-                                                    {paymentResult.gateway_status && (
-                                                        <p className="text-xs text-blue-700">
-                                                            Gateway status: <span className="font-semibold">{paymentResult.gateway_status}</span>
-                                                        </p>
-                                                    )}
-                                                    {paymentResult.provider_reference && (
-                                                        <p className="text-xs text-blue-700">
-                                                            Provider reference: <span className="font-mono">{paymentResult.provider_reference}</span>
-                                                        </p>
-                                                    )}
-                                                </div>
-                                            </div>
-                                            <button
-                                                onClick={() => refreshPaymentStatus(paymentResult.payment_id)}
-                                                disabled={refreshingPaymentStatus}
-                                                className="w-full mb-6 bg-blue-600 text-white py-3 rounded-xl font-bold hover:bg-blue-700 disabled:opacity-60 transition-all flex items-center justify-center gap-2"
-                                            >
-                                                <AlertCircle size={18} />
-                                                {refreshingPaymentStatus ? 'Checking Status...' : 'Refresh Payment Status'}
-                                            </button>
-                                        </>
-                                    )}
-
-                                    <div className="flex flex-col gap-3">
-                                        <button
-                                            onClick={() => handleDownloadInvoice(paymentResult.payment_id)}
-                                            className="w-full bg-primary/10 text-primary py-3 rounded-xl font-bold hover:bg-primary/20 transition-all flex items-center justify-center gap-2"
-                                        >
-                                            <Download size={18} />
-                                            Download PDF Invoice
-                                        </button>
-                                        <button
-                                            onClick={() => {
-                                                setShowPaymentModal(false);
-                                                setPaymentResult(null);
-                                            }}
-                                            className="w-full bg-slate-900 text-white py-3 rounded-xl font-bold hover:bg-slate-800 transition-all"
-                                        >
-                                            Got it, Close
-                                        </button>
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-                    </div>
-                </div>
-            )}
-        </div >
-    );
-}
-
-const GatewayOption = ({ id, name, icon: Icon, description, selected, onSelect }: any) => {
-    return (
-        <button
-            onClick={onSelect}
-            className={`w-full flex items-center gap-4 p-4 rounded-xl border-2 transition-all text-left
-                ${selected
-                    ? 'border-primary bg-primary/5 ring-4 ring-primary/10'
-                    : 'border-slate-100 hover:border-slate-200 hover:bg-slate-50'
-                }`}
-        >
-            <div className={`w-10 h-10 rounded-lg flex items-center justify-center 
-                ${selected ? 'bg-primary text-white shadow-md' : 'bg-slate-100 text-slate-500'}`}
-            >
-                <Icon size={24} />
-            </div>
-            <div className="flex-1">
-                <p className={`font-bold ${selected ? 'text-primary' : 'text-slate-900'}`}>{name}</p>
-                <p className="text-xs text-slate-500">{description}</p>
-            </div>
-            {selected ? (
-                <div className="text-primary">
-                    <CheckCircle2 size={20} />
-                </div>
-            ) : (
-                <div className="w-5 h-5 rounded-full border-2 border-slate-200" />
-            )}
-        </button>
-    );
-};
-
-const PlanCard = ({ name, price, limit, description, features, currentPlan, paymentStatus, onUpgrade, loading, highlight = false, actionLabel, customNote }: any) => {
-    const isSelected = currentPlan === name;
-    const isPaid = isSelected && paymentStatus === 'PAID';
-    const isCustomPlan = price === 'Custom';
-
-    // Logic: Highlight (Blue) only if it's NOT the current plan.
-    // Paid Plan (Green) takes precedence.
-    const showHighlight = highlight && !isSelected;
-
-    return (
-        <div className={`border rounded-lg p-6 flex flex-col relative transition-all duration-200 
-            ${isPaid
-                ? 'border-green-500 ring-2 ring-green-100 bg-green-50/10'
-                : isSelected
-                    ? 'border-yellow-500 bg-yellow-50/5'
-                    : showHighlight
-                        ? 'border-primary ring-1 ring-primary shadow-sm shadow-primary/5'
-                        : 'border-slate-200 hover:border-slate-300'
-            } 
-            ${isPaid ? 'scale-[1.01]' : ''}
-        `}>
-            {/* Badges */}
-            {showHighlight && (
-                <div className="absolute -top-3 left-1/2 -translate-x-1/2 bg-primary text-white text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wider">
-                    Recommended
-                </div>
-            )}
-
-            {isPaid && (
-                <div className="absolute -top-3 left-1/2 -translate-x-1/2 bg-green-600 text-white text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wider flex items-center gap-1">
-                    <div className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
-                    Active Plan
-                </div>
-            )}
-
-            {isSelected && !isPaid && !isCustomPlan && (
-                <div className="absolute -top-3 left-1/2 -translate-x-1/2 bg-yellow-600 text-white text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wider flex items-center gap-1">
-                    Pending Payment
-                </div>
-            )}
-
-            <div className="mb-4 mt-2">
-                <h4 className={`text-lg font-semibold ${isPaid ? 'text-green-900' : isSelected ? 'text-yellow-900' : 'text-slate-900'}`}>{name}</h4>
-                <div className="flex items-baseline gap-1 mt-2">
-                    <span className="text-3xl font-bold text-slate-900">{price}</span>
-                    {!isCustomPlan && <span className="text-slate-500">/mo</span>}
-                </div>
-                {!isCustomPlan ? (
-                    <div className="mt-2 text-xs leading-5 text-slate-500">
-                        <div>Billed monthly</div>
-                        <div>Cancel anytime</div>
-                    </div>
-                ) : (
-                    <div className="mt-2 text-xs leading-5 text-slate-500">
-                        <div>{customNote || 'Tailored pricing'}</div>
-                        <div>Contact sales to activate</div>
-                    </div>
-                )}
-                <p className="text-sm text-slate-500 mt-1">{limit} assessments/mo</p>
-                {description && <p className="text-sm text-slate-500 mt-3 leading-6">{description}</p>}
-            </div>
-
-            <ul className="space-y-4 mb-8 flex-1">
-                {features.map((feat: string, i: number) => (
-                    <li key={i} className="flex items-start gap-2 text-sm leading-6 text-slate-600">
-                        <div className={`w-1.5 h-1.5 rounded-full ${isPaid ? 'bg-green-500' : isSelected ? 'bg-yellow-500' : 'bg-primary'}`} />
-                        {feat}
-                    </li>
-                ))}
-            </ul>
-
-            <button
-                onClick={onUpgrade}
-                disabled={isPaid || loading}
-                className={`w-full py-2 rounded-lg font-semibold transition-all ${isPaid
-                    ? 'bg-green-100 text-green-700 cursor-default border border-green-200'
-                    : isSelected && !isCustomPlan
-                        ? 'bg-yellow-600 text-white hover:bg-yellow-700 shadow-sm'
-                    : showHighlight
-                            ? 'bg-primary text-white hover:bg-primary/90 shadow-sm shadow-primary/20'
-                            : 'bg-slate-900 text-white hover:bg-slate-800'
-                    }`}
-            >
-                {isPaid ? 'Current Plan' : isCustomPlan ? (actionLabel || 'Contact Sales') : isSelected ? 'Complete Payment' : loading ? 'Processing...' : (actionLabel || 'Upgrade')}
-            </button>
+            <PaymentFlowModal
+                open={flow.modalOpen}
+                stage={flow.stage}
+                selectedPlan={flow.selectedPlan}
+                selectedGateway={flow.selectedGateway}
+                phoneNumber={flow.phoneNumber}
+                payment={flow.payment}
+                startingRequest={startingRequest}
+                cancellingRequest={cancellingRequest}
+                onDismiss={dismissModal}
+                onStartPayment={() => void startPayment()}
+                onCancelPayment={() => void cancelPayment(flow.payment || monitoredPayment)}
+                onGatewayChange={(gateway) => dispatch({ type: 'SET_GATEWAY', gateway })}
+                onPhoneChange={(phoneNumber) => dispatch({ type: 'SET_PHONE', phoneNumber })}
+                onRetry={() => dispatch({ type: 'PREPARE_RETRY' })}
+                onDownloadInvoice={downloadInvoice}
+            />
         </div>
     );
-};
+}

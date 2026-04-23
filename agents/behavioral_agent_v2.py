@@ -23,7 +23,7 @@ and transparent, making them audit-friendly and explainable.
 
 import sys
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 # Fix for direct execution: ensure project root is in path
 if __name__ == "__main__" or __package__ is None:
@@ -44,7 +44,10 @@ class BehavioralAgentV2:
     """
 
     @staticmethod
-    def analyze_transactions(transactions: list) -> Dict[str, Any]:
+    def analyze_transactions(
+        transactions: list,
+        statement_summary: Optional[Any] = None
+    ) -> Dict[str, Any]:
         """
         Analyzes standardized transaction data from user uploads.
         Applies confidence weighting to all scores.
@@ -69,16 +72,52 @@ class BehavioralAgentV2:
         
         # --- LOGIC HARMONIZATION ---
         # Calculate observation window for confidence tagging
+        def get_summary_field(field: str) -> Any:
+            if not statement_summary:
+                return None
+            if isinstance(statement_summary, dict):
+                return statement_summary.get(field)
+            return getattr(statement_summary, field, None)
+
+        def coerce_float(value: Any) -> Optional[float]:
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
         timestamps = []
         for t in transactions:
             try:
                 # Handle YYYY-MM-DD
                 ts = datetime.strptime(t.date, "%Y-%m-%d")
                 timestamps.append(ts)
-            except: pass
+            except Exception:
+                pass
 
         window_days = 0
-        if timestamps:
+        summary_period = get_summary_field("statement_period")
+        summary_start = None
+        summary_end = None
+        if summary_period:
+            if isinstance(summary_period, dict):
+                summary_start = summary_period.get("start")
+                summary_end = summary_period.get("end")
+            else:
+                summary_start = getattr(summary_period, "start", None)
+                summary_end = getattr(summary_period, "end", None)
+
+        if summary_start and summary_end:
+            try:
+                start_dt = datetime.strptime(summary_start, "%Y-%m-%d")
+                end_dt = datetime.strptime(summary_end, "%Y-%m-%d")
+                delta = end_dt - start_dt
+                window_days = max(delta.days, 1) if delta.total_seconds() >= 0 else 0
+            except ValueError:
+                window_days = 0
+
+        if window_days == 0 and timestamps:
             delta = max(timestamps) - min(timestamps)
             window_days = max(delta.days, 1)
         
@@ -118,8 +157,16 @@ class BehavioralAgentV2:
             metrics["income_consistency_score"] = raw_score * confidence
 
         # Savings & Spending
-        total_in = sum(inflow_amounts)
-        total_out = sum(outflow_amounts)
+        summary_total_in = coerce_float(get_summary_field("total_money_in"))
+        summary_total_out = coerce_float(get_summary_field("total_money_out"))
+        using_summary_totals = (
+            summary_total_in is not None and
+            summary_total_out is not None and
+            summary_total_in > 0
+        )
+
+        total_in = summary_total_in if using_summary_totals else sum(inflow_amounts)
+        total_out = summary_total_out if using_summary_totals else sum(outflow_amounts)
         
         if total_in > 0:
             savings_rate = (total_in - total_out) / total_in

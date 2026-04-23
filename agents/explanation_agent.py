@@ -51,7 +51,14 @@ class ExplanationAgent:
         # =========================================================
         requested_amt = borrower.loan_amount_requested if borrower else None
         
-        is_starter = "STARTER_LOAN_APPROVED_LIMITED_HISTORY" in flags
+        is_starter = bool(
+            decision_metadata.get("starter_loan_applied") or
+            metrics.get("starter_loan_applied") or
+            "STARTER_LOAN_APPROVED_LIMITED_HISTORY" in flags
+        )
+        policy_cap_reason = str(decision_metadata.get("policy_cap_reason") or "")
+        is_affordability_cap = policy_cap_reason.startswith("AFFORDABILITY_CAP")
+        starter_policy_reasons = decision_metadata.get("starter_policy_reasons") or []
         is_equality = requested_amt is not None and abs(requested_amt - (decision_results.get('recommended_amount') or 0)) < 0.01
 
         # HANDLE REFER (Manual Review)
@@ -85,7 +92,61 @@ class ExplanationAgent:
             
             action_item = "Review the offer details and accept to proceed."
             
-            if is_equality:
+            if is_affordability_cap:
+                req_dur = decision_metadata.get("requested_duration_days") or decision_results.get("recommended_duration_days")
+                affordable_limit = decision_metadata.get("affordable_amount") or decision_results.get("recommended_amount")
+                summary = (
+                    f"Applicant approved with a duration-aware cap. Requested: ${requested_amt:,.0f} | "
+                    f"Recommended: ${decision_results['recommended_amount']:,.0f}."
+                )
+                customer_summary = (
+                    f"We've approved ${decision_results['recommended_amount']:,.0f} for the requested "
+                    f"{req_dur}-day repayment window."
+                )
+                if affordable_limit and decision_results.get("recommended_amount") is not None:
+                    if abs(float(affordable_limit) - float(decision_results["recommended_amount"])) > 0.01:
+                        policy_justification = (
+                            f"The requested {req_dur}-day repayment window supports up to "
+                            f"${float(affordable_limit):,.0f} based on the current disposable budget. "
+                            f"A further risk adjustment produced the final offer of "
+                            f"${decision_results['recommended_amount']:,.0f}."
+                        )
+                    else:
+                        policy_justification = (
+                            f"The requested {req_dur}-day repayment window supports up to "
+                            f"${float(affordable_limit):,.0f} based on the current disposable budget, "
+                            f"so the request was reduced to that level."
+                        )
+                if is_starter and starter_policy_reasons:
+                    policy_justification += (
+                        " Starter policy also remains active because "
+                        + "; ".join(starter_policy_reasons)
+                        + "."
+                    )
+            elif is_starter:
+                starter_cap_amount = decision_metadata.get("capacity_based_max") or decision_results.get("recommended_amount")
+                starter_reason_text = (
+                    "; ".join(starter_policy_reasons)
+                    if starter_policy_reasons else
+                    "limited verified history"
+                )
+                summary = f"Applicant approved under starter policy. Requested: ${requested_amt:,.0f} | Recommended: ${decision_results['recommended_amount']:,.0f}."
+                customer_summary = (
+                    f"We've approved a starter loan of ${decision_results['recommended_amount']:,.0f} while you build more verified history."
+                )
+                if starter_cap_amount and decision_results.get("recommended_amount") is not None:
+                    if abs(float(starter_cap_amount) - float(decision_results["recommended_amount"])) > 0.01:
+                        policy_justification = (
+                            f"Starter-loan policy applied because {starter_reason_text}. "
+                            f"The request was first limited to ${float(starter_cap_amount):,.0f} before the final offer of "
+                            f"${decision_results['recommended_amount']:,.0f}."
+                        )
+                    else:
+                        policy_justification = (
+                            f"Starter-loan policy applied because {starter_reason_text}. "
+                            f"The current verified history supports a starter limit of ${float(starter_cap_amount):,.0f}."
+                        )
+            elif is_equality:
                 summary = "This applicant demonstrates a stable financial profile with favorable behavioral indicators."
                 customer_summary = "Great news! Your application meets our standard criteria, and we're happy to recommend approval for the full amount."
             else:
@@ -93,11 +154,7 @@ class ExplanationAgent:
                 customer_summary = f"We've reviewed your request and can offer a loan of ${decision_results['recommended_amount']:,.0f}."
                 
                 # Logic for Starter/Risk adjustments
-                if is_starter:
-                    customer_summary = "Welcome! Since you're new to our system, we've approved you for a starter loan to help you build your record."
-                    policy_justification = f"Approved under Micro-Starter policy with loan size restricted to the policy limit of ${decision_results['recommended_amount']:,.0f}."
-                else:
-                    customer_summary = f"We've approved a loan of ${decision_results['recommended_amount']:,.0f} which aligns with our current lending limits for your account."
+                customer_summary = f"We've approved a loan of ${decision_results['recommended_amount']:,.0f} which aligns with our current lending limits for your account."
 
                 # Duration adjustment context for customer
                 req_dur = decision_metadata.get("requested_duration_days")
@@ -146,6 +203,8 @@ class ExplanationAgent:
                 customer_message["key_reasons"] = "Your current transaction activity doesn't quite meet our lending thresholds for this particular request."
         elif is_starter:
             customer_message["key_reasons"] = "As you're establishing your record with us, we've started with a safe lending limit that can grow over time."
+        elif is_affordability_cap:
+            customer_message["key_reasons"] = "We matched the offer to what fits the requested repayment window using your current budget."
 
         # 2. INTERNAL DECISION NOTES (For Officers & Risk Teams)
         officer_guidance = []
@@ -195,6 +254,9 @@ class ExplanationAgent:
             f"POLICY_VERSION: {policy_version}\n"
             f"DECISION: {decision}\n"
             f"AFFORDABILITY_CAPACITY: {decision_metadata.get('capacity_based_max', 0)}\n"
+            f"AFFORDABLE_AMOUNT: {decision_metadata.get('affordable_amount', 'N/A')}\n"
+            f"AFFORDABILITY_RATIO: {decision_metadata.get('affordability_ratio', 'N/A')}\n"
+            f"AFFORDABILITY_TERM_MONTHS: {decision_metadata.get('affordability_term_months', 'N/A')}\n"
             f"POLICY_LIMIT: {decision_metadata.get('policy_cap_amount', 'N/A')}\n"
             f"LIMIT_REASON: {decision_metadata.get('policy_cap_reason', 'N/A')}\n"
             f"OBSERVED_DEPOSIT_VOLUME: {metrics.get('observed_deposit_volume', 0):.2f}\n"

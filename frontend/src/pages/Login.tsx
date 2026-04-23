@@ -14,7 +14,7 @@ export default function Login() {
     const [showPassword, setShowPassword] = useState(false);
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(false);
-    const { user, isLoading } = useAuth();
+    const { user, isLoading, authError } = useAuth();
     const navigate = useNavigate();
     const emailId = React.useId();
     const passwordId = React.useId();
@@ -26,6 +26,13 @@ export default function Login() {
             navigate('/dashboard', { replace: true });
         }
     }, [user, isLoading, navigate]);
+
+    React.useEffect(() => {
+        if (authError) {
+            setError(authError);
+            toast.error(authError);
+        }
+    }, [authError]);
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
