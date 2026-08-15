@@ -6,7 +6,6 @@ The **Loan Officer AI Agent** is a fintech-grade credit decision engine designed
 
 **CRITICAL PRINCIPLE:** This system does NOT auto-approve loans. Rules ALWAYS override ML predictions. All decisions are auditable and explainable.
 
----
 
 ## 📚 Documentation
 
