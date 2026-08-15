@@ -350,7 +350,7 @@ loan_officer_ai/
 
 ## License & Credits
 
-**Developed by Antigravity AI** for Advanced Agentic Coding.
+**Developed by Emmmanuel Bwanga.
 
 This system is designed to be:
 - **Regulator-safe**: Full audit trail, explainable decisions
